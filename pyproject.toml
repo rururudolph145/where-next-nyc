@@ -1,0 +1,38 @@
+[project]
+name = "new-york-taxi-demand-forecasting"
+version = "0.1.0"
+description = "New York Taxi Demand Forecasting"
+requires-python = ">=3.13"
+dependencies = [
+    # Data
+    "numpy>=2.0",
+    "pandas>=2.2",
+    "pyarrow>=18.0",       # read/write parquet (NYC taxi data format)
+    "scikit-learn>=1.6",
+    # Time-series & forecasting
+    "statsmodels>=0.14",
+    "xgboost>=2.1",
+    "lightgbm>=4.5",
+    "optuna>=4.0",         # hyperparameter tuning
+    # Deep learning
+    "torch>=2.6",
+    "torchvision>=0.21",
+    # Visualisation
+    "matplotlib>=3.10",
+    "seaborn>=0.13",
+    # Notebooks & dev
+    "jupyter>=1.1",
+    "ipykernel>=6.29",
+    "tqdm>=4.67",
+    "dask>=2026.1.2",
+    "gpxpy>=1.6.2",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
+torchvision = { index = "pytorch-cu126" }
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
