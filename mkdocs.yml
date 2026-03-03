@@ -1,0 +1,22 @@
+site_name: New York Taxi Demand Forecasting
+site_description: An MLOps project for forecasting NYC yellow taxi demand.
+repo_url: https://github.com/jason/NewYorkTaxiDemandForecasting
+
+theme:
+  name: material
+  language: en
+  palette:
+    - scheme: default
+      primary: white
+  font:
+    text: Work Sans
+    code: Space Mono
+  features:
+    - navigation.instant
+    - toc.integrate
+
+nav:
+  - Home: index.md
+
+extra_css:
+  - css/extra.css

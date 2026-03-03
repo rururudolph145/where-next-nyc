@@ -1,0 +1,49 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.eggs/
+dist/
+build/
+*.egg-info/
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env
+
+# Testing
+.pytest_cache/
+htmlcov/
+.tox/
+.coverage
+coverage.xml
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+
+# Jupyter
+.ipynb_checkpoints/
+
+# MkDocs
+site/
+.cache/
+
+# MLflow
+mlruns/
+
+# Model artifacts
+models/*.pkl
+
+# Data
+data/raw/
+data/*.parquet
+data/*.csv
+
+# DVC
+.dvc/tmp/
