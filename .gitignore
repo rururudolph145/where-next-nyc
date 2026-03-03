@@ -42,6 +42,8 @@ models/*.pkl
 
 # Data
 data/raw/
+data/**/*.parquet
+data/**/*.csv
 data/*.parquet
 data/*.csv
 
