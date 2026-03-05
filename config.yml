@@ -1,6 +1,13 @@
+env: local  # local | cloud
+
 data:
   train_path: data/train.parquet
   test_path: data/test.parquet
+  bronze_path: data/bronze/yellow_tripdata_2022-01-01_2022-01-14.parquet
+  silver_path: data/silver/yellow_tripdata_cleaned.parquet
+
+clean:
+  null_strategy: drop  # drop | ffill | bfill
 
 train:
   test_size: 0.2
