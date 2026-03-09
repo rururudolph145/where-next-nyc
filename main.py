@@ -1,89 +1,72 @@
+import os
 import logging
 import yaml
-import mlflow
-import mlflow.sklearn
-from steps.ingest import Ingestion
-from steps.clean import Cleaner
-from steps.train import Trainer
-from steps.predict import Predictor
+import pandas as pd
+from datetime import date, timedelta
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s:%(levelname)s:%(message)s')
+from steps.ingest import Ingestion, START_DATE, END_DATE
+from steps.clean import DataCleaner
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(levelname)s:%(message)s")
 
-def main():
-    ingestion = Ingestion()
-    train, test = ingestion.load_data()
-    logging.info("Data ingestion completed successfully")
-
-    cleaner = Cleaner()
-    train_data = cleaner.clean_data(train)
-    test_data = cleaner.clean_data(test)
-    logging.info("Data cleaning completed successfully")
-
-    trainer = Trainer()
-    X_train, y_train = trainer.feature_target_separator(train_data)
-    trainer.train_model(X_train, y_train)
-    trainer.save_model()
-    logging.info("Model training completed successfully")
-
-    predictor = Predictor()
-    X_test, y_test = predictor.feature_target_separator(test_data)
-    mae, rmse, r2 = predictor.evaluate_model(X_test, y_test)
-    logging.info("Model evaluation completed successfully")
-
-    print("\n============= Model Evaluation Results ==============")
-    print(f"Model: {trainer.model_name}")
-    print(f"MAE: {mae:.4f}  |  RMSE: {rmse:.4f}  |  R²: {r2:.4f}")
-    print("=====================================================\n")
+# Stop early after this many dates so the pipeline can be tested quickly.
+# Set to None (or a very large number) to run the full date range.
+MAX_DATES: int = 2
 
 
-def train_with_mlflow():
-    with open('config.yml', 'r') as f:
-        config = yaml.safe_load(f)
+def run_pipeline() -> None:
+    """Run the ingest → clean pipeline day by day.
 
-    mlflow.set_experiment("NY Taxi Demand Forecasting")
+    For each calendar day between START_DATE and END_DATE:
+    1. Fetch raw trip data from the NYC Open Data API → Bronze layer.
+    2. Clean the raw data and promote it → Silver layer.
 
-    with mlflow.start_run() as run:
-        ingestion = Ingestion()
-        train, test = ingestion.load_data()
-        logging.info("Data ingestion completed successfully")
+    The loop exits as soon as *MAX_DATES* days have been processed or the
+    END_DATE is reached, whichever comes first.
+    """
+    with open("config.yml") as f:
+        config: dict[str, object] = yaml.safe_load(f)
 
-        cleaner = Cleaner()
-        train_data = cleaner.clean_data(train)
-        test_data = cleaner.clean_data(test)
-        logging.info("Data cleaning completed successfully")
+    ingestor = Ingestion()
+    cleaner = DataCleaner(config)  # type: ignore[arg-type]
 
-        trainer = Trainer()
-        X_train, y_train = trainer.feature_target_separator(train_data)
-        trainer.train_model(X_train, y_train)
-        trainer.save_model()
-        logging.info("Model training completed successfully")
+    current = date.fromisoformat(START_DATE)
+    end = date.fromisoformat(END_DATE)
+    dates_fetched = 0
 
-        predictor = Predictor()
-        X_test, y_test = predictor.feature_target_separator(test_data)
-        mae, rmse, r2 = predictor.evaluate_model(X_test, y_test)
-        logging.info("Model evaluation completed successfully")
+    while current <= end:
+        date_str = current.isoformat()
+        logging.info("--- [%d] Ingesting %s ---", dates_fetched + 1, date_str)
 
-        mlflow.set_tag('Model developer', 'jason')
-        mlflow.set_tag('task', 'demand_forecasting')
+        # ── Ingest: fetch one day → Bronze ────────────────────────────────
+        bronze_path = ingestor.fetch_day(date_str)
 
-        model_params = config['model']['params']
-        mlflow.log_params(model_params)
-        mlflow.log_metric("mae", mae)
-        mlflow.log_metric("rmse", rmse)
-        mlflow.log_metric("r2", r2)
-        mlflow.sklearn.log_model(trainer.model, "model")
+        if not os.path.exists(bronze_path):
+            logging.warning("No data returned for %s, skipping clean step.", date_str)
+            current += timedelta(days=1)
+            continue
 
-        model_uri = f"runs:/{run.info.run_id}/model"
-        mlflow.register_model(model_uri, "ny_taxi_demand_model")
-        logging.info("MLflow tracking completed successfully")
+        # ── Clean: Bronze → Silver ─────────────────────────────────────────
+        df = pd.read_parquet(bronze_path)
+        cleaned = cleaner.clean(df)
 
-        print("\n============= Model Evaluation Results ==============")
-        print(f"Model: {trainer.model_name}")
-        print(f"MAE: {mae:.4f}  |  RMSE: {rmse:.4f}  |  R²: {r2:.4f}")
-        print("=====================================================\n")
+        silver_dir = "data/silver"
+        os.makedirs(silver_dir, exist_ok=True)
+        silver_path = f"{silver_dir}/yellow_tripdata_cleaned_{date_str}.parquet"
+        cleaned.to_parquet(silver_path, index=False)
+        logging.info("Silver → %s  (%s rows)", silver_path, f"{len(cleaned):,}")
+
+        dates_fetched += 1
+        current += timedelta(days=1)
+
+        if dates_fetched >= MAX_DATES:
+            logging.info(
+                "Stopped after %d date(s) (MAX_DATES fast-test limit).", MAX_DATES
+            )
+            break
+
+    logging.info("Pipeline complete. Processed %d date(s).", dates_fetched)
 
 
 if __name__ == "__main__":
-    # main()
-    train_with_mlflow()
+    run_pipeline()
