@@ -80,3 +80,7 @@ The project follows the MLOps template structure from [prsdm/mlops-project](http
 - **Time-series split:** Use time-based splits only — never shuffle for temporal data (see `pipeline.MD` §6).
 - **Target column:** `trip_count` — features and target are separated in `Trainer.feature_target_separator()` and `Predictor.feature_target_separator()` by dropping this column.
 - **MLflow model name:** registered as `ny_taxi_demand_model` in the local `mlruns/` store.
+
+## Development rule
+- Secrets: Always put API keys and database credentials in .env
+- App Settings: Put non-sensitive, environment-specific toggles in config.yaml or .config/.

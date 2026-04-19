@@ -1,3 +1,4 @@
+import calendar
 import os
 import shutil
 import tempfile
@@ -12,12 +13,48 @@ import yaml
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-START_DATE = "2022-01-01"
-END_DATE = "2022-02-28"
-END_EXCLUSIVE = "2022-03-01"
+SOCRATA_CATALOG_URL = "https://api.us.socrata.com/api/catalog/v1"
+SOCRATA_DOMAIN = "data.cityofnewyork.us"
+RESOURCE_URL_TEMPLATE = "https://data.cityofnewyork.us/resource/{dataset_id}.json"
 
-DATASET_ID = "qp3b-zxtp"  # 2022 Yellow Taxi Trip Data
-BASE_URL = f"https://data.cityofnewyork.us/resource/{DATASET_ID}.json"
+
+def resolve_dataset_id(year: int) -> str:
+    """Look up the Socrata dataset ID for a given year's Yellow Taxi Trip Data.
+
+    Queries the Socrata Discovery API for datasets matching
+    ``"<year> Yellow Taxi Trip Data"`` on the NYC Open Data domain.
+
+    Args:
+        year: Four-digit year (e.g. 2021).
+
+    Returns:
+        The Socrata dataset identifier (e.g. ``"m6nq-qud6"``).
+
+    Raises:
+        ValueError: If no matching dataset is found for the given year.
+    """
+    resp = requests.get(
+        SOCRATA_CATALOG_URL,
+        params={
+            "q": f"{year} Yellow Taxi Trip Data",
+            "domains": SOCRATA_DOMAIN,
+            "limit": 5,
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+
+    for result in resp.json().get("results", []):
+        name: str = result.get("resource", {}).get("name", "")
+        if str(year) in name and "yellow taxi" in name.lower():
+            dataset_id: str = result["resource"]["id"]
+            return dataset_id
+
+    raise ValueError(
+        f"No Socrata dataset found for {year} Yellow Taxi Trip Data. "
+        f"Check https://data.cityofnewyork.us for available years."
+    )
+
 PAGE_SIZE = 50_000
 REQUEST_TIMEOUT_SECONDS = 60  # Socrata API can be slow on large offsets
 
@@ -118,7 +155,9 @@ class Ingestion:
                 df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int16")
         return df
 
-    def _fetch_to_parquet(self, where_clause: str, output_path: str) -> int:
+    def _fetch_to_parquet(
+        self, base_url: str, where_clause: str, output_path: str
+    ) -> int:
         """Paginate through the API using *where_clause* and write rows to *output_path*.
 
         Writes to a temporary file first and renames it atomically on success,
@@ -126,6 +165,7 @@ class Ingestion:
         mid-pagination.
 
         Args:
+            base_url: Socrata JSON API endpoint for the target dataset.
             where_clause: SoQL $where expression that filters the rows to fetch.
             output_path: Destination parquet file path.
 
@@ -151,7 +191,7 @@ class Ingestion:
                     "$order": "tpep_pickup_datetime",
                 }
                 resp = self._session.get(
-                    BASE_URL, params=params, timeout=REQUEST_TIMEOUT_SECONDS
+                    base_url, params=params, timeout=REQUEST_TIMEOUT_SECONDS
                 )
                 resp.raise_for_status()
 
@@ -204,24 +244,29 @@ class Ingestion:
 
     # ── Fetch methods: download raw data from the Socrata API → Bronze ────────
 
-    def fetch_data(self) -> str:
-        """Download raw trip data for the configured date range and write to bronze parquet.
+    def fetch_data(self) -> list[str]:
+        """Download raw trip data for the configured month range into the bronze layer.
 
-        Uses the module-level ``START_DATE`` / ``END_DATE`` / ``END_EXCLUSIVE``
-        constants for the date range. ``config.yml`` is not consulted here; it
-        is loaded only for use by ``load_data``.
+        Reads ``ingest.start_year_month`` and ``ingest.end_year_month`` from
+        ``config.yml`` and fetches each month via :meth:`fetch_month`.
 
         Returns:
-            Output path of the written parquet file.
+            List of output parquet file paths (one per month).
         """
-        os.makedirs("data/bronze", exist_ok=True)
-        output_path = f"data/bronze/yellow_tripdata_{START_DATE}_{END_DATE}.parquet"
-        where_clause = (
-            f"tpep_pickup_datetime >= '{START_DATE}T00:00:00' "
-            f"AND tpep_pickup_datetime < '{END_EXCLUSIVE}T00:00:00'"
-        )
-        self._fetch_to_parquet(where_clause, output_path)
-        return output_path
+        start_ym: str = self.config["ingest"]["start_year_month"]
+        end_ym: str = self.config["ingest"]["end_year_month"]
+        s_year, s_month = (int(x) for x in start_ym.split("-"))
+        e_year, e_month = (int(x) for x in end_ym.split("-"))
+
+        paths: list[str] = []
+        year, month = s_year, s_month
+        while (year, month) <= (e_year, e_month):
+            paths.append(self.fetch_month(year, month))
+            month += 1
+            if month > 12:
+                month = 1
+                year += 1
+        return paths
 
     def fetch_day(self, date_str: str) -> str:
         """Download raw trip data for a single calendar day and write to bronze parquet.
@@ -246,15 +291,58 @@ class Ingestion:
         next_day = (parsed + timedelta(days=1)).isoformat()
         os.makedirs("data/bronze", exist_ok=True)
         output_path = f"data/bronze/yellow_tripdata_{date_str}.parquet"
+
+        dataset_id = resolve_dataset_id(parsed.year)
+        base_url = RESOURCE_URL_TEMPLATE.format(dataset_id=dataset_id)
+
         where_clause = (
             f"tpep_pickup_datetime >= '{date_str}T00:00:00' "
             f"AND tpep_pickup_datetime < '{next_day}T00:00:00'"
         )
-        rows_written = self._fetch_to_parquet(where_clause, output_path)
+        rows_written = self._fetch_to_parquet(base_url, where_clause, output_path)
         if rows_written == 0:
             print(
                 f"  Warning: no rows returned for {date_str}; bronze file not written."
             )
+        return output_path
+
+    def fetch_month(self, year: int, month: int) -> str:
+        """Download raw trip data for a full calendar month into the bronze layer.
+
+        The file is saved to ``data/bronze/YYYY_MM/YYYY_MM.parquet``.
+        If the file already exists the download is skipped (idempotent).
+
+        Args:
+            year: Four-digit year (e.g. 2022).
+            month: Month number (1–12).
+
+        Returns:
+            Output path of the written (or already existing) parquet file.
+        """
+        tag = f"{year}_{month:02d}"
+        out_dir = f"data/bronze/{tag}"
+        os.makedirs(out_dir, exist_ok=True)
+        output_path = f"{out_dir}/{tag}.parquet"
+
+        if os.path.exists(output_path):
+            print(f"Skipping {tag} — {output_path} already exists.")
+            return output_path
+
+        first_day = date(year, month, 1)
+        last_day = calendar.monthrange(year, month)[1]
+        next_month_first = first_day + timedelta(days=last_day)
+
+        dataset_id = resolve_dataset_id(year)
+        base_url = RESOURCE_URL_TEMPLATE.format(dataset_id=dataset_id)
+        print(f"  Resolved dataset for {year}: {dataset_id}")
+
+        where_clause = (
+            f"tpep_pickup_datetime >= '{first_day.isoformat()}T00:00:00' "
+            f"AND tpep_pickup_datetime < '{next_month_first.isoformat()}T00:00:00'"
+        )
+        rows_written = self._fetch_to_parquet(base_url, where_clause, output_path)
+        if rows_written == 0:
+            print(f"  Warning: no rows returned for {tag}; bronze file not written.")
         return output_path
 
     # ── Load methods: read pre-split parquet files from disk ──────────────────

@@ -1,10 +1,17 @@
 env: local  # local | cloud
 
+ingest:
+  start_year_month: "2021-01"
+  end_year_month: "2021-02"
+
 data:
   train_path: data/train.parquet
   test_path: data/test.parquet
   bronze_path: data/bronze/yellow_tripdata_2022-01-01_2022-02-28.parquet
   silver_path: data/silver/yellow_tripdata_cleaned.parquet
+
+feature:
+  lag_hours: [1, 3, 6, 12, 24]  # t-lag pickup count features
 
 clean:
   null_strategy: drop  # drop | ffill | bfill

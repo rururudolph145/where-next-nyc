@@ -1,71 +1,81 @@
 import os
 import logging
+from typing import Any
+
 import yaml
 import pandas as pd
-from datetime import date, timedelta
 
-from steps.ingest import Ingestion, START_DATE, END_DATE
-from steps.clean import DataCleaner
+from src.steps.ingest import Ingestion
+from src.steps.clean import DataCleaner
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(levelname)s:%(message)s")
 
-# Stop early after this many dates so the pipeline can be tested quickly.
-# Set to None (or a very large number) to run the full date range.
-MAX_DATES: int = 2
+
+def _iter_months(start: str, end: str) -> list[tuple[int, int]]:
+    """Return a list of (year, month) tuples from *start* to *end* inclusive.
+
+    Args:
+        start: Year-month string in ``YYYY-MM`` format (e.g. ``"2022-01"``).
+        end: Year-month string in ``YYYY-MM`` format (e.g. ``"2022-04"``).
+
+    Returns:
+        List of ``(year, month)`` tuples covering the range.
+    """
+    s_year, s_month = (int(x) for x in start.split("-"))
+    e_year, e_month = (int(x) for x in end.split("-"))
+    months: list[tuple[int, int]] = []
+    year, month = s_year, s_month
+    while (year, month) <= (e_year, e_month):
+        months.append((year, month))
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
+    return months
 
 
 def run_pipeline() -> None:
-    """Run the ingest → clean pipeline day by day.
+    """Run the ingest → clean pipeline month by month.
 
-    For each calendar day between START_DATE and END_DATE:
+    For each month in the configured ``ingest.start_year_month`` to
+    ``ingest.end_year_month`` range:
     1. Fetch raw trip data from the NYC Open Data API → Bronze layer.
     2. Clean the raw data and promote it → Silver layer.
-
-    The loop exits as soon as *MAX_DATES* days have been processed or the
-    END_DATE is reached, whichever comes first.
     """
     with open("config.yml") as f:
-        config: dict[str, object] = yaml.safe_load(f)
+        config: dict[str, Any] = yaml.safe_load(f)
 
     ingestor = Ingestion()
-    cleaner = DataCleaner(config)  # type: ignore[arg-type]
+    cleaner = DataCleaner(config)
 
-    current = date.fromisoformat(START_DATE)
-    end = date.fromisoformat(END_DATE)
-    dates_fetched = 0
+    start_ym: str = config["ingest"]["start_year_month"]
+    end_ym: str = config["ingest"]["end_year_month"]
 
-    while current <= end:
-        date_str = current.isoformat()
-        logging.info("--- [%d] Ingesting %s ---", dates_fetched + 1, date_str)
+    months = _iter_months(start_ym, end_ym)
+    logging.info("Pipeline will process %d month(s): %s → %s", len(months), start_ym, end_ym)
 
-        # ── Ingest: fetch one day → Bronze ────────────────────────────────
-        bronze_path = ingestor.fetch_day(date_str)
+    for i, (year, month) in enumerate(months, 1):
+        tag = f"{year}_{month:02d}"
+        logging.info("--- [%d/%d] Ingesting %s ---", i, len(months), tag)
+
+        # ── Ingest: fetch one month → Bronze ────────────────────────────
+        bronze_path = ingestor.fetch_month(year, month)
 
         if not os.path.exists(bronze_path):
-            logging.warning("No data returned for %s, skipping clean step.", date_str)
-            current += timedelta(days=1)
+            logging.warning("No data returned for %s, skipping clean step.", tag)
             continue
 
-        # ── Clean: Bronze → Silver ─────────────────────────────────────────
+        # ── Clean: Bronze → Silver ──────────────────────────────────────
         df = pd.read_parquet(bronze_path)
         cleaned = cleaner.clean(df)
 
         silver_dir = "data/silver"
         os.makedirs(silver_dir, exist_ok=True)
-        silver_path = f"{silver_dir}/yellow_tripdata_cleaned_{date_str}.parquet"
+        silver_path = f"{silver_dir}/yellow_tripdata_cleaned_{tag}.parquet"
         cleaned.to_parquet(silver_path, index=False)
         logging.info("Silver → %s  (%s rows)", silver_path, f"{len(cleaned):,}")
 
-        dates_fetched += 1
-        current += timedelta(days=1)
-
-        if dates_fetched >= MAX_DATES:
-            logging.info(
-                "Stopped after %d date(s) (MAX_DATES fast-test limit).", MAX_DATES
-            )
-            break
-
-    logging.info("Pipeline complete. Processed %d date(s).", dates_fetched)
+    logging.info("Pipeline complete. Processed %d month(s).", len(months))
 
 
 if __name__ == "__main__":

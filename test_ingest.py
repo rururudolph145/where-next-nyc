@@ -1,4 +1,4 @@
-from steps import ingest
+from src.steps import ingest
 
 def main():
     ingestion = ingest.Ingestion()

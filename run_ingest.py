@@ -4,10 +4,12 @@ Usage:
     uv run python run_ingest.py
 """
 
-from steps.ingest import Ingestion, START_DATE, END_DATE
+from src.steps.ingest import Ingestion
 
 if __name__ == "__main__":
-    print(f"Fetching NYC Yellow Taxi data from {START_DATE} to {END_DATE} ...")
     ingestor = Ingestion()
-    path = ingestor.fetch_data()
-    print(f"\nDone! File saved to: {path}")
+    start = ingestor.config["ingest"]["start_year_month"]
+    end = ingestor.config["ingest"]["end_year_month"]
+    print(f"Fetching NYC Yellow Taxi data from {start} to {end} ...")
+    paths = ingestor.fetch_data()
+    print(f"\nDone! Files saved to:\n" + "\n".join(f"  {p}" for p in paths))

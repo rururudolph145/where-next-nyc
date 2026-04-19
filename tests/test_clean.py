@@ -1,6 +1,6 @@
 import pytest
 import pandas as pd
-from steps.clean import Cleaner
+from src.steps.clean import Cleaner
 
 
 @pytest.fixture

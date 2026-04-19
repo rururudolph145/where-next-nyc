@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "mypy": {
+      "source": "bobmatnyc/claude-mpm-skills",
+      "sourceType": "github",
+      "computedHash": "fd494cbb2b9e19f0d2eb9a3c0781d2dc1150813d53c3f6938b53e24a1ad4995a"
+    }
+  }
+}

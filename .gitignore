@@ -47,5 +47,9 @@ data/**/*.csv
 data/*.parquet
 data/*.csv
 
+# Reference / lookup files (shapefiles, etc.)
+data/reference/*
+!data/reference/.gitkeep
+
 # DVC
 .dvc/tmp/
