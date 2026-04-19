@@ -8,6 +8,7 @@ import pandas as pd
 from src.ingestion.ingest import Ingestion
 from src.ingestion.clean import DataCleaner
 from src.ingestion.feature import FeatureEngineer
+from src.training.train import Trainer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(levelname)s:%(message)s")
 
@@ -36,7 +37,7 @@ def _iter_months(start: str, end: str) -> list[tuple[int, int]]:
 
 
 def run_pipeline() -> None:
-    """Run the ingest → clean → feature engineering pipeline.
+    """Run the ingest → clean → feature engineering → training pipeline.
 
     For each month in the configured range:
     1. Fetch raw trip data from the NYC Open Data API → Bronze layer.
@@ -44,6 +45,7 @@ def run_pipeline() -> None:
 
     After all months are processed:
     3. Run feature engineering on the full Silver data → Gold layer.
+    4. Train demand prediction model, log to MLflow, save artifact.
     """
     with open("config.yml") as f:
         config: dict[str, Any] = yaml.safe_load(f)
@@ -78,6 +80,17 @@ def run_pipeline() -> None:
     # ── Feature Engineering: full Silver → Gold ──────────────────────
     logging.info("Running feature engineering on full Silver data")
     feature_eng.run()
+
+    # ── Training: Gold → Model ─────────────────────────────────────
+    logging.info("Training demand prediction model")
+    trainer = Trainer(config)
+    result = trainer.run()
+    logging.info(
+        "Training complete. Val MAE=%.2f, Test MAE=%.2f. Model → %s",
+        result["val_metrics"]["mae"],
+        result["test_metrics"]["mae"],
+        result["model_path"],
+    )
 
     logging.info("Pipeline complete. Processed %d month(s).", len(months))
 

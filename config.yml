@@ -12,16 +12,30 @@ data:
   gold_path: data/gold/yellow_tripdata
 
 feature:
-  lag_hours: [1, 3, 6, 12, 24]  # t-lag pickup count features
+  lag_hours: [1, 3, 6, 12, 24, 168]  # t-lag pickup count features
   zone_shapefile_path: data/reference/taxi_zones.shp
 
 clean:
   null_strategy: drop  # drop | ffill | bfill
 
 train:
-  test_size: 0.2
-  random_state: 42
-  shuffle: true
+  split_ratios: [0.8, 0.1, 0.1]  # train / val / test
+  features:
+    - hour_of_day_sin
+    - hour_of_day_cos
+    - day_of_week_sin
+    - day_of_week_cos
+    - month_sin
+    - month_cos
+    - pickup_longitude
+    - pickup_latitude
+    - trip_count_lag_1
+    - trip_count_lag_3
+    - trip_count_lag_6
+    - trip_count_lag_12
+    - trip_count_lag_24
+    - trip_count_lag_168
+  target: trip_count
 
 model:
   name: LGBMRegressor
@@ -31,4 +45,9 @@ model:
     max_depth: -1
     num_leaves: 31
     random_state: 42
+    verbosity: -1
   store_path: models/
+
+mlflow:
+  experiment_name: ny_taxi_demand_model
+  tracking_uri: mlruns
