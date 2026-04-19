@@ -1,3 +1,5 @@
+"""Data cleaning and Bronze-to-Silver promotion for NYC taxi trip data."""
+
 import os
 from typing import Any
 
@@ -37,16 +39,29 @@ class DataCleaner:
         raise NotImplementedError(f"env='{self.env}' is not supported yet.")
 
     def save_silver(self, data: pd.DataFrame) -> None:
-        """Persist cleaned data to the Silver layer.
+        """Upsert cleaned data into the Silver layer.
+
+        If the silver file already exists, the new data is appended and
+        duplicates are dropped so the file always contains a single
+        deduplicated copy of all ingested records.
 
         Args:
-            data: Cleaned DataFrame to save.
+            data: Cleaned DataFrame to upsert.
 
         Raises:
             NotImplementedError: If env is not 'local'.
         """
         if self.env == "local":
             os.makedirs(os.path.dirname(self.silver_path), exist_ok=True)
+
+            if os.path.exists(self.silver_path):
+                existing = pd.read_parquet(self.silver_path)
+                data = pd.concat([existing, data], ignore_index=True)
+                data = data.drop_duplicates()
+
+            data = data.sort_values("tpep_pickup_datetime").reset_index(
+                drop=True
+            )
             data.to_parquet(self.silver_path, index=False)
             print(f"Saved → {self.silver_path}  ({len(data):,} rows)")
             return
@@ -76,7 +91,8 @@ class DataCleaner:
         if strategy == "bfill":
             return data.bfill()
         raise ValueError(
-            f"Unknown null_strategy '{strategy}'. Choose from: drop, ffill, bfill."
+            f"Unknown null_strategy '{strategy}'. "
+            "Choose from: drop, ffill, bfill."
         )
 
     # ------------------------------------------------------------------
@@ -95,14 +111,20 @@ class DataCleaner:
         data = data.copy()
 
         # Parse datetimes
-        data["tpep_pickup_datetime"] = pd.to_datetime(data["tpep_pickup_datetime"])
-        data["tpep_dropoff_datetime"] = pd.to_datetime(data["tpep_dropoff_datetime"])
+        data["tpep_pickup_datetime"] = pd.to_datetime(
+            data["tpep_pickup_datetime"]
+        )
+        data["tpep_dropoff_datetime"] = pd.to_datetime(
+            data["tpep_dropoff_datetime"]
+        )
 
         # Handle nulls with configured strategy
         data = self.handle_nulls(data)
 
         # Remove trips with non-positive passenger count or trip distance
-        data = data[(data["passenger_count"] > 0) & (data["trip_distance"] > 0)]
+        data = data[
+            (data["passenger_count"] > 0) & (data["trip_distance"] > 0)
+        ]
 
         # Remove fare outliers using IQR
         q1 = data["fare_amount"].quantile(0.25)
@@ -126,7 +148,7 @@ class DataCleaner:
     # ------------------------------------------------------------------
 
     def run(self) -> pd.DataFrame:
-        """Execute the full Bronze → Silver cleaning pipeline.
+        """Execute the full Bronze -> Silver cleaning pipeline.
 
         Returns:
             Cleaned DataFrame that has been saved to the Silver layer.

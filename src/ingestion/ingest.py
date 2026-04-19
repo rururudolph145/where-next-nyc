@@ -1,3 +1,5 @@
+"""Data ingestion from the NYC TLC Socrata API into the Bronze layer."""
+
 import calendar
 import os
 import shutil
@@ -5,13 +7,14 @@ import tempfile
 from datetime import date, timedelta
 from typing import Any
 
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-import pandas as pd
 import requests
-import yaml
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+from src.shared.config import load_config
 
 SOCRATA_CATALOG_URL = "https://api.us.socrata.com/api/catalog/v1"
 SOCRATA_DOMAIN = "data.cityofnewyork.us"
@@ -54,6 +57,7 @@ def resolve_dataset_id(year: int) -> str:
         f"No Socrata dataset found for {year} Yellow Taxi Trip Data. "
         f"Check https://data.cityofnewyork.us for available years."
     )
+
 
 PAGE_SIZE = 50_000
 REQUEST_TIMEOUT_SECONDS = 60  # Socrata API can be slow on large offsets
@@ -108,28 +112,15 @@ class Ingestion:
     specified in ``config.yml``.
     """
 
-    def __init__(self, config_path: str = "config.yml") -> None:
-        """Initialise Ingestion and load configuration.
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        """Initialise Ingestion with configuration.
 
         Args:
-            config_path: Path to the YAML configuration file. Defaults to
-                ``"config.yml"`` relative to the current working directory.
+            config: Parsed configuration dictionary. If ``None``, loads
+                from ``config.yml`` via :func:`src.shared.config.load_config`.
         """
-        self.config = self.load_config(config_path)
+        self.config = config or load_config()
         self._session = _make_session()
-
-    @staticmethod
-    def load_config(config_path: str = "config.yml") -> dict[str, Any]:
-        """Load and return the YAML configuration file.
-
-        Args:
-            config_path: Path to the YAML configuration file.
-
-        Returns:
-            Parsed configuration as a nested dictionary.
-        """
-        with open(config_path) as f:
-            return yaml.safe_load(f)
 
     def cast_batch(self, df: pd.DataFrame) -> pd.DataFrame:
         """Cast DataFrame columns to their canonical types.
@@ -158,7 +149,7 @@ class Ingestion:
     def _fetch_to_parquet(
         self, base_url: str, where_clause: str, output_path: str
     ) -> int:
-        """Paginate through the API using *where_clause* and write rows to *output_path*.
+        """Paginate through the API and write rows to *output_path*.
 
         Writes to a temporary file first and renames it atomically on success,
         so a partial file is never left at *output_path* if an error occurs
@@ -214,7 +205,8 @@ class Ingestion:
                 writer.write_table(table)
                 total_rows += len(batch)
                 print(
-                    f"  offset={offset:>7,}  batch={len(batch):,}  total={total_rows:,}"
+                    f"  offset={offset:>7,}  batch={len(batch):,}"
+                    f"  total={total_rows:,}"
                 )
 
                 if len(page) < PAGE_SIZE:
@@ -248,7 +240,7 @@ class Ingestion:
         """Download raw trip data for the configured month range into the bronze layer.
 
         Reads ``ingest.start_year_month`` and ``ingest.end_year_month`` from
-        ``config.yml`` and fetches each month via :meth:`fetch_month`.
+        the configuration and fetches each month via :meth:`fetch_month`.
 
         Returns:
             List of output parquet file paths (one per month).
@@ -269,7 +261,10 @@ class Ingestion:
         return paths
 
     def fetch_day(self, date_str: str) -> str:
-        """Download raw trip data for a single calendar day and write to bronze parquet.
+        """Download raw trip data for a single calendar day to bronze parquet.
+
+        The file is saved under the configured ``data.bronze_path`` in a
+        ``YYYY_MM/`` subfolder as ``YYYY_MM_DD.parquet``.
 
         Args:
             date_str: Calendar day in ISO format (e.g. ``"2022-01-01"``).
@@ -288,10 +283,15 @@ class Ingestion:
                 f"fetch_day: expected ISO date (YYYY-MM-DD), got {date_str!r}"
             ) from None
 
-        next_day = (parsed + timedelta(days=1)).isoformat()
-        os.makedirs("data/bronze", exist_ok=True)
-        output_path = f"data/bronze/yellow_tripdata_{date_str}.parquet"
+        bronze_base: str = self.config["data"]["bronze_path"]
+        tag = f"{parsed.year}_{parsed.month:02d}"
+        out_dir = f"{bronze_base}/{tag}"
+        os.makedirs(out_dir, exist_ok=True)
+        output_path = (
+            f"{out_dir}/{tag}_{parsed.day:02d}.parquet"
+        )
 
+        next_day = (parsed + timedelta(days=1)).isoformat()
         dataset_id = resolve_dataset_id(parsed.year)
         base_url = RESOURCE_URL_TEMPLATE.format(dataset_id=dataset_id)
 
@@ -302,25 +302,28 @@ class Ingestion:
         rows_written = self._fetch_to_parquet(base_url, where_clause, output_path)
         if rows_written == 0:
             print(
-                f"  Warning: no rows returned for {date_str}; bronze file not written."
+                f"  Warning: no rows returned for {date_str}; "
+                "bronze file not written."
             )
         return output_path
 
     def fetch_month(self, year: int, month: int) -> str:
         """Download raw trip data for a full calendar month into the bronze layer.
 
-        The file is saved to ``data/bronze/YYYY_MM/YYYY_MM.parquet``.
+        The file is saved under the configured ``data.bronze_path`` as
+        ``YYYY_MM/YYYY_MM.parquet``.
         If the file already exists the download is skipped (idempotent).
 
         Args:
             year: Four-digit year (e.g. 2022).
-            month: Month number (1–12).
+            month: Month number (1-12).
 
         Returns:
             Output path of the written (or already existing) parquet file.
         """
+        bronze_base: str = self.config["data"]["bronze_path"]
         tag = f"{year}_{month:02d}"
-        out_dir = f"data/bronze/{tag}"
+        out_dir = f"{bronze_base}/{tag}"
         os.makedirs(out_dir, exist_ok=True)
         output_path = f"{out_dir}/{tag}.parquet"
 
@@ -338,11 +341,14 @@ class Ingestion:
 
         where_clause = (
             f"tpep_pickup_datetime >= '{first_day.isoformat()}T00:00:00' "
-            f"AND tpep_pickup_datetime < '{next_month_first.isoformat()}T00:00:00'"
+            f"AND tpep_pickup_datetime < "
+            f"'{next_month_first.isoformat()}T00:00:00'"
         )
         rows_written = self._fetch_to_parquet(base_url, where_clause, output_path)
         if rows_written == 0:
-            print(f"  Warning: no rows returned for {tag}; bronze file not written.")
+            print(
+                f"  Warning: no rows returned for {tag}; bronze file not written."
+            )
         return output_path
 
     # ── Load methods: read pre-split parquet files from disk ──────────────────

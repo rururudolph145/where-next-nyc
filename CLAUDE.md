@@ -39,22 +39,42 @@ uv run uvicorn app:app --reload  # start the FastAPI serving endpoint (dev mode)
 
 ## Architecture
 
-The project follows the MLOps template structure from [prsdm/mlops-project](https://github.com/prsdm/mlops-project), adapted for NYC yellow taxi demand forecasting.
+The project uses **pipeline-scoped modules** under `src/`, each with its own entrypoint and domain logic. Common code lives in `src/shared/`.
 
-**Pipeline flow** (`main.py` orchestrates):
-1. `steps/ingest.py` — reads `data/train.parquet` and `data/test.parquet` using paths from `config.yml`
-2. `steps/clean.py` — drops nulls, removes non-positive trip values, clips fare outliers via IQR, engineers time features (`hour`, `day_of_week`, `month`, `is_weekend`)
-3. `steps/train.py` — trains the model from `config.yml` (currently `LGBMRegressor`), saves to `models/model.pkl`
-4. `steps/predict.py` — loads `models/model.pkl`, evaluates with MAE / RMSE / R²
+```
+src/
+  shared/          # centralized config loading
+    config.py      # load_config() — single source of YAML config loading
+  ingestion/       # Bronze → Silver pipeline
+    ingest.py      # Ingestion class (Socrata API → Bronze parquet)
+    clean.py       # DataCleaner class (Bronze → Silver)
+  training/        # Model training pipeline
+    trainer.py     # Trainer class (LGBMRegressor, saves to models/)
+  inference/       # Prediction & evaluation pipeline
+    predictor.py   # Predictor class (loads model, computes MAE/RMSE/R²)
+  serving/         # FastAPI serving
+    app.py         # FastAPI app with /predict endpoint
+  utils/           # visualization helpers
+    visualize.py
+```
 
-`main.py` — pipeline orchestration entry points
-`tests/` — pytest tests
+**Root entrypoints:**
+- `main.py` — orchestrates the ingestion pipeline (ingest → clean, month by month)
+- `app.py` — re-exports `src.serving.app.app` so `uvicorn app:app` works
 
-**Serving:** `app.py` exposes a FastAPI endpoint at `POST /predict`. It loads `models/model.pkl` at startup, so the model must be trained before the server is started.
+**Ingestion pipeline** (orchestrated by `main.py`):
+1. `src/ingestion/ingest.py` — downloads raw trip data from the Socrata API into the configured `data.bronze_path`
+2. `src/ingestion/clean.py` — drops nulls, removes non-positive trip values, clips fare outliers via IQR, engineers time features (`hour`, `day_of_week`, `month`, `is_weekend`)
 
-**Configuration:** All data paths, train/test split settings, and model hyperparameters live in `config.yml`. Swap models by changing `model.name` — the `MODELS` dict in `steps/train.py` maps name strings to classes.
+**Training:** `src/training/trainer.py` — trains the model from `config.yml` (currently `LGBMRegressor`), saves to `models/model.pkl`. The `MODELS` dict maps name strings to classes.
 
-**Data:** Raw NYC TLC parquet files go under `data/`. The `data/` directory uses a medallion-style layout (e.g., `data/bronze/`). All `.parquet` and `.csv` files at any depth under `data/` are gitignored. Use `dataset.py` as the entry point for downloading/splitting source data.
+**Inference:** `src/inference/predictor.py` — loads `models/model.pkl`, evaluates with MAE / RMSE / R²
+
+**Serving:** `src/serving/app.py` exposes a FastAPI endpoint at `POST /predict`. It loads `models/model.pkl` at startup, so the model must be trained before the server is started.
+
+**Configuration:** All data paths, train/test split settings, and model hyperparameters live in `config.yml`. Configuration is loaded via `src.shared.config.load_config()`.
+
+**Data:** Raw NYC TLC parquet files go under `data/`. The `data/` directory uses a medallion-style layout (e.g., `data/bronze/`). All `.parquet` and `.csv` files at any depth under `data/` are gitignored.
 
 **Forecasting checklist:** `pipeline.MD` contains a detailed checklist of all pipeline stages (ingestion → monitoring). Use it to track implementation progress.
 
@@ -78,9 +98,24 @@ The project follows the MLOps template structure from [prsdm/mlops-project](http
 ## Key Decisions
 
 - **Time-series split:** Use time-based splits only — never shuffle for temporal data (see `pipeline.MD` §6).
-- **Target column:** `trip_count` — features and target are separated in `Trainer.feature_target_separator()` and `Predictor.feature_target_separator()` by dropping this column.
+- **Target column:** `trip_count` — features and target are separated in `src.training.trainer.Trainer.feature_target_separator()` and `src.inference.predictor.Predictor.feature_target_separator()` by dropping this column.
 - **MLflow model name:** registered as `ny_taxi_demand_model` in the local `mlruns/` store.
 
-## Development rule
+## Development Workflow
+
+Every new feature or pipeline step **must** follow this workflow in order:
+
+1. **Requirement definition** — Clearly define what the feature does, its inputs/outputs, and acceptance criteria before writing any code.
+2. **Implementation checklist** — Create a markdown checklist file in `implementation_checklist/` (e.g. `implementation_checklist/feature_engineering.md`) that breaks the work into concrete, verifiable steps.
+3. **Implementation** — Implement the feature following the checklist step by step. Check off items as they are completed.
+4. **Testing** — Add or update test cases in `tests/` to cover the new functionality. All tests must pass (`uv run python -m pytest`).
+5. **Code quality** — Ensure the code passes both linters before considering the work done:
+   - `uv run mypy src/ --strict` — all type checks must pass
+   - `uv run ruff check src/` — all lint rules must pass
+   - `uv run ruff format --check src/` — formatting must be consistent
+
+Do **not** skip or reorder these steps. If a step reveals issues, go back and fix before proceeding.
+
+## Development Rules
 - Secrets: Always put API keys and database credentials in .env
 - App Settings: Put non-sensitive, environment-specific toggles in config.yaml or .config/.

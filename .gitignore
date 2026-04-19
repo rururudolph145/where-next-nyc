@@ -51,5 +51,8 @@ data/*.csv
 data/reference/*
 !data/reference/.gitkeep
 
+# Implementation checklists
+implementation_checklist/
+
 # DVC
 .dvc/tmp/

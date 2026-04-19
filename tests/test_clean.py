@@ -1,6 +1,6 @@
 import pytest
 import pandas as pd
-from src.steps.clean import Cleaner
+from src.ingestion.clean import DataCleaner
 
 
 @pytest.fixture
@@ -17,11 +17,19 @@ def sample_data():
 
 @pytest.fixture
 def cleaner():
-    return Cleaner()
+    config = {
+        'env': 'local',
+        'data': {
+            'bronze_path': 'data/bronze/test.parquet',
+            'silver_path': 'data/silver/test.parquet',
+        },
+        'clean': {'null_strategy': 'drop'},
+    }
+    return DataCleaner(config)
 
 
 def test_clean_data(sample_data, cleaner):
-    result = cleaner.clean_data(sample_data)
+    result = cleaner.clean(sample_data)
 
     # Rows with null datetimes or non-positive passenger/distance should be dropped
     assert result['tpep_pickup_datetime'].notna().all()

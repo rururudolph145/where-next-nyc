@@ -1,7 +1,7 @@
 import pytest
 import pandas as pd
 from unittest.mock import patch, mock_open
-from src.steps.ingest import Ingestion
+from src.ingestion.ingest import Ingestion
 
 
 @pytest.fixture
@@ -28,7 +28,7 @@ def test_load_data(mock_read_parquet, mock_safe_load, mock_open_file, config_dat
     mock_safe_load.return_value = config_data
     mock_read_parquet.side_effect = sample_data
 
-    ingestion = Ingestion()
+    ingestion = Ingestion(config=config_data)
     train_data, test_data = ingestion.load_data()
 
     pd.testing.assert_frame_equal(train_data, sample_data[0])

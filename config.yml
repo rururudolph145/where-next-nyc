@@ -7,11 +7,13 @@ ingest:
 data:
   train_path: data/train.parquet
   test_path: data/test.parquet
-  bronze_path: data/bronze/yellow_tripdata_2022-01-01_2022-02-28.parquet
+  bronze_path: data/bronze/yellow_tripdata
   silver_path: data/silver/yellow_tripdata_cleaned.parquet
+  gold_path: data/gold/yellow_tripdata
 
 feature:
   lag_hours: [1, 3, 6, 12, 24]  # t-lag pickup count features
+  zone_shapefile_path: data/reference/taxi_zones.shp
 
 clean:
   null_strategy: drop  # drop | ffill | bfill

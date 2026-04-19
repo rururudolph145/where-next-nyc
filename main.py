@@ -5,8 +5,9 @@ from typing import Any
 import yaml
 import pandas as pd
 
-from src.steps.ingest import Ingestion
-from src.steps.clean import DataCleaner
+from src.ingestion.ingest import Ingestion
+from src.ingestion.clean import DataCleaner
+from src.ingestion.feature import FeatureEngineer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(levelname)s:%(message)s")
 
@@ -35,18 +36,21 @@ def _iter_months(start: str, end: str) -> list[tuple[int, int]]:
 
 
 def run_pipeline() -> None:
-    """Run the ingest → clean pipeline month by month.
+    """Run the ingest → clean → feature engineering pipeline.
 
-    For each month in the configured ``ingest.start_year_month`` to
-    ``ingest.end_year_month`` range:
+    For each month in the configured range:
     1. Fetch raw trip data from the NYC Open Data API → Bronze layer.
-    2. Clean the raw data and promote it → Silver layer.
+    2. Clean the raw data and upsert into a single Silver layer file.
+
+    After all months are processed:
+    3. Run feature engineering on the full Silver data → Gold layer.
     """
     with open("config.yml") as f:
         config: dict[str, Any] = yaml.safe_load(f)
 
     ingestor = Ingestion()
     cleaner = DataCleaner(config)
+    feature_eng = FeatureEngineer(config)
 
     start_ym: str = config["ingest"]["start_year_month"]
     end_ym: str = config["ingest"]["end_year_month"]
@@ -65,15 +69,15 @@ def run_pipeline() -> None:
             logging.warning("No data returned for %s, skipping clean step.", tag)
             continue
 
-        # ── Clean: Bronze → Silver ──────────────────────────────────────
+        # ── Clean: Bronze → Silver (upsert into single file) ─────────
         df = pd.read_parquet(bronze_path)
         cleaned = cleaner.clean(df)
+        cleaner.save_silver(cleaned)
+        logging.info("Silver upserted (%s new rows from %s)", f"{len(cleaned):,}", tag)
 
-        silver_dir = "data/silver"
-        os.makedirs(silver_dir, exist_ok=True)
-        silver_path = f"{silver_dir}/yellow_tripdata_cleaned_{tag}.parquet"
-        cleaned.to_parquet(silver_path, index=False)
-        logging.info("Silver → %s  (%s rows)", silver_path, f"{len(cleaned):,}")
+    # ── Feature Engineering: full Silver → Gold ──────────────────────
+    logging.info("Running feature engineering on full Silver data")
+    feature_eng.run()
 
     logging.info("Pipeline complete. Processed %d month(s).", len(months))
 
