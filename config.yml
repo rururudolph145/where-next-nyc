@@ -48,6 +48,9 @@ model:
     verbosity: -1
   store_path: models/
 
+inference:
+  output_path: data/predictions/demand_predictions.parquet
+
 mlflow:
   experiment_name: ny_taxi_demand_model
   tracking_uri: mlruns
