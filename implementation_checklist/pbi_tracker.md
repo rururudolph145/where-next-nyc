@@ -80,6 +80,34 @@ Supports **Step 1 (Start Shift) → Step 2 (Check Demand)** in the driver journe
   - Output: JSON list of top-N zones with scores
   - Acceptance: response < 200ms; returns valid zone recommendations
 
+### Near-Real-Time Inference (simulated streaming)
+
+> In production, Uber refreshes heatmap predictions every 10-15 minutes.
+> This doesn't require a streaming inference pipeline — prediction is batch by nature.
+> The two loops are decoupled:
+>
+> - **Data ingestion** (continuous): trip events land in a database in near-real-time.
+> - **Inference** (batch, every 15 min): cron job queries latest aggregated counts,
+>   computes features, runs model.predict(), updates the predictions store.
+>
+> The model needs aggregates over completed time windows (e.g., `trip_count_lag_1` =
+> total pickups in zone X one hour ago). You can't compute this until the window closes,
+> so streaming individual trip events doesn't help — batch on aggregated windows is correct.
+>
+> **Simulation approach:** Since we can't run 24/7, we replay historical data with a
+> simulated clock. A `--simulate-time` flag advances through historical hours, exercising
+> the same code path as a production cron job. In a design doc, explain:
+> "In production this would be triggered by a cron job every 15 minutes against a live
+> database. For demonstration, we replay historical data with a simulated clock."
+
+- [ ] **PBI 11 — Near-Real-Time Inference with Simulated Clock**
+  - Add `--simulate-time` flag to inference pipeline that replays historical data hour-by-hour
+  - Each iteration: query data "up to" simulated time, compute features, predict, update heatmap
+  - Simulating a full month completes in minutes but exercises the production code path
+  - Input: historical Gold data + simulated current time
+  - Output: predictions table updated per simulated hour
+  - Acceptance: heatmap updates as simulated clock advances; same results as full batch
+
 ### System Reliability
 
 - [ ] **PBI 9 — Stale Data Handler**
@@ -103,6 +131,8 @@ PBI 1 (train t) ──> PBI 2 (inference t) ──> PBI 3 (heatmap API)
                                   │
                                   ├──> PBI 4 (multi-horizon)
                                   │
+                                  ├──> PBI 11 (simulated streaming) ──> PBI 3 (heatmap refreshes)
+                                  │
                                   │         PBI 5 (zone map) ──┐
                                   │                             ├──> PBI 7 (decay) ──> PBI 8 (recommend API)
                                   │         PBI 6 (location) ──┘
@@ -125,9 +155,11 @@ PBI 1 (train t) ──> PBI 2 (inference t) ──> PBI 3 (heatmap API)
 | 8 | PBI 8 | Recommendation API — personalized ranking endpoint |
 | 9 | PBI 9 | Fallback — reliability layer |
 | 10 | PBI 10 | Monitoring — observability layer |
+| 11 | PBI 11 | Simulated streaming — shows production awareness |
 
 ## Known Limitations & Future Considerations
 
 - **Feedback loop:** Driver recommendations influence future trip data (see DiDi's multi-driver optimization). Not addressed in MVP since heatmap approach + surge pricing mitigate herding naturally.
 - **Multi-driver coordination:** MVP serves the same heatmap to all drivers (Uber model). DiDi-style per-driver optimization requires fleet state tracking and is deferred to post-MVP.
 - **A/B testing:** No framework for measuring if recommendations improve driver outcomes. Design doc recommended before scaling.
+- **Batch vs streaming inference:** Prediction is batch by nature — the model needs aggregates over completed time windows (e.g., hourly trip counts). Data ingestion can be streaming into a DB, but inference runs as a periodic batch job (every 15 min in Uber's case). These two loops are decoupled. For demo purposes, historical replay with a simulated clock exercises the same code path as a production cron job.

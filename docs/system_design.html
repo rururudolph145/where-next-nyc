@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>System Design — NYC Taxi Demand Heatmap</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --text-muted: #8b949e;
+      --accent: #58a6ff;
+      --accent-green: #3fb950;
+      --accent-yellow: #d29922;
+      --accent-orange: #db6d28;
+      --accent-purple: #bc8cff;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      padding: 2rem;
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      font-size: 2rem;
+      margin-bottom: 0.25rem;
+      color: var(--text);
+    }
+
+    h1 + p { color: var(--text-muted); margin-bottom: 2rem; }
+
+    h2 {
+      font-size: 1.4rem;
+      margin-top: 2.5rem;
+      margin-bottom: 1rem;
+      padding-bottom: 0.4rem;
+      border-bottom: 1px solid var(--border);
+      color: var(--text);
+    }
+
+    h3 {
+      font-size: 1.1rem;
+      margin-top: 1.5rem;
+      margin-bottom: 0.5rem;
+      color: var(--accent);
+    }
+
+    p, li { color: var(--text); margin-bottom: 0.5rem; }
+
+    ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 1.5rem;
+      font-size: 0.9rem;
+    }
+
+    th {
+      background: var(--surface);
+      color: var(--accent);
+      text-align: left;
+      padding: 0.6rem 0.8rem;
+      border: 1px solid var(--border);
+      font-weight: 600;
+    }
+
+    td {
+      padding: 0.5rem 0.8rem;
+      border: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    tr:nth-child(even) td { background: rgba(22, 27, 34, 0.5); }
+
+    pre {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1rem;
+      overflow-x: auto;
+      font-size: 0.85rem;
+      line-height: 1.5;
+      margin-bottom: 1.5rem;
+      color: var(--text);
+    }
+
+    code {
+      font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+      font-size: 0.85rem;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.2rem;
+      margin-bottom: 1rem;
+    }
+
+    .card-title {
+      font-weight: 600;
+      color: var(--accent);
+      margin-bottom: 0.3rem;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 0.15rem 0.5rem;
+      border-radius: 12px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+
+    .badge-blue { background: rgba(88, 166, 255, 0.15); color: var(--accent); }
+    .badge-green { background: rgba(63, 185, 80, 0.15); color: var(--accent-green); }
+    .badge-yellow { background: rgba(210, 153, 34, 0.15); color: var(--accent-yellow); }
+    .badge-orange { background: rgba(219, 109, 40, 0.15); color: var(--accent-orange); }
+    .badge-purple { background: rgba(188, 140, 255, 0.15); color: var(--accent-purple); }
+
+    .step-num {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.8rem;
+      height: 1.8rem;
+      border-radius: 50%;
+      background: var(--accent);
+      color: var(--bg);
+      font-weight: 700;
+      font-size: 0.85rem;
+      margin-right: 0.5rem;
+      flex-shrink: 0;
+    }
+
+    .step-header {
+      display: flex;
+      align-items: center;
+      margin-bottom: 0.5rem;
+      font-size: 1.1rem;
+      font-weight: 600;
+    }
+
+    .step { margin-bottom: 2rem; }
+
+    .divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 2.5rem 0;
+    }
+
+    .toc {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.2rem 1.5rem;
+      margin-bottom: 2rem;
+    }
+
+    .toc-title { font-weight: 600; margin-bottom: 0.5rem; color: var(--text-muted); }
+    .toc a { color: var(--accent); text-decoration: none; }
+    .toc a:hover { text-decoration: underline; }
+    .toc ol { margin-bottom: 0; }
+    .toc li { margin-bottom: 0.3rem; }
+
+    .highlight { color: var(--accent-yellow); font-weight: 600; }
+    .diagram-label { color: var(--text-muted); font-size: 0.8rem; margin-top: -1rem; margin-bottom: 1.5rem; }
+  </style>
+</head>
+<body>
+
+<h1>System Design: NYC Taxi Demand Heatmap</h1>
+<p>Step-by-step system design from problem formulation to architecture</p>
+
+<nav class="toc">
+  <div class="toc-title">Contents</div>
+  <ol>
+    <li><a href="#objective">Problem Formulation</a></li>
+    <li><a href="#step1">Functional Requirements</a></li>
+    <li><a href="#step2">Non-Functional Requirements</a></li>
+    <li><a href="#step3">Data Contract</a></li>
+    <li><a href="#step4">Data Flow (Trace Backwards)</a></li>
+    <li><a href="#step5">Separate the Loops</a></li>
+    <li><a href="#step6">Component Design</a></li>
+    <li><a href="#step7">Architecture Diagram</a></li>
+    <li><a href="#step8">NFR &rarr; Architecture Mapping</a></li>
+    <li><a href="#step9">MVP vs Production</a></li>
+    <li><a href="#data-source">Data Source Reality &amp; Simulation</a></li>
+    <li><a href="#limitations">Known Limitations</a></li>
+  </ol>
+</nav>
+
+<!-- ================================================================ -->
+<h2 id="objective">Problem Formulation</h2>
+
+<div class="card">
+  <div class="card-title">Objective: High-Demand-Zone Heatmap</div>
+  <p>Maximize driver efficiency by telling the driver high-demand zones at t+30 and t+60 minutes. Using the system, the driver will be able to decide where they should go given their current position.</p>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="step1">Step 1: Functional Requirements</h2>
+
+<table>
+  <tr><th>#</th><th>Requirement</th><th>Derived from</th></tr>
+  <tr>
+    <td>F1</td>
+    <td>Predict trip demand per zone at t+30 and t+60</td>
+    <td>"high-demand zone in t+30 and t+60 minute"</td>
+  </tr>
+  <tr>
+    <td>F2</td>
+    <td>Serve predictions as a heatmap to the driver</td>
+    <td>"telling the driver high-demand zone"</td>
+  </tr>
+  <tr>
+    <td>F3</td>
+    <td>Refresh predictions periodically so they stay current</td>
+    <td>"t+30 and t+60" implies relative to <em>now</em></td>
+  </tr>
+</table>
+
+<!-- ================================================================ -->
+<h2 id="step2">Step 2: Non-Functional Requirements</h2>
+
+<h3>Latency</h3>
+<table>
+  <tr><th>Component</th><th>Requirement</th><th>Rationale</th></tr>
+  <tr><td>API response (<code>GET /heatmap</code>)</td><td>&lt; 200ms</td><td>Driver is waiting; slow = bad UX</td></tr>
+  <tr><td>Inference batch (all zones)</td><td>&lt; 60s</td><td>Must complete well within the 15-min refresh window</td></tr>
+  <tr><td>Data ingestion to queryable</td><td>&lt; 5 min</td><td>Trip data should be available for next inference cycle</td></tr>
+</table>
+
+<h3>Freshness (Staleness Tolerance)</h3>
+<table>
+  <tr><th>Data</th><th>Acceptable Staleness</th><th>Rationale</th></tr>
+  <tr><td>Heatmap predictions</td><td>15 min</td><td>Demand shifts slowly within an hour; Uber uses 10-15 min</td></tr>
+  <tr><td>Lag features (trip counts)</td><td>1 hour</td><td>Features are hourly aggregates &mdash; sub-hour precision doesn't help</td></tr>
+  <tr><td>Model weights</td><td>Days / weeks</td><td>Demand patterns are seasonal; model drift is slow</td></tr>
+</table>
+
+<h3>Availability</h3>
+<table>
+  <tr><th>Component</th><th>Target</th><th>Rationale</th></tr>
+  <tr><td>Heatmap API</td><td>99.5%</td><td>Advisory, not safety-critical; drivers can function without it</td></tr>
+  <tr><td>Inference pipeline</td><td>Best effort</td><td>If one cycle fails, serve stale predictions; alert if &gt; 2 consecutive failures</td></tr>
+  <tr><td>Fallback</td><td>Historical averages if predictions &gt; 1 hour stale</td><td>Driver should always see something</td></tr>
+</table>
+
+<h3>Scalability</h3>
+<table>
+  <tr><th>Dimension</th><th>Expected Load</th><th>Design Implication</th></tr>
+  <tr><td>Concurrent drivers</td><td>Thousands reading heatmap</td><td>Read-heavy; cache predictions, don't compute per request</td></tr>
+  <tr><td>Zones</td><td>~260</td><td>Tiny; model predicts all zones in &lt;10ms</td></tr>
+  <tr><td>Inference frequency</td><td>Every 15 min</td><td>One batch job; no parallelism needed</td></tr>
+  <tr><td>Data growth</td><td>~10M trips/month</td><td>DB partitioned by month; only query recent hours for features</td></tr>
+</table>
+
+<h3>Consistency</h3>
+<table>
+  <tr><th>Question</th><th>Decision</th><th>Rationale</th></tr>
+  <tr><td>Can two drivers see different heatmaps at the same time?</td><td>Yes, briefly</td><td>During ~1s cache refresh, some see old data. Acceptable.</td></tr>
+  <tr><td>Must predictions match the latest data?</td><td>No</td><td>Eventual consistency. 15-min cycle already implies staleness.</td></tr>
+</table>
+
+<h3>Accuracy / Quality</h3>
+<table>
+  <tr><th>Metric</th><th>Target</th><th>How to Measure</th></tr>
+  <tr><td>MAE</td><td>Established at training time</td><td>Predicted vs actual trip_count on test set</td></tr>
+  <tr><td>Prediction drift</td><td>Alert if MAE degrades &gt; 20%</td><td>Rolling error vs training baseline</td></tr>
+  <tr><td>Zone coverage</td><td>100% of active zones</td><td>No zones missing from heatmap</td></tr>
+</table>
+
+<h3>Cost</h3>
+<table>
+  <tr><th>Concern</th><th>Decision</th></tr>
+  <tr><td>Compute</td><td>Single-machine batch; no GPU needed for LGBM</td></tr>
+  <tr><td>Storage</td><td>~260 rows predictions &mdash; negligible</td></tr>
+  <tr><td>API</td><td>Stateless cache reads; minimal compute per request</td></tr>
+</table>
+
+<!-- ================================================================ -->
+<h2 id="step3">Step 3: Data Contract</h2>
+
+<h3>System Output (what the driver sees)</h3>
+<pre><code>{
+  "generated_at": "2021-01-15T14:00:00Z",
+  "predictions": [
+    { "pulocationid": 161, "zone_name": "Midtown Center", "predicted_t30": 342, "predicted_t60": 287 },
+    { "pulocationid": 237, "zone_name": "Upper East Side", "predicted_t30": 215, "predicted_t60": 198 }
+  ]
+}</code></pre>
+
+<h3>Model Input (feature row per zone)</h3>
+<table>
+  <tr><th>Feature Group</th><th>Columns</th><th>Source</th></tr>
+  <tr><td>Lag features</td><td><code>trip_count_lag_1, lag_3, lag_6, lag_12, lag_24, lag_168</code></td><td>Hourly trip count aggregation</td></tr>
+  <tr><td>Time features</td><td><code>hour_of_day_sin/cos, day_of_week_sin/cos, month_sin/cos</code></td><td>Current timestamp</td></tr>
+  <tr><td>Zone features</td><td><code>pickup_longitude, pickup_latitude</code></td><td>Zone shapefile centroids</td></tr>
+</table>
+
+<h3>Raw Data Source</h3>
+<p>Trip records: <code>(pickup_zone, pickup_time, dropoff_time, ...)</code> from NYC TLC / Socrata API.</p>
+
+<!-- ================================================================ -->
+<h2 id="step4">Step 4: Data Flow (Trace Backwards)</h2>
+
+<pre><code>Driver sees heatmap
+  &larr; GET /heatmap returns JSON
+    &larr; API reads from predictions store
+      &larr; Predictor generates predictions per zone (t+30, t+60)
+        &larr; Feature builder computes feature row per zone
+          &larr; Aggregator counts trips per zone per hour
+            &larr; Trip records in database
+              &larr; Trip events from real world</code></pre>
+
+<p>Each arrow is a component:</p>
+<pre><code>Trip source &rarr; Ingestion &rarr; Trip DB &rarr; Feature Query &rarr; Predictor &rarr; Predictions Store &rarr; API &rarr; Driver</code></pre>
+
+<!-- ================================================================ -->
+<h2 id="step5">Step 5: Separate the Loops</h2>
+
+<p>Not everything runs at the same frequency. Group by cadence:</p>
+
+<table>
+  <tr><th>Frequency</th><th>What Runs</th><th>Why</th></tr>
+  <tr>
+    <td><span class="badge badge-green">Continuous</span></td>
+    <td>Trip data ingestion into DB</td>
+    <td>Events arrive as trips complete</td>
+  </tr>
+  <tr>
+    <td><span class="badge badge-blue">Every 15 min</span></td>
+    <td>Feature query + inference + update predictions store</td>
+    <td>Heatmap freshness target</td>
+  </tr>
+  <tr>
+    <td><span class="badge badge-yellow">Days / weeks</span></td>
+    <td>Model retraining (full pipeline)</td>
+    <td>Model drift is slow; seasonal patterns</td>
+  </tr>
+  <tr>
+    <td><span class="badge badge-purple">On request</span></td>
+    <td>API serves latest predictions</td>
+    <td>Driver opens app</td>
+  </tr>
+</table>
+
+<div class="card">
+  <div class="card-title">Key insight: decouple the loops</div>
+  <p>Each loop runs independently at its own cadence. The inference loop doesn't need streaming &mdash; prediction is batch by nature because the model needs aggregates over <em>completed</em> time windows (e.g., trip count in the last hour). You can't compute <code>trip_count_lag_1</code> until that hour is over.</p>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="step6">Step 6: Component Design</h2>
+
+<div class="step">
+  <div class="step-header"><span class="step-num">A</span> Ingestion</div>
+  <table>
+    <tr><th>Question</th><th>Answer</th></tr>
+    <tr><td>What arrives?</td><td>Trip record: <code>(zone_id, pickup_time, dropoff_time, ...)</code></td></tr>
+    <tr><td>How fast?</td><td>Near-real-time (seconds to minutes after trip completes)</td></tr>
+    <tr><td>Where does it land?</td><td>Append-only trip table in DB</td></tr>
+    <tr><td>MVP simplification</td><td>Skip streaming; load historical data in bulk via Socrata API</td></tr>
+  </table>
+</div>
+
+<div class="step">
+  <div class="step-header"><span class="step-num">B</span> Feature Computation</div>
+  <p>The model needs <code>trip_count_lag_1</code> = "how many trips in zone X in the hour ending 1 hour ago." This is a SQL aggregation:</p>
+<pre><code>SELECT pulocationid,
+       COUNT(*) as trip_count,
+       date_trunc('hour', pickup_time) as hour
+FROM trips
+WHERE pickup_time BETWEEN (now - 168h) AND now
+GROUP BY pulocationid, hour</code></pre>
+  <p>Then compute lag features, cyclical time features, and join zone coordinates. Output: <strong>one feature row per zone (~260 rows)</strong>.</p>
+  <table>
+    <tr><th>Question</th><th>Answer</th></tr>
+    <tr><td>How expensive?</td><td>Cheap &mdash; one SQL query + pandas transform</td></tr>
+    <tr><td>MVP simplification</td><td>Read from Gold parquet instead of DB</td></tr>
+  </table>
+</div>
+
+<div class="step">
+  <div class="step-header"><span class="step-num">C</span> Predictor</div>
+<pre><code>For each zone:
+  features = [lag_1h, lag_3h, ..., hour_sin, hour_cos, ..., lat, lon]
+  predicted_t30 = model_t30.predict(features)
+  predicted_t60 = model_t60.predict(features)</code></pre>
+  <table>
+    <tr><th>Question</th><th>Answer</th></tr>
+    <tr><td>How many models?</td><td>2 (one per horizon) or 1 multi-output model</td></tr>
+    <tr><td>Latency?</td><td>LGBMRegressor predicts 260 rows in &lt;10ms</td></tr>
+    <tr><td>Output?</td><td>DataFrame: <code>(zone_id, predicted_t30, predicted_t60)</code></td></tr>
+  </table>
+</div>
+
+<div class="step">
+  <div class="step-header"><span class="step-num">D</span> Predictions Store</div>
+  <table>
+    <tr><th>Question</th><th>Answer</th></tr>
+    <tr><td>Write frequency</td><td>Once every 15 min</td></tr>
+    <tr><td>Read frequency</td><td>Every driver request (potentially thousands/sec)</td></tr>
+    <tr><td>Size</td><td>~260 rows &times; 4 columns &mdash; tiny</td></tr>
+    <tr><td>Choice</td><td>Redis / in-memory cache for production; parquet file for MVP</td></tr>
+  </table>
+</div>
+
+<div class="step">
+  <div class="step-header"><span class="step-num">E</span> API</div>
+  <pre><code>GET /heatmap &rarr; read predictions store &rarr; return JSON</code></pre>
+  <table>
+    <tr><th>Question</th><th>Answer</th></tr>
+    <tr><td>Computation per request</td><td>Zero &mdash; just read cached predictions</td></tr>
+    <tr><td>Personalization</td><td>None (MVP). Same heatmap for all drivers</td></tr>
+    <tr><td>Scalability</td><td>Trivial &mdash; cache read. Horizontal scale with replicas.</td></tr>
+  </table>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="step7">Step 7: Architecture Diagram</h2>
+
+<h3>MVP Architecture</h3>
+<pre><code>
+ TRAINING PIPELINE (offline, run once)
+
+  Socrata ──&gt; Bronze ──&gt; Silver ──&gt; Gold ──&gt; Trainer ──&gt; model.pkl
+    API       (raw)     (cleaned)  (features)  (LGBM)     + MLflow
+
+
+ INFERENCE PIPELINE (batch, run once)
+
+  Gold ──&gt; Predictor (model.pkl) ──&gt; Predictions (.parquet)
+
+
+ SERVING (online)
+
+  Driver ──&gt; GET /heatmap ──&gt; FastAPI (reads parquet) ──&gt; JSON response
+</code></pre>
+
+<h3>Production Architecture</h3>
+<pre><code>
+ INGESTION (continuous)
+
+  Trip events ──&gt; Message queue (Kafka) ──&gt; Trip DB (append-only)
+
+
+ INFERENCE (cron, every 15 min)
+
+  Trip DB ──&gt; SQL aggregation ──&gt; Feature rows (&times;260 zones)
+                                      |
+                            +---------+---------+
+                            v                   v
+                      model_t30.predict   model_t60.predict
+                            |                   |
+                            +---------+---------+
+                                      v
+                              Predictions store
+
+
+ SERVING (on request)
+
+  Driver ──&gt; GET /heatmap ──&gt; Cache layer ──&gt; JSON { zone, t30, t60 }
+
+
+ MODEL RETRAINING (separate loop, days/weeks)
+
+  Historical data ──&gt; full pipeline ──&gt; new model.pkl
+</code></pre>
+
+<!-- ================================================================ -->
+<h2 id="step8">Step 8: How NFRs Drive Architecture</h2>
+
+<table>
+  <tr><th>NFR</th><th>Architectural Consequence</th></tr>
+  <tr><td>Latency &lt; 200ms</td><td>Pre-compute predictions, serve from cache (not compute on request)</td></tr>
+  <tr><td>Freshness = 15 min</td><td>Cron-based batch inference (not streaming)</td></tr>
+  <tr><td>Read-heavy traffic</td><td>Cache layer between predictions store and API</td></tr>
+  <tr><td>Eventual consistency</td><td>No distributed transactions needed; simple file/cache swap</td></tr>
+  <tr><td>Cost-sensitive</td><td>Single machine, LGBM (no GPU), parquet files (no managed DB for MVP)</td></tr>
+</table>
+
+<div class="card">
+  <div class="card-title">Every component is a consequence of these requirements</div>
+  <p>The architecture isn't arbitrary. Each decision traces back to a specific non-functional requirement. This is what makes a system design defensible in an interview or design review.</p>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="step9">Step 9: MVP vs Production Mapping</h2>
+
+<table>
+  <tr><th>Production Component</th><th>MVP Equivalent</th></tr>
+  <tr><td>Trip DB (streaming)</td><td>Socrata API &rarr; Bronze parquet (batch)</td></tr>
+  <tr><td>SQL aggregation</td><td>Bronze &rarr; Silver &rarr; Gold pipeline</td></tr>
+  <tr><td>model_t30 / model_t60</td><td>model.pkl (single horizon; multi-horizon in PBI 4)</td></tr>
+  <tr><td>Predictions store (Redis)</td><td>predictions.parquet</td></tr>
+  <tr><td>Cron every 15 min</td><td><code>python pipeline/05_inference.py</code> (manual run)</td></tr>
+  <tr><td>API + cache layer</td><td>FastAPI <code>GET /heatmap</code> reads parquet</td></tr>
+</table>
+
+<p>The architecture is the same &mdash; the MVP uses simpler implementations of each component.</p>
+
+<hr class="divider">
+
+<!-- ================================================================ -->
+<h2 id="data-source">Data Source Reality &amp; Simulation Strategy</h2>
+
+<h3>Real world vs MVP data source</h3>
+
+<div class="card">
+  <div class="card-title">Key distinction</div>
+  <p>The Socrata API is a <strong>historical data archive</strong>, not the actual production data source. In production, there is no API call &mdash; data arrives organically as drivers complete trips and submit trip records through the app.</p>
+</div>
+
+<table>
+  <tr><th></th><th>Production</th><th>Current MVP</th><th>Simulation (target)</th></tr>
+  <tr>
+    <td><strong>Data source</strong></td>
+    <td>Driver submits trip &rarr; event lands in DB</td>
+    <td>Socrata API bulk download &rarr; Bronze</td>
+    <td>Raw folder (historical trips partitioned by day)</td>
+  </tr>
+  <tr>
+    <td><strong>Arrival pattern</strong></td>
+    <td>Continuous, second-level granularity</td>
+    <td>Bulk (all months at once)</td>
+    <td>Day-by-day replay with time filter</td>
+  </tr>
+  <tr>
+    <td><strong>Pipeline trigger</strong></td>
+    <td>Cron every 15 min</td>
+    <td>Manual script run</td>
+    <td>Loop advancing simulated clock</td>
+  </tr>
+</table>
+
+<h3>Raw folder structure</h3>
+
+<p>Historical data is partitioned by month and day, mirroring how trip data naturally accumulates:</p>
+
+<pre><code>data/
+  raw/
+    yellow_tripdata/
+      2021_01/
+        2021_01_01.parquet
+        2021_01_02.parquet
+        ...
+        2021_01_31.parquet
+      2021_02/
+        2021_02_01.parquet
+        ...
+</code></pre>
+
+<p>This is the <strong>one-time seed</strong> step: download from Socrata, split into daily files, store in <code>raw/</code>. After this, the pipeline never touches the API again &mdash; it reads from <code>raw/</code> just like production would read from a database.</p>
+
+<h3>Why second-level arrival doesn't matter</h3>
+
+<div class="card">
+  <div class="card-title">The model operates on hourly aggregates, not individual events</div>
+  <p>In reality, trip records arrive at second-level granularity &mdash; hundreds of events per minute across NYC. But the model's finest-grained feature is <code>trip_count_lag_1</code>: the total number of pickups in a zone during the <em>previous completed hour</em>.</p>
+</div>
+
+<p>This means:</p>
+<ul>
+  <li>Whether 500 trips arrive one-by-one over an hour or all at once in a bulk load, the feature value is the same: <strong>500</strong>.</li>
+  <li>You can't compute <code>trip_count_lag_1</code> until that hour window is fully closed.</li>
+  <li>Simulating per-second arrival adds infrastructure complexity with <strong>zero impact</strong> on features or predictions.</li>
+</ul>
+
+<pre><code>14:00:00  Trip A arrives    ┐
+14:00:03  Trip B arrives    │
+14:00:15  Trip C arrives    │  All contribute to the
+  ...                       │  14:00-15:00 hour bucket
+14:59:58  Trip Z arrives    ┘
+
+15:00:00  Inference runs
+          → queries: "how many trips in 14:00-15:00?"
+          → answer: 500
+          → same answer regardless of arrival pattern</code></pre>
+
+<h3>What the simulation must get right</h3>
+
+<table>
+  <tr><th>Must simulate correctly</th><th>Why</th></tr>
+  <tr>
+    <td>Which trips exist at query time</td>
+    <td>Inference must only see trips that have "already happened" relative to simulated time</td>
+  </tr>
+  <tr>
+    <td>Hourly window boundaries</td>
+    <td>Features are hourly aggregates &mdash; the window must be complete before querying</td>
+  </tr>
+</table>
+
+<table>
+  <tr><th>Does NOT need to simulate</th><th>Why</th></tr>
+  <tr>
+    <td>Per-second arrival order</td>
+    <td>Model uses hourly aggregates; individual event timing is irrelevant</td>
+  </tr>
+  <tr>
+    <td>Message queue / streaming infra</td>
+    <td>A time filter on historical data produces identical features</td>
+  </tr>
+  <tr>
+    <td>Concurrent writes</td>
+    <td>We read from static parquet files, not a live DB</td>
+  </tr>
+</table>
+
+<h3>Simulation approach</h3>
+
+<pre><code>Simulated time = 2021-01-15 15:00
+
+1. Read raw files: raw/yellow_tripdata/2021_01/2021_01_01.parquet
+                   through 2021_01_15.parquet
+2. Filter: keep only rows where pickup_time &lt;= 2021-01-15 15:00
+3. Run: clean → feature engineering → inference
+4. Output: updated predictions store (heatmap for this moment in time)
+5. Advance clock → repeat
+
+A full month replays in minutes.
+Same code path as a production cron job.</code></pre>
+
+<div class="card">
+  <div class="card-title">What to say in a design doc or interview</div>
+  <p><em>"In production, trip events stream into a database continuously at second-level granularity. However, the model's features are hourly aggregates, so per-event processing adds no value &mdash; inference runs as a periodic batch job on completed hourly windows. For demonstration, we replay historical data with a simulated clock and a time filter, exercising the same inference code path as a production cron job."</em></p>
+</div>
+
+<hr class="divider">
+
+<!-- ================================================================ -->
+<h2 id="limitations">Known Limitations &amp; Future Considerations</h2>
+
+<div class="card">
+  <div class="card-title">Feedback loop</div>
+  <p>Driver recommendations influence future trip data. If many drivers go to Zone A based on the heatmap, that zone becomes saturated. Not addressed in MVP since the heatmap approach (Uber model) mitigates herding naturally &mdash; drivers interpret the map differently and make individual decisions.</p>
+</div>
+
+<div class="card">
+  <div class="card-title">Multi-driver coordination</div>
+  <p>MVP serves the same heatmap to all drivers. DiDi-style per-driver optimization (different recommendation per driver to prevent oversaturation) requires fleet state tracking and is deferred to post-MVP.</p>
+</div>
+
+<div class="card">
+  <div class="card-title">Batch vs streaming inference</div>
+  <p>Prediction is batch by nature &mdash; the model needs aggregates over completed time windows (hourly trip counts). Data ingestion can be streaming into a DB, but inference runs as a periodic batch job. These two loops are decoupled. For demo, historical replay with a simulated clock exercises the same code path as a production cron job.</p>
+</div>
+
+<div class="card">
+  <div class="card-title">A/B testing</div>
+  <p>No framework for measuring if recommendations actually improve driver outcomes. A design doc for A/B test methodology is recommended before scaling to real users.</p>
+</div>
+
+<hr class="divider">
+
+<h2>System Design Thinking Sequence</h2>
+
+<div class="step"><div class="step-header"><span class="step-num">1</span> Functional requirements &mdash; What must the system do?</div></div>
+<div class="step"><div class="step-header"><span class="step-num">2</span> Non-functional requirements &mdash; How well must it perform?</div></div>
+<div class="step"><div class="step-header"><span class="step-num">3</span> Data contract &mdash; What goes in, what comes out?</div></div>
+<div class="step"><div class="step-header"><span class="step-num">4</span> Trace backwards &mdash; From user screen to raw data source</div></div>
+<div class="step"><div class="step-header"><span class="step-num">5</span> Separate loops &mdash; Group by frequency (continuous / periodic / on-request)</div></div>
+<div class="step"><div class="step-header"><span class="step-num">6</span> Component design &mdash; What, how fast, how big, MVP shortcut?</div></div>
+<div class="step"><div class="step-header"><span class="step-num">7</span> Architecture diagram &mdash; Summarize all decisions visually</div></div>
+<div class="step"><div class="step-header"><span class="step-num">8</span> NFR &rarr; architecture mapping &mdash; Justify every decision</div></div>
+<div class="step"><div class="step-header"><span class="step-num">9</span> MVP vs production &mdash; Same architecture, simpler implementations</div></div>
+
+</body>
+</html>

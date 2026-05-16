@@ -2,16 +2,18 @@
 
 ## System Design
 
+### MVP Architecture
+
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                        TRAINING PIPELINE (offline)                  │
+│                    TRAINING PIPELINE (offline, run once)             │
 │                                                                     │
 │  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────────┐  │
 │  │ Socrata  │───>│  Bronze  │───>│  Silver  │───>│    Gold      │  │
 │  │   API    │    │ (raw     │    │ (cleaned │    │ (features +  │  │
 │  │          │    │  parquet) │    │  data)   │    │  target)     │  │
 │  └──────────┘    └──────────┘    └──────────┘    └──────┬───────┘  │
-│   ingest.py        clean.py      feature_eng.py         │          │
+│   01_ingest.py    02_clean.py    03_feature.py          │          │
 │                                                         v          │
 │                                                  ┌──────────────┐  │
 │                                                  │   Trainer    │  │
@@ -25,11 +27,11 @@
 │                                   └─────┬─────┘  │  (metrics │  │ │
 │                                         │        │   + model) │  │ │
 │                                         │        └───────────┘  │ │
-│                                         │                       │ │
+│                                  04_train.py                    │ │
 └─────────────────────────────────────────┼───────────────────────┘ │
                                           │                         │
 ┌─────────────────────────────────────────┼─────────────────────────┘
-│                     INFERENCE PIPELINE (batch)                     │
+│                 INFERENCE PIPELINE (batch, run once)                │
 │                                          │                         │
 │  ┌──────────┐                    ┌───────v──────┐                  │
 │  │   Gold   │───────────────────>│  Predictor   │                  │
@@ -41,7 +43,7 @@
 │                                  │ Predictions  │                  │
 │                                  │  (.parquet)  │                  │
 │                                  └───────┬──────┘                  │
-│                                          │                         │
+│                                   05_inference.py                  │
 └──────────────────────────────────────────┼─────────────────────────┘
                                            │
 ┌──────────────────────────────────────────┼─────────────────────────┐
@@ -59,6 +61,71 @@
 │                                                                    │
 └────────────────────────────────────────────────────────────────────┘
 ```
+
+### Production Architecture (what changes at scale)
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│              DATA INGESTION (continuous, streaming)                   │
+│                                                                      │
+│  ┌──────────┐    ┌──────────────┐    ┌───────────────────────────┐   │
+│  │ Trip     │───>│  Message     │───>│  Database                 │   │
+│  │ events   │    │  queue       │    │  (append-only trip store) │   │
+│  │ (real-   │    │  (Kafka/     │    │                           │   │
+│  │  time)   │    │   Redis)     │    │                           │   │
+│  └──────────┘    └──────────────┘    └─────────────┬─────────────┘   │
+│                                                    │                 │
+└────────────────────────────────────────────────────┼─────────────────┘
+                                                     │
+┌────────────────────────────────────────────────────┼─────────────────┐
+│              INFERENCE (batch, every 15 min via cron)                 │
+│                                                    │                 │
+│  ┌─────────────────────┐                   ┌───────v──────┐          │
+│  │ Query latest hourly │──────────────────>│  Predictor   │          │
+│  │ counts per zone     │  feature vector   │  (model.pkl) │          │
+│  │ (SQL aggregation)   │  per zone         │              │          │
+│  └─────────────────────┘                   └───────┬──────┘          │
+│                                                    │                 │
+│  No Bronze→Silver→Gold pipeline needed.            v                 │
+│  Just query DB for aggregated counts       ┌──────────────┐          │
+│  (lag_1h, lag_3h, ...) and time features.  │ Predictions  │          │
+│                                            │   store      │          │
+│                                            └───────┬──────┘          │
+│                                                    │                 │
+└────────────────────────────────────────────────────┼─────────────────┘
+                                                     │
+┌────────────────────────────────────────────────────┼─────────────────┐
+│              SERVING (online, reads latest predictions)               │
+│                                                    v                 │
+│  ┌────────┐    GET /heatmap       ┌──────────────────┐               │
+│  │ Driver │ ────────────────────> │    FastAPI        │               │
+│  │  App   │ <──────────────────── │ (cache layer +   │               │
+│  │        │    JSON response      │  predictions     │               │
+│  └────────┘                       │  store)          │               │
+│                                   └──────────────────┘               │
+│                                                                      │
+│  Heatmap refreshes every 15 min.                                     │
+│  Same heatmap served to all drivers (Uber model).                    │
+│  Personalized ranking (DiDi model) would add POST /recommend.        │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+
+MODEL RETRAINING (separate loop, days/weeks)
+  New historical data ──> full Bronze→Silver→Gold pipeline
+  ──> retrain model ──> new model.pkl ──> Predictor picks up on next run
+```
+
+### Key Design Decisions
+
+| Decision | MVP | Production |
+|----------|-----|------------|
+| Data ingestion | Batch file download from Socrata | Streaming events into DB |
+| Feature computation | Full Bronze→Silver→Gold pipeline | SQL query for latest aggregates |
+| Inference trigger | Manual (run script) | Cron every 15 min |
+| Inference scope | All Gold data (historical) | All zones, latest features only |
+| Heatmap freshness | Static (one-time run) | Refreshes every 15 min |
+| Model retraining | Manual | Scheduled (days/weeks) |
+| Personalization | None (shared heatmap) | Post-MVP: per-driver ranking |
 
 ---
 
