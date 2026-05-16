@@ -2,12 +2,33 @@ env: local  # local | cloud
 
 ingest:
   start_year_month: "2021-01"
-  end_year_month: "2021-02"
+  end_year_month: "2021-03"
+  bronze_schema:
+    VendorID: float64
+    tpep_pickup_datetime: datetime64[us]
+    tpep_dropoff_datetime: datetime64[us]
+    passenger_count: float64
+    trip_distance: float64
+    RatecodeID: float64
+    store_and_fwd_flag: str
+    PULocationID: float64
+    DOLocationID: float64
+    payment_type: float64
+    fare_amount: float64
+    extra: float64
+    mta_tax: float64
+    tip_amount: float64
+    tolls_amount: float64
+    improvement_surcharge: float64
+    total_amount: float64
+    congestion_surcharge: float64
+    airport_fee: float64
 
 data:
+  raw_path: data/raw/yellow_tripdata
   train_path: data/train.parquet
   test_path: data/test.parquet
-  bronze_path: data/bronze/yellow_tripdata
+  bronze_path: data/bronze/yellow_tripdata/bronze.parquet
   silver_path: data/silver/yellow_tripdata_cleaned.parquet
   gold_path: data/gold/yellow_tripdata
 
@@ -17,6 +38,14 @@ feature:
 
 clean:
   null_strategy: drop  # drop | ffill | bfill
+  null_subset:         # columns to check for nulls (empty = all columns)
+    - tpep_pickup_datetime
+    - tpep_dropoff_datetime
+    - passenger_count
+    - trip_distance
+    - fare_amount
+    - PULocationID
+    - DOLocationID
 
 train:
   split_ratios: [0.8, 0.1, 0.1]  # train / val / test
@@ -50,6 +79,9 @@ model:
 
 inference:
   output_path: data/predictions/demand_predictions.parquet
+  simulation:
+    start_hour: "2021-03-01 00:00:00"
+    end_hour: "2021-03-02 23:00:00"
 
 mlflow:
   experiment_name: ny_taxi_demand_model

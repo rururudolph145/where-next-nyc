@@ -232,6 +232,9 @@ class FeatureEngineer:
         if data is None:
             data = pd.read_parquet(self.silver_path)
 
+        # Normalise column names to lowercase for consistent downstream use
+        data.columns = pd.Index([c.lower() for c in data.columns])
+
         panel = self.build_hourly_demand(data)
         panel = self.add_time_features(panel)
         panel = self.add_cyclical_features(panel)

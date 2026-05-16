@@ -1,5 +1,6 @@
 """Data cleaning and Bronze-to-Silver promotion for NYC taxi trip data."""
 
+import json
 import os
 from typing import Any
 
@@ -39,29 +40,17 @@ class DataCleaner:
         raise NotImplementedError(f"env='{self.env}' is not supported yet.")
 
     def save_silver(self, data: pd.DataFrame) -> None:
-        """Upsert cleaned data into the Silver layer.
-
-        If the silver file already exists, the new data is appended and
-        duplicates are dropped so the file always contains a single
-        deduplicated copy of all ingested records.
+        """Write cleaned data to the Silver layer (overwrite).
 
         Args:
-            data: Cleaned DataFrame to upsert.
+            data: Cleaned DataFrame to persist.
 
         Raises:
             NotImplementedError: If env is not 'local'.
         """
         if self.env == "local":
             os.makedirs(os.path.dirname(self.silver_path), exist_ok=True)
-
-            if os.path.exists(self.silver_path):
-                existing = pd.read_parquet(self.silver_path)
-                data = pd.concat([existing, data], ignore_index=True)
-                data = data.drop_duplicates()
-
-            data = data.sort_values("tpep_pickup_datetime").reset_index(
-                drop=True
-            )
+            data = data.sort_values("tpep_pickup_datetime").reset_index(drop=True)
             data.to_parquet(self.silver_path, index=False)
             print(f"Saved → {self.silver_path}  ({len(data):,} rows)")
             return
@@ -74,6 +63,9 @@ class DataCleaner:
     def handle_nulls(self, data: pd.DataFrame) -> pd.DataFrame:
         """Apply the configured null-value strategy to the DataFrame.
 
+        When ``config.clean.null_subset`` is provided, only those columns
+        are considered for the null check (relevant for ``drop`` strategy).
+
         Args:
             data: Input DataFrame that may contain null values.
 
@@ -84,52 +76,64 @@ class DataCleaner:
             ValueError: If null_strategy is not one of drop, ffill, bfill.
         """
         strategy = self.null_strategy
+        subset: list[str] | None = self.config["clean"].get("null_subset")
+        if subset:
+            # Only keep subset columns that actually exist in the data
+            subset = [c for c in subset if c in data.columns]
         if strategy == "drop":
-            return data.dropna()
+            return data.dropna(subset=subset or None)
         if strategy == "ffill":
             return data.ffill()
         if strategy == "bfill":
             return data.bfill()
         raise ValueError(
-            f"Unknown null_strategy '{strategy}'. "
-            "Choose from: drop, ffill, bfill."
+            f"Unknown null_strategy '{strategy}'. Choose from: drop, ffill, bfill."
         )
 
     # ------------------------------------------------------------------
     # Cleaning logic
     # ------------------------------------------------------------------
 
-    def clean(self, data: pd.DataFrame) -> pd.DataFrame:
+    def clean(
+        self,
+        data: pd.DataFrame,
+        iqr_bounds: dict[str, float] | None = None,
+    ) -> tuple[pd.DataFrame, dict[str, float]]:
         """Apply all cleaning and feature-engineering steps.
 
         Args:
             data: Raw DataFrame from the Bronze layer.
+            iqr_bounds: Pre-computed IQR bounds to reuse (transform mode).
+                If None, bounds are computed from the data (fit mode).
 
         Returns:
-            Cleaned and feature-enriched DataFrame ready for the Silver layer.
+            Tuple of (cleaned DataFrame, IQR bounds dict with keys
+            q1, q3, iqr).
         """
         data = data.copy()
 
         # Parse datetimes
-        data["tpep_pickup_datetime"] = pd.to_datetime(
-            data["tpep_pickup_datetime"]
-        )
-        data["tpep_dropoff_datetime"] = pd.to_datetime(
-            data["tpep_dropoff_datetime"]
-        )
+        data["tpep_pickup_datetime"] = pd.to_datetime(data["tpep_pickup_datetime"])
+        data["tpep_dropoff_datetime"] = pd.to_datetime(data["tpep_dropoff_datetime"])
 
         # Handle nulls with configured strategy
         data = self.handle_nulls(data)
 
         # Remove trips with non-positive passenger count or trip distance
-        data = data[
-            (data["passenger_count"] > 0) & (data["trip_distance"] > 0)
-        ]
+        data = data[(data["passenger_count"] > 0) & (data["trip_distance"] > 0)]
 
         # Remove fare outliers using IQR
-        q1 = data["fare_amount"].quantile(0.25)
-        q3 = data["fare_amount"].quantile(0.75)
-        iqr = q3 - q1
+        if iqr_bounds is None:
+            q1 = float(data["fare_amount"].quantile(0.25))
+            q3 = float(data["fare_amount"].quantile(0.75))
+            iqr = q3 - q1
+            bounds: dict[str, float] = {"q1": q1, "q3": q3, "iqr": iqr}
+        else:
+            bounds = iqr_bounds
+            q1 = bounds["q1"]
+            q3 = bounds["q3"]
+            iqr = bounds["iqr"]
+
         data = data[
             (data["fare_amount"] >= q1 - 1.5 * iqr)
             & (data["fare_amount"] <= q3 + 1.5 * iqr)
@@ -141,7 +145,7 @@ class DataCleaner:
         data["month"] = data["tpep_pickup_datetime"].dt.month
         data["is_weekend"] = (data["day_of_week"] >= 5).astype(int)
 
-        return data
+        return data, bounds
 
     # ------------------------------------------------------------------
     # Orchestration
@@ -150,6 +154,11 @@ class DataCleaner:
     def run(self) -> pd.DataFrame:
         """Execute the full Bronze -> Silver cleaning pipeline.
 
+        Splits bronze data by the inference simulation start hour so that
+        IQR fare thresholds are fit only on the training period, then
+        applied (transformed) to the inference period. This prevents
+        data leakage from future data into the cleaning step.
+
         Returns:
             Cleaned DataFrame that has been saved to the Silver layer.
         """
@@ -157,8 +166,39 @@ class DataCleaner:
         raw = self.load_bronze()
         print(f"  Raw rows: {len(raw):,}")
 
-        cleaned = self.clean(raw)
-        print(f"  Cleaned rows: {len(cleaned):,}")
+        # Parse pickup datetimes for splitting
+        raw["tpep_pickup_datetime"] = pd.to_datetime(raw["tpep_pickup_datetime"])
+
+        # Split by inference cutoff
+        cutoff = pd.Timestamp(self.config["inference"]["simulation"]["start_hour"])
+        train_raw = raw[raw["tpep_pickup_datetime"] < cutoff]
+        inference_raw = raw[raw["tpep_pickup_datetime"] >= cutoff]
+
+        print(f"  Training rows (before {cutoff}): {len(train_raw):,}")
+        print(f"  Inference rows (from {cutoff}): {len(inference_raw):,}")
+
+        # Fit IQR on training data
+        train_cleaned, bounds = self.clean(train_raw)
+        print(f"  Cleaned training rows: {len(train_cleaned):,}")
+        print(f"  IQR bounds: {bounds}")
+
+        # Transform inference data with training bounds
+        if len(inference_raw) > 0:
+            inference_cleaned, _ = self.clean(inference_raw, iqr_bounds=bounds)
+            print(f"  Cleaned inference rows: {len(inference_cleaned):,}")
+            cleaned = pd.concat([train_cleaned, inference_cleaned], ignore_index=True)
+        else:
+            cleaned = train_cleaned
+
+        print(f"  Total cleaned rows: {len(cleaned):,}")
+
+        # Persist IQR bounds for reproducibility
+        store_path: str = self.config["model"]["store_path"]
+        os.makedirs(store_path, exist_ok=True)
+        bounds_path = os.path.join(store_path, "iqr_bounds.json")
+        with open(bounds_path, "w") as f:
+            json.dump(bounds, f, indent=2)
+        print(f"  Saved IQR bounds → {bounds_path}")
 
         self.save_silver(cleaned)
         return cleaned
