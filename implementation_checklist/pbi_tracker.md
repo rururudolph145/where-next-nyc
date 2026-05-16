@@ -31,7 +31,7 @@ Supports **Step 2 (Check Demand)** — get the core ML pipeline working first.
 
 Supports **Step 1 (Start Shift) → Step 2 (Check Demand)** in the driver journey.
 
-- [ ] **PBI 3 — Heatmap API**
+- [x] **PBI 3 — Heatmap API**
   - Build `GET /heatmap` endpoint that reads the predictions table and returns all zone predictions
   - Input: none (reads latest predictions parquet)
   - Output: JSON with `generated_at` + list of `{ pulocationid, zone_name, predicted_trip_count }`

@@ -83,6 +83,10 @@ inference:
     start_hour: "2021-03-01 00:00:00"
     end_hour: "2021-03-02 23:00:00"
 
+serving:
+  predictions_path: data/predictions/demand_predictions.parquet
+  zone_shapefile_path: data/reference/taxi_zones.shp
+
 mlflow:
   experiment_name: ny_taxi_demand_model
   tracking_uri: mlruns
