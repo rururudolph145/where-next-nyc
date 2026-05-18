@@ -1,0 +1,115 @@
+{
+  "model": "claude-opus-4-7",
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Bash(python3:*)",
+      "Bash(python:*)",
+      "Bash(.venv/bin/python:*)",
+      "Bash(uv run:*)",
+      "Bash(uv sync:*)",
+      "Bash(uv add:*)",
+      "Bash(uv pip:*)",
+      "Bash(pip install:*)",
+      "Bash(ruff check:*)",
+      "Bash(ruff format:*)",
+      "Bash(npm:*)",
+      "Bash(npx:*)",
+      "Bash(node:*)",
+      "Bash(openssl x509:*)",
+      "Bash(kubectl:*)",
+      "Bash(docker:*)",
+      "Bash(lscpu:*)",
+      "Bash(lsof:*)",
+      "Bash(wc:*)",
+      "Bash(ls:*)",
+      "Bash(tree:*)",
+      "Bash(mv:*)",
+      "Bash(cp:*)",
+      "Bash(mkdir:*)",
+      "Bash(touch:*)",
+      "Bash(diff:*)",
+      "Bash(which:*)",
+      "Bash(env:*)",
+      "Bash(printenv:*)",
+      "Write(*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git pull:*)",
+      "Bash(git branch:*)",
+      "Bash(git checkout:*)",
+      "Bash(git switch:*)",
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(git fetch:*)",
+      "Bash(git stash:*)",
+      "Bash(git tag:*)",
+      "Bash(git remote:*)",
+      "Bash(git show:*)",
+      "Bash(gh pr:*)",
+      "Bash(gh issue:*)",
+      "Bash(gh api:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:npmjs.org)",
+      "WebFetch(domain:pypi.org)",
+      "WebFetch(domain:docs.python.org)",
+      "WebFetch(domain:fastapi.tiangolo.com)"
+    ],
+    "deny": [
+      "Bash(sudo:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git push --force:*)",
+      "Bash(rm -rf /:*)",
+      "Bash(pkill:*)",
+      "Bash(kill -9:*)",
+      "Bash(killall:*)",
+      "Read(id_rsa)",
+      "Read(id_ed25519)",
+      "Read(**/.env*)",
+      "Read(**/*secret*)",
+      "Read(**/*credential*)",
+      "Write(**/.env*)",
+      "Write(**/*secret*)",
+      "Write(**/*credential*)"
+    ],
+    "ask": [
+      "Bash(rm:*)",
+      "Bash(chmod:*)",
+      "Bash(curl:*)",
+      "Bash(wget:*)",
+      "Bash(git merge:*)",
+      "Bash(git push:*)",
+      "Bash(git rebase:*)",
+      "Bash(git reset:*)",
+      "Bash(docker rm:*)",
+      "Bash(docker rmi:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) && [ \"$(git -C \"$GIT_ROOT\" branch --show-current 2>/dev/null)\" != \"main\" ] || echo 'WARNING: Editing on main branch. Consider creating a feature branch.' >&2",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "case \"$CLAUDE_FILE_PATH\" in *.py) GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) && cd \"$GIT_ROOT\" && ruff check --fix --quiet \"$CLAUDE_FILE_PATH\" 2>/dev/null || true ;; esac",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
