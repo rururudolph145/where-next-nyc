@@ -266,7 +266,7 @@ class TestRunLogsToMlflow:
         trainer.store_path = str(tmp_path / "models")
         trainer.tracking_uri = str(tmp_path / "mlruns")
 
-        with patch("src.training.train.mlflow") as mock_mlflow:
+        with patch("app.training.trainer.mlflow") as mock_mlflow:
             mock_run = mock_mlflow.start_run.return_value.__enter__.return_value
             trainer.run(data=gold_df)
 
