@@ -1,20 +1,11 @@
-"""Centralized configuration loading for the NYC Taxi Demand Forecasting project."""
+"""Backwards-compatibility shim — re-exports ``load_config`` from its new home.
 
-from typing import Any
+The implementation now lives in :mod:`app.core.config`. This module exists
+only so legacy imports (``from src.shared.config import load_config``)
+keep working during the ``src/`` → ``app/`` migration. It will be removed
+once all callers have been updated.
+"""
 
-import yaml
+from app.core.config import load_config
 
-
-def load_config(path: str = "config.yml") -> dict[str, Any]:
-    """Load and return the YAML configuration file.
-
-    Args:
-        path: Path to the YAML configuration file. Defaults to
-            ``"config.yml"`` relative to the current working directory.
-
-    Returns:
-        Parsed configuration as a nested dictionary.
-    """
-    with open(path) as f:
-        config: dict[str, Any] = yaml.safe_load(f)
-    return config
+__all__ = ["load_config"]
