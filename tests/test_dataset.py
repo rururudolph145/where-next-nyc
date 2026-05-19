@@ -1,7 +1,7 @@
 import pytest
 import pandas as pd
 from unittest.mock import patch, mock_open
-from src.ingestion.ingest import Ingestion
+from app.ingestion.ingest import Ingestion
 
 
 @pytest.fixture

@@ -43,7 +43,7 @@ def client(
     sample_predictions: pd.DataFrame, zone_lookup: dict[int, str]
 ) -> TestClient:
     """Create a test client with mocked predictions and zone lookup."""
-    import src.serving.app as serving_module
+    import app.api.main as serving_module
 
     serving_module._predictions_df = sample_predictions
     serving_module._zone_lookup = zone_lookup
@@ -136,7 +136,7 @@ class TestHeatmapNoData:
 
     def test_heatmap_returns_503_when_no_predictions(self) -> None:
         """GET /heatmap returns 503 if predictions are not loaded."""
-        import src.serving.app as serving_module
+        import app.api.main as serving_module
 
         serving_module._predictions_df = None
         serving_module._zone_lookup = {}

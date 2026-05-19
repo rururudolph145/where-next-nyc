@@ -1,4 +1,4 @@
-"""Tests for the inference module (src/inference/predictor.py)."""
+"""Tests for the inference module (app/inference/predictor.py)."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.inference.predictor import Predictor
-from src.training.train import Trainer
+from app.inference.predictor import Predictor
+from app.training.trainer import Trainer
 
 
 # -- Shared config and data fixtures ----------------------------------------

@@ -1,6 +1,6 @@
 import pytest
 import pandas as pd
-from src.ingestion.clean import DataCleaner
+from app.ingestion.clean import DataCleaner
 
 
 @pytest.fixture

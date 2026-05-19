@@ -1,4 +1,4 @@
-"""Tests for the training module (src/training/train.py)."""
+"""Tests for the training module (app/training/trainer.py)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.training.train import Trainer
+from app.training.trainer import Trainer
 
 
 # -- Shared config and data fixtures ----------------------------------------

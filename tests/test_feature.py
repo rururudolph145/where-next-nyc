@@ -1,4 +1,4 @@
-"""Tests for the feature engineering module (src/ingestion/feature.py)."""
+"""Tests for the feature engineering module (app/ingestion/feature.py)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.ingestion.feature import FeatureEngineer
+from app.ingestion.feature import FeatureEngineer
 
 # -- Shared config fixture used across tests --------------------------------
 
