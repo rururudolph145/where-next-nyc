@@ -46,7 +46,7 @@ Forecast NYC taxi demand at the **(pickup zone, hour)** grain for short-horizon 
               ▼                                        ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        Ingestion Pipeline                           │
-│   src/ingestion/ingest.py          src/ingestion/clean.py           │
+│   app/ingestion/ingest.py          app/ingestion/clean.py           │
 │   (Socrata → Bronze parquet)  ───► (Bronze → Silver parquet)        │
 └──────────────────────────┬──────────────────────────────────────────┘
                            ▼
@@ -60,7 +60,7 @@ Forecast NYC taxi demand at the **(pickup zone, hour)** grain for short-horizon 
                            ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        Training Pipeline                            │
-│   src/training/trainer.py                                           │
+│   app/training/trainer.py                                           │
 │   (Gold features → time-split → LGBMRegressor → models/model.pkl)   │
 │                       │                                             │
 │                       └──► MLflow (mlruns/, model name:             │
@@ -69,9 +69,9 @@ Forecast NYC taxi demand at the **(pickup zone, hour)** grain for short-horizon 
                            ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                Inference & Serving                                  │
-│   src/inference/predictor.py   ◄── batch eval (MAE / RMSE / R²)     │
-│   src/serving/app.py            ── FastAPI POST /predict            │
-│   app.py (re-export entrypoint)                                     │
+│   app/inference/predictor.py   ◄── batch eval (MAE / RMSE / R²)     │
+│   app/api/main.py               ── FastAPI GET /heatmap             │
+│   (uvicorn app.api.main:app)                                        │
 └──────────────────────────┬──────────────────────────────────────────┘
                            ▼
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -85,15 +85,15 @@ Forecast NYC taxi demand at the **(pickup zone, hour)** grain for short-horizon 
 ## 3. Component Responsibilities
 
 ### 3.1 Configuration
-- **`src/shared/config.py`** — single source of YAML config loading via `load_config()`.
+- **`app/core/config.py`** — single source of YAML config loading via `load_config()`.
 - **`config.yml`** — owns: data paths (bronze/silver/gold), train/test split, model hyperparameters, MLflow experiment name.
 
 ### 3.2 Ingestion (Bronze → Silver)
 | Module | Responsibility |
 |---|---|
-| `src/ingestion/ingest.py` | `Ingestion` class. Downloads raw trip data from the Socrata API into `data.bronze_path`. Month-by-month iteration. |
-| `src/ingestion/clean.py` | `DataCleaner` class. Drops nulls, removes non-positive trip values, clips fare outliers via IQR, engineers time features (`hour`, `day_of_week`, `month`, `is_weekend`). |
-| `main.py` | Orchestrates ingest → clean month-by-month. |
+| `app/ingestion/ingest.py` | `Ingestion` class. Downloads raw trip data from the Socrata API into `data.bronze_path`. Month-by-month iteration. |
+| `app/ingestion/clean.py` | `DataCleaner` class. Drops nulls, removes non-positive trip values, clips fare outliers via IQR, engineers time features (`hour`, `day_of_week`, `month`, `is_weekend`). |
+| `pipeline/run_all.py` | Orchestrates ingest → clean → feature → train → infer month-by-month. |
 
 ### 3.3 Feature Engineering (Silver → Gold)
 - Aggregates Silver trip records to **(pickup_zone, datetime_hour)** grain.
@@ -101,7 +101,7 @@ Forecast NYC taxi demand at the **(pickup zone, hour)** grain for short-horizon 
 - Output: `data/gold/` parquet partitioned by month, target = `trip_count`.
 
 ### 3.4 Training
-- **`src/training/trainer.py`** — `Trainer` class:
+- **`app/training/trainer.py`** — `Trainer` class:
   - Loads Gold features.
   - **Time-based split only** — never shuffle temporal data (`pipeline.MD` §6).
   - `feature_target_separator()` drops `trip_count` to split X/y.
@@ -110,16 +110,16 @@ Forecast NYC taxi demand at the **(pickup zone, hour)** grain for short-horizon 
   - Logs params, metrics, artifacts to MLflow under model name `ny_taxi_demand_model`.
 
 ### 3.5 Inference (offline evaluation)
-- **`src/inference/predictor.py`** — `Predictor` class:
+- **`app/inference/predictor.py`** — `Predictor` class:
   - Loads `models/model.pkl`.
   - `feature_target_separator()` (mirrors trainer).
   - Computes MAE / RMSE / R² on held-out time slice.
   - Used by batch eval scripts; not by the API.
 
 ### 3.6 Serving (online)
-- **`src/serving/app.py`** — FastAPI app, exposes `POST /predict`.
-- Loads `models/model.pkl` at **startup** (model must exist before server starts).
-- **`app.py`** at repo root re-exports `src.serving.app.app` so `uvicorn app:app` works.
+- **`app/api/main.py`** — FastAPI app, exposes `GET /heatmap`.
+- Loads pre-computed predictions at **startup** (inference simulation must be run before server starts).
+- Served via `uvicorn app.api.main:app`.
 
 ### 3.7 Frontend (planned)
 - Vite + React + TypeScript SPA at `frontend/`.
@@ -206,7 +206,7 @@ data/gold/**.parquet
 | **Time-based split only** | Avoids leakage on temporal data. Hard rule (`pipeline.MD` §6). |
 | **MLflow local store** | No tracking-server infra needed; `mlruns/` is git-tracked-out. |
 | **Model loaded at FastAPI startup** | Predictable cold-start cost paid once, sub-200ms p95 inference. |
-| **`app.py` re-export shim** | Lets `uvicorn app:app` work from repo root without `PYTHONPATH` gymnastics. |
+| **`app/api/main.py` as canonical app** | Directly served via `uvicorn app.api.main:app` without re-export shims. |
 | **`config.yml` over env vars for ML knobs** | Hyperparameters and paths belong in versioned config; `.env` is only for secrets. |
 
 ---
@@ -214,7 +214,7 @@ data/gold/**.parquet
 ## 6. Cross-Cutting Concerns
 
 ### Configuration
-- All ML/data knobs live in `config.yml`, loaded once via `src.shared.config.load_config()`.
+- All ML/data knobs live in `config.yml`, loaded once via `app.core.config.load_config()`.
 - Secrets (Socrata app token, DB creds) live in `.env`, never committed.
 
 ### Logging
@@ -227,7 +227,7 @@ data/gold/**.parquet
 - Trainer/predictor raise specific exceptions; no bare `except`.
 
 ### Testing
-- `tests/` mirrors `src/`.
+- `tests/` mirrors `app/`.
 - Unit tests for `clean`, `feature_engineering`, `trainer`, `predictor`.
 - Integration test: smoke-test `/predict` against a fixture model.
 - All tests run via `uv run pytest`; CI enforces strict mypy + ruff.
@@ -251,9 +251,9 @@ data/gold/**.parquet
 ┌──────────────────────────────────────────────────────────┐
 │  Developer machine (WSL2 / Linux)                        │
 │                                                          │
-│  uv run python main.py            # pipeline             │
-│  uv run python -m src.training    # training             │
-│  uv run uvicorn app:app --reload  # serving :8000        │
+│  uv run python -m pipeline.run_all       # pipeline      │
+│  uv run python -m app.training.trainer   # training      │
+│  uv run uvicorn app.api.main:app --reload # serving :8000│
 │  uv run mlflow ui                 # mlflow UI :5000      │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -270,8 +270,8 @@ data/gold/**.parquet
 | Constraint | Validated by |
 |---|---|
 | Python 3.13+, uv-managed | `pyproject.toml`, `.python-version`, uv lockfile |
-| Strict typing | `uv run mypy src/ --strict` (must pass) |
-| Lint/format | `uv run ruff check src/ && uv run ruff format --check src/` |
+| Strict typing | `uv run mypy app/ --strict` (must pass) |
+| Lint/format | `uv run ruff check app/ && uv run ruff format --check app/` |
 | Time-split discipline | Code review of `Trainer.train()` — never `shuffle=True` |
 | Latency target | Bench `/predict` with `wrk` or `hey`; verify model is loaded once at startup |
 | Reproducible data | DVC pins Bronze/Silver/Gold snapshots |

@@ -49,7 +49,7 @@ Event loop:  [req1 start] [req2 start] [req3 start] [req1 done→parse] [req2 do
 
 ## 2. Where Concurrency Applies in Our Ingestion Pipeline
 
-Look at the current `fetch_data` method in `src/steps/ingest.py`:
+Look at the current `fetch_data` method in `app/ingestion/ingest.py`:
 
 ```python
 # Current: sequential — each month waits for the previous one to finish
@@ -188,9 +188,9 @@ Our `_make_session()` creates a single session stored as `self._session`. For th
 
 ---
 
-## 5. Applying Concurrency to `main.py` Pipeline
+## 5. Applying Concurrency to the `pipeline.run_all` Runner
 
-The pipeline in `main.py` runs ingest → clean sequentially per month. We could parallelise this too, but we need to be more careful:
+The pipeline in `pipeline/run_all.py` runs ingest → clean sequentially per month. We could parallelise this too, but we need to be more careful:
 
 ```python
 # Current sequential pipeline

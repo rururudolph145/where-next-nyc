@@ -202,7 +202,7 @@
               ▼                                        ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        Ingestion Pipeline                           │
-│   src/ingestion/ingest.py          src/ingestion/clean.py           │
+│   app/ingestion/ingest.py          app/ingestion/clean.py           │
 │   (Socrata → Bronze parquet)  ───► (Bronze → Silver parquet)        │
 └──────────────────────────┬──────────────────────────────────────────┘
                            ▼
@@ -216,7 +216,7 @@
                            ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        Training Pipeline                            │
-│   src/training/trainer.py                                           │
+│   app/training/trainer.py                                           │
 │   (Gold features → time-split → LGBMRegressor → models/model.pkl)   │
 │                       │                                             │
 │                       └──► MLflow (mlruns/, model name:             │
@@ -225,9 +225,9 @@
                            ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                Inference &amp; Serving                                  │
-│   src/inference/predictor.py   ◄── batch eval (MAE / RMSE / R²)     │
-│   src/serving/app.py            ── FastAPI POST /predict            │
-│   app.py (re-export entrypoint)                                     │
+│   app/inference/predictor.py   ◄── batch eval (MAE / RMSE / R²)     │
+│   app/api/main.py               ── FastAPI GET /heatmap             │
+│   (uvicorn app.api.main:app)                                        │
 └──────────────────────────┬──────────────────────────────────────────┘
                            ▼
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -242,7 +242,7 @@
   <div class="grid-2">
     <div class="card">
       <div class="card-title">Configuration <span class="badge badge-blue">shared</span></div>
-      <p><code>src/shared/config.py</code> — single source of YAML config loading via <code>load_config()</code>.
+      <p><code>app/core/config.py</code> — single source of YAML config loading via <code>load_config()</code>.
         <code>config.yml</code> owns: data paths, train/test split, model hyperparameters, MLflow experiment name.</p>
     </div>
     <div class="card">
@@ -269,8 +269,8 @@
     </div>
     <div class="card">
       <div class="card-title">Serving <span class="badge badge-blue">FastAPI</span></div>
-      <p><code>src/serving/app.py</code> exposes <code>POST /predict</code>. Loads <code>models/model.pkl</code> at
-        startup. Root <code>app.py</code> re-exports the app so <code>uvicorn app:app</code> works.</p>
+      <p><code>app/api/main.py</code> exposes <code>GET /heatmap</code>. Loads pre-computed predictions at
+        startup. Served via <code>uvicorn app.api.main:app</code>.</p>
     </div>
     <div class="card">
       <div class="card-title">Frontend <span class="badge badge-yellow">planned</span></div>
@@ -354,7 +354,7 @@
       <tr><td><strong>Time-based split only</strong></td><td>Avoids leakage on temporal data. Hard rule (<code>pipeline.MD</code> §6).</td></tr>
       <tr><td><strong>MLflow local store</strong></td><td>No tracking-server infra needed; <code>mlruns/</code> is git-ignored.</td></tr>
       <tr><td><strong>Model loaded at FastAPI startup</strong></td><td>Predictable cold-start cost paid once; sub-200ms p95 inference.</td></tr>
-      <tr><td><strong><code>app.py</code> re-export shim</strong></td><td>Lets <code>uvicorn app:app</code> work from repo root without <code>PYTHONPATH</code> tricks.</td></tr>
+      <tr><td><strong><code>app/api/main.py</code> as canonical app</strong></td><td>Directly served via <code>uvicorn app.api.main:app</code> without re-export shims.</td></tr>
       <tr><td><strong><code>config.yml</code> over env for ML knobs</strong></td><td>Hyperparameters and paths belong in versioned config; <code>.env</code> is only for secrets.</td></tr>
     </tbody>
   </table>
@@ -384,7 +384,7 @@
 
   <h3>Testing</h3>
   <ul>
-    <li><code>tests/</code> mirrors <code>src/</code>.</li>
+    <li><code>tests/</code> mirrors <code>app/</code>.</li>
     <li>Unit tests for <code>clean</code>, feature engineering, <code>trainer</code>, <code>predictor</code>.</li>
     <li>Integration test: smoke-test <code>/predict</code> against a fixture model.</li>
     <li>All tests run via <code>uv run pytest</code>; CI enforces strict mypy + ruff.</li>
@@ -412,7 +412,7 @@
   <pre>┌──────────────────────────────────────────────────────────┐
 │  Developer machine (WSL2 / Linux)                        │
 │                                                          │
-│  uv run python main.py            # pipeline             │
+│  uv run python -m pipeline.run_all  # pipeline           │
 │  uv run python -m src.training    # training             │
 │  uv run uvicorn app:app --reload  # serving :8000        │
 │  uv run mlflow ui                 # mlflow UI :5000      │
@@ -432,8 +432,8 @@
     <thead><tr><th>Constraint</th><th>Validated by</th></tr></thead>
     <tbody>
       <tr><td>Python 3.13+, uv-managed</td><td><code>pyproject.toml</code>, <code>.python-version</code>, uv lockfile</td></tr>
-      <tr><td>Strict typing</td><td><code>uv run mypy src/ --strict</code> (must pass)</td></tr>
-      <tr><td>Lint/format</td><td><code>uv run ruff check src/ &amp;&amp; uv run ruff format --check src/</code></td></tr>
+      <tr><td>Strict typing</td><td><code>uv run mypy app/ --strict</code> (must pass)</td></tr>
+      <tr><td>Lint/format</td><td><code>uv run ruff check app/ &amp;&amp; uv run ruff format --check app/</code></td></tr>
       <tr><td>Time-split discipline</td><td>Code review of <code>Trainer.train()</code> — never <code>shuffle=True</code></td></tr>
       <tr><td>Latency target</td><td>Bench <code>/predict</code> with <code>wrk</code> or <code>hey</code>; verify model is loaded once at startup</td></tr>
       <tr><td>Reproducible data</td><td>DVC pins Bronze/Silver/Gold snapshots</td></tr>

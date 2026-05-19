@@ -34,7 +34,7 @@
   - [ ] Fix `train.shuffle: false` (currently `true` — wrong for time-series)
 - [ ] Fix `steps/train.py` — add type hints, Google docstrings, temporal split, expand MODELS dict
 - [ ] Fix `steps/predict.py` — add type hints, Google docstrings
-- [ ] Update `main.py` — wire full pipeline: ingest → clean → feature → train → evaluate
+- [ ] Update `pipeline/run_all.py` — wire full pipeline: ingest → clean → feature → train → evaluate
 - [ ] Fix `tests/test_clean.py` — broken import (`Cleaner` → `DataCleaner`)
 - [ ] Create `tests/test_feature.py`
   - [ ] Test no future data leakage in lag features
@@ -43,7 +43,7 @@
 - [ ] Create `tests/test_train.py`
   - [ ] Test temporal split preserves time ordering
   - [ ] Test model trains and prediction shape is correct
-- [ ] Verify: `uv run python main.py` produces `models/model.pkl`
+- [ ] Verify: `uv run python -m pipeline.run_all` produces `models/model.pkl`
 - [ ] Verify: `uv run pytest` — all tests pass
 
 ---
@@ -68,7 +68,7 @@
   - [ ] Each trial logged as MLflow child run
 - [ ] Update `config.yml` — add `mlflow.experiment_name`, `mlflow.tracking_uri`
 - [ ] Create `tests/test_registry.py` with mock MLflow
-- [ ] Verify: `uv run python main.py` → `uv run mlflow ui` shows runs and registered model
+- [ ] Verify: `uv run python -m pipeline.run_all` → `uv run mlflow ui` shows runs and registered model
 
 ---
 
@@ -77,7 +77,7 @@
 **Goal:** Two distinct API surfaces, pre-computed predictions cached in Redis.
 
 - [ ] Create API package structure
-  - [ ] `api/main.py` — FastAPI app factory with lifespan (load model, connect Redis)
+  - [ ] `app/api/main.py` — FastAPI app factory with lifespan (load model, connect Redis)
   - [ ] `api/dependencies.py` — DI providers: model, Redis client, config
   - [ ] `api/models/requests.py` — Pydantic request schemas
   - [ ] `api/models/responses.py` — Pydantic response schemas
@@ -96,7 +96,7 @@
 - [ ] Create `jobs/precompute.py` — hourly batch job: predict all 263 zones at h+1..h+12, write to Redis (75-min TTL)
 - [ ] Add `redis` to `pyproject.toml`
 - [ ] Create `docker-compose.yml` — API + Redis for local dev
-- [ ] Deprecate old `app.py` (redirect imports or remove)
+- [x] Deprecate old `app.py` (redirect imports or remove) — done in refactor/app-package-layout
 - [ ] Create `tests/test_api_driver.py` — driver endpoint tests with TestClient + fakeredis
 - [ ] Create `tests/test_api_fleet.py` — fleet endpoint tests
 - [ ] Create `tests/test_cache.py` — cache layer unit tests
@@ -129,7 +129,7 @@
   - [ ] `validate_bronze()`: schema check, null rates, expected columns
   - [ ] `validate_silver()`: distribution drift vs reference month (Evidently `DataDriftPreset`)
   - [ ] `validate_gold()`: feature completeness, no-leakage sanity check
-- [ ] Wire validation gates into `main.py` — halt pipeline on critical validation failures
+- [ ] Wire validation gates into `pipeline/run_all.py` — halt pipeline on critical validation failures
 - [ ] Create `monitoring/dashboard.py` — Evidently report generation
   - [ ] Prediction drift report (current vs reference predictions)
   - [ ] Accuracy report (predicted vs actual once actuals arrive)
