@@ -1,7 +1,7 @@
 """Logging setup helper.
 
 A single ``setup_logging`` entrypoint so every script/service uses the
-same format. Currently extracted verbatim from ``main.py``'s
+same format. Extracted from the pipeline runner scripts'
 ``logging.basicConfig`` call.
 """
 
