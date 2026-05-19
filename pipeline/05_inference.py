@@ -7,8 +7,8 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.inference.predictor import Predictor
-from src.shared.config import load_config
+from app.core.config import load_config
+from app.inference.predictor import Predictor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(levelname)s:%(message)s")
 

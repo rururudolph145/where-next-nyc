@@ -7,8 +7,8 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.ingestion.clean import DataCleaner
-from src.shared.config import load_config
+from app.core.config import load_config
+from app.ingestion.clean import DataCleaner
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(levelname)s:%(message)s")
 

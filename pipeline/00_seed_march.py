@@ -19,7 +19,7 @@ from urllib.request import urlretrieve
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline import seed_raw_helper
-from src.shared.config import load_config
+from app.core.config import load_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(levelname)s:%(message)s")
 

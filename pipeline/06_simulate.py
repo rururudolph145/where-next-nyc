@@ -1,6 +1,6 @@
 """Step 6 — Hourly inference simulation over out-of-sample period.
 
-Runs the :class:`src.inference.simulate.HourlySimulator` to produce
+Runs the :class:`app.inference.simulator.HourlySimulator` to produce
 per-zone, per-hour predictions for the configured simulation window
 (default: March 2021).
 
@@ -15,8 +15,8 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.inference.simulate import HourlySimulator
-from src.shared.config import load_config
+from app.core.config import load_config
+from app.inference.simulator import HourlySimulator
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(levelname)s:%(message)s")
 
