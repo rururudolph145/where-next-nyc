@@ -67,12 +67,13 @@ Supports **Step 1 (Start Shift) → Step 2 (Check Demand)** in the driver journe
 Supports the "parallelize I/O-bound operations with async" rule. Splits cleanly into
 test-first invariant locking → equivalence test → implementation, per TDD rule.
 
-- [x] **PBI 12 — Lock-in Bronze Temporal-Sort Invariant (Test-First)**
+- [x] **PBI 12 — Lock-in Bronze Temporal-Sort Invariant (Test-First)** — *shipped in `b3ba4d9`*
   - Add `test_bronze_is_temporally_sorted` to `tests/test_dataset.py`
   - Assertion: `pd.read_parquet(bronze_path)["tpep_pickup_datetime"].is_monotonic_increasing`
-  - Input: small fixture of out-of-order daily parquets
+  - Input: small fixture of in-order daily parquets (4 daily files across 2 months, each internally time-sorted)
   - Output: passing test against current sequential implementation
   - Acceptance: test passes on current code; pins the invariant before any parallelization touches the read path
+  - Outcome: pytest baseline grew 57 → 58 passing; ruff + mypy clean on `app/ tests/`; the invariant currently holds by coincidence of the sequential loop — PBI 14 will be forced to add an explicit `sort_values` to keep it green
 
 - [ ] **PBI 13 — Parallel-Equivalence Regression Test**
   - Add `test_load_raw_parallel_equivalence` to `tests/test_dataset.py`
