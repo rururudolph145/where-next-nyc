@@ -49,6 +49,82 @@ Supports **Step 1 (Start Shift) → Step 2 (Check Demand)** in the driver journe
 
 ---
 
+## Release: Performance Hardening (PBIs 12–17)
+
+> Aligns the codebase with `.claude/rules/performance.md`. Audit findings recorded in
+> the Phase 6 smoke-test follow-up: `app/ingestion/ingest.py:load_raw` reads parquet
+> files sequentially despite the "parallelize I/O-bound operations with async" rule;
+> `pd.concat` accumulates all frames in memory in violation of "use generators when
+> processing large lists"; `GET /heatmap` returns the full 263-zone payload in
+> violation of "Use pagination when API responses are large".
+>
+> **Critical invariant:** Bronze data must remain globally sorted by
+> `tpep_pickup_datetime` regardless of file read order. Parallel I/O is safe *only* if
+> a stable sort runs after `pd.concat` and a regression test enforces it.
+
+### Activity 4: Ingestion I/O Parallelism
+
+Supports the "parallelize I/O-bound operations with async" rule. Splits cleanly into
+test-first invariant locking → equivalence test → implementation, per TDD rule.
+
+- [ ] **PBI 12 — Lock-in Bronze Temporal-Sort Invariant (Test-First)**
+  - Add `test_bronze_is_temporally_sorted` to `tests/test_dataset.py`
+  - Assertion: `pd.read_parquet(bronze_path)["tpep_pickup_datetime"].is_monotonic_increasing`
+  - Input: small fixture of out-of-order daily parquets
+  - Output: passing test against current sequential implementation
+  - Acceptance: test passes on current code; pins the invariant before any parallelization touches the read path
+
+- [ ] **PBI 13 — Parallel-Equivalence Regression Test**
+  - Add `test_load_raw_parallel_equivalence` to `tests/test_dataset.py`
+  - Assertion: `load_raw(max_workers=1)` and `load_raw(max_workers=8)` produce equal DataFrames (after sort)
+  - Acceptance: test fails until PBI 14 lands; codifies the contract that parallelism is order-independent
+
+- [ ] **PBI 14 — Parallelize `load_raw` with `ThreadPoolExecutor`**
+  - Replace the sequential `for pq_file in parquets` loop in `app/ingestion/ingest.py` with `ThreadPoolExecutor.map(pd.read_parquet, paths)`
+  - Add `ingest.max_workers` (default 8) to `config.yml`; thread the value through `Ingestion.__init__`
+  - After `pd.concat`, call `df.sort_values("tpep_pickup_datetime", kind="mergesort").reset_index(drop=True)` to restore canonical time order
+  - Acceptance: PBIs 12 + 13 pass; all 58 existing tests still pass; ingestion runtime measurably improves (informal benchmark in PR description)
+
+- [ ] **PBI 15 — Streaming Bronze Write (Generator Compliance) — *stretch***
+  - Replace `frames.append` accumulator + `pd.concat` with streaming `pyarrow.parquet.ParquetWriter`
+  - Each parallel read writes its sorted batch incrementally; final external merge-sort pass produces canonically-ordered bronze
+  - Honors the "use generators when processing large lists" rule
+  - Acceptance: peak RSS during ingestion stays bounded regardless of date range; PBIs 12 + 13 still pass
+  - Note: defer until ingestion actually OOMs in practice; YAGNI applies
+
+### Activity 5: API Response Compliance
+
+Supports the "Use pagination when API responses are large" rule.
+
+- [ ] **PBI 16 — Paginate `GET /heatmap`**
+  - Add `?top_n=<int>` query parameter to `app/api/main.py:get_heatmap` (default 50, max 263)
+  - Sort predictions descending by `predicted_trip_count` (already done), then slice to top-N before serializing
+  - Add `test_heatmap_top_n_default`, `test_heatmap_top_n_custom`, `test_heatmap_top_n_out_of_range` to `tests/test_serving.py`
+  - Update `docs/system_design.md` §4.4 and `docs/system_design.html` to document the new parameter
+  - Acceptance: default response payload shrinks by ~80%; serving tests stay 100% green
+
+### Activity 6: Outbound HTTP Compliance — *Forward-looking*
+
+> N/A today — no outbound HTTP calls live in `app/`. Activates when the Socrata
+> downloader (currently external) is migrated into the repo.
+
+- [ ] **PBI 17 — Bring Socrata Downloader Under Performance Rules**
+  - When the Socrata downloader is added to `app/ingestion/`:
+    - [ ] Set request `timeout=180` seconds
+    - [ ] Configure `max_retries=3–5` via `tenacity` or `urllib3.Retry`
+    - [ ] Exponential backoff on HTTP 429 (`backoff_factor` ≥ 1.0)
+    - [ ] Parallelize multi-month downloads with `asyncio.gather` + `httpx.AsyncClient`
+    - [ ] Reuse a single client/session — honors connection pooling
+  - Acceptance: downloader survives a forced 429 burst in tests; total wall-clock for an N-month range scales sub-linearly with N
+
+### Activity 7: Documentation Alignment
+
+- [ ] **Update `about_concurrency.md`** — once PBI 14 lands, mark §5 ("Applying Concurrency to `pipeline.run_all`") as implemented and link to the live code
+- [ ] **Add "Performance" subsection to `docs/system_design.md`** — codify the parallel-read + sort-once invariant as an architectural guarantee, not just an implementation detail
+- [ ] **Append a Performance Compliance row to the Phase 6 smoke-test HTML report** — track which rules are now met
+
+---
+
 ## Release: Post-MVP
 
 ### Personalized Ranking (upgrade from heatmap to recommendations)
@@ -127,7 +203,7 @@ Supports **Step 1 (Start Shift) → Step 2 (Check Demand)** in the driver journe
 ## Dependency Graph
 
 ```
-PBI 1 (train t) ──> PBI 2 (inference t) ──> PBI 3 (heatmap API)
+PBI 1 (train t) ──> PBI 2 (inference t) ──> PBI 3 (heatmap API) ──> PBI 16 (paginate heatmap)
                                   │
                                   ├──> PBI 4 (multi-horizon)
                                   │
@@ -139,6 +215,13 @@ PBI 1 (train t) ──> PBI 2 (inference t) ──> PBI 3 (heatmap API)
                                   │
                                   ├──> PBI 9 (fallback)
                                   └──> PBI 10 (monitoring)
+
+Performance Hardening (independent of feature PBIs):
+PBI 12 (sort invariant test) ──> PBI 13 (parallel equivalence test) ──> PBI 14 (parallel load_raw)
+                                                                              │
+                                                                              └──> PBI 15 (streaming write, stretch)
+
+PBI 17 (Socrata HTTP compliance) — blocked: requires downloader to migrate into app/ first
 ```
 
 ## Priority Order
@@ -156,6 +239,12 @@ PBI 1 (train t) ──> PBI 2 (inference t) ──> PBI 3 (heatmap API)
 | 9 | PBI 9 | Fallback — reliability layer |
 | 10 | PBI 10 | Monitoring — observability layer |
 | 11 | PBI 11 | Simulated streaming — shows production awareness |
+| 12 | PBI 12 | Bronze temporal-sort invariant test — TDD RED step; safe in isolation |
+| 13 | PBI 13 | Parallel-equivalence regression test — RED for PBI 14 |
+| 14 | PBI 14 | Parallel `load_raw` — closes the "parallelize I/O-bound" gap |
+| 15 | PBI 16 | Paginate `/heatmap` — closes the "pagination for large responses" gap |
+| 16 | PBI 15 | Streaming bronze write — defer until ingestion OOMs in practice |
+| 17 | PBI 17 | Socrata HTTP compliance — blocked until downloader migrates into `app/` |
 
 ## Known Limitations & Future Considerations
 
