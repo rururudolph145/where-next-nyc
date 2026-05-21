@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 from typing import Any
 
-import joblib
 import numpy as np
 import pandas as pd
 import pytest
@@ -157,9 +156,7 @@ class TestPredict:
         preds = predictor.predict(gold_df)
         assert len(preds) == len(gold_df)
 
-    def test_finite_values(
-        self, predictor: Predictor, gold_df: pd.DataFrame
-    ) -> None:
+    def test_finite_values(self, predictor: Predictor, gold_df: pd.DataFrame) -> None:
         """All predictions are finite numbers."""
         predictor.load_model()
         preds = predictor.predict(gold_df)
@@ -172,9 +169,7 @@ class TestPredict:
 class TestBuildPredictionsTable:
     """Tests for Predictor.build_predictions_table."""
 
-    def test_correct_columns(
-        self, predictor: Predictor, gold_df: pd.DataFrame
-    ) -> None:
+    def test_correct_columns(self, predictor: Predictor, gold_df: pd.DataFrame) -> None:
         """Output has expected columns."""
         predictor.load_model()
         preds = predictor.predict(gold_df)
@@ -215,9 +210,7 @@ class TestBuildPredictionsTable:
 class TestEvaluate:
     """Tests for Predictor.evaluate."""
 
-    def test_metric_keys(
-        self, predictor: Predictor, gold_df: pd.DataFrame
-    ) -> None:
+    def test_metric_keys(self, predictor: Predictor, gold_df: pd.DataFrame) -> None:
         """Returns dict with expected metric keys."""
         predictor.load_model()
         preds = predictor.predict(gold_df)
@@ -241,9 +234,7 @@ class TestEvaluate:
 class TestSavePredictions:
     """Tests for Predictor.save_predictions."""
 
-    def test_file_created(
-        self, predictor: Predictor, gold_df: pd.DataFrame
-    ) -> None:
+    def test_file_created(self, predictor: Predictor, gold_df: pd.DataFrame) -> None:
         """Parquet file is created at configured path."""
         predictor.load_model()
         preds = predictor.predict(gold_df)

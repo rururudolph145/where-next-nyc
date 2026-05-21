@@ -90,9 +90,7 @@ def gold_df() -> pd.DataFrame:
 class TestSplitData:
     """Tests for Trainer.split_data."""
 
-    def test_split_ratios(
-        self, trainer: Trainer, gold_df: pd.DataFrame
-    ) -> None:
+    def test_split_ratios(self, trainer: Trainer, gold_df: pd.DataFrame) -> None:
         """Train/val/test sets have approximately correct proportions."""
         train, val, test = trainer.split_data(gold_df)
 
@@ -111,18 +109,14 @@ class TestSplitData:
         assert len(val) > 0
         assert len(test) > 0
 
-    def test_no_temporal_leakage(
-        self, trainer: Trainer, gold_df: pd.DataFrame
-    ) -> None:
+    def test_no_temporal_leakage(self, trainer: Trainer, gold_df: pd.DataFrame) -> None:
         """Max hour in train < min hour in val < min hour in test."""
         train, val, test = trainer.split_data(gold_df)
 
         assert train["hour"].max() < val["hour"].min()
         assert val["hour"].max() < test["hour"].min()
 
-    def test_no_overlap(
-        self, trainer: Trainer, gold_df: pd.DataFrame
-    ) -> None:
+    def test_no_overlap(self, trainer: Trainer, gold_df: pd.DataFrame) -> None:
         """No overlapping timestamps between splits."""
         train, val, test = trainer.split_data(gold_df)
 
@@ -134,9 +128,7 @@ class TestSplitData:
         assert val_hours.isdisjoint(test_hours)
         assert train_hours.isdisjoint(test_hours)
 
-    def test_deterministic(
-        self, trainer: Trainer, gold_df: pd.DataFrame
-    ) -> None:
+    def test_deterministic(self, trainer: Trainer, gold_df: pd.DataFrame) -> None:
         """Calling split_data twice produces identical results."""
         train1, val1, test1 = trainer.split_data(gold_df)
         train2, val2, test2 = trainer.split_data(gold_df)
@@ -162,9 +154,7 @@ class TestSplitData:
 class TestTrainModel:
     """Tests for Trainer.train."""
 
-    def test_model_is_fitted(
-        self, trainer: Trainer, gold_df: pd.DataFrame
-    ) -> None:
+    def test_model_is_fitted(self, trainer: Trainer, gold_df: pd.DataFrame) -> None:
         """Model has fitted attributes after training."""
         train_df, _, _ = trainer.split_data(gold_df)
         x_train = train_df[trainer.features]
@@ -175,9 +165,7 @@ class TestTrainModel:
         assert hasattr(trainer.model, "n_features_in_")
         assert trainer.model.n_features_in_ == len(trainer.features)
 
-    def test_model_can_predict(
-        self, trainer: Trainer, gold_df: pd.DataFrame
-    ) -> None:
+    def test_model_can_predict(self, trainer: Trainer, gold_df: pd.DataFrame) -> None:
         """Fitted model produces predictions."""
         train_df, val_df, _ = trainer.split_data(gold_df)
         trainer.train(train_df[trainer.features], train_df[trainer.target])
@@ -192,9 +180,7 @@ class TestTrainModel:
 class TestEvaluate:
     """Tests for Trainer.evaluate."""
 
-    def test_metric_keys(
-        self, trainer: Trainer, gold_df: pd.DataFrame
-    ) -> None:
+    def test_metric_keys(self, trainer: Trainer, gold_df: pd.DataFrame) -> None:
         """Returns dict with expected metric keys."""
         train_df, val_df, _ = trainer.split_data(gold_df)
         trainer.train(train_df[trainer.features], train_df[trainer.target])
@@ -217,9 +203,7 @@ class TestEvaluate:
         for key, value in metrics.items():
             assert value >= 0, f"{key} is negative: {value}"
 
-    def test_mae_leq_rmse(
-        self, trainer: Trainer, gold_df: pd.DataFrame
-    ) -> None:
+    def test_mae_leq_rmse(self, trainer: Trainer, gold_df: pd.DataFrame) -> None:
         """MAE <= RMSE by definition."""
         train_df, val_df, _ = trainer.split_data(gold_df)
         trainer.train(train_df[trainer.features], train_df[trainer.target])
@@ -267,21 +251,14 @@ class TestRunLogsToMlflow:
         trainer.tracking_uri = str(tmp_path / "mlruns")
 
         with patch("app.training.trainer.mlflow") as mock_mlflow:
-            mock_run = mock_mlflow.start_run.return_value.__enter__.return_value
             trainer.run(data=gold_df)
 
-            mock_mlflow.set_tracking_uri.assert_called_once_with(
-                trainer.tracking_uri
-            )
-            mock_mlflow.set_experiment.assert_called_once_with(
-                trainer.experiment_name
-            )
+            mock_mlflow.set_tracking_uri.assert_called_once_with(trainer.tracking_uri)
+            mock_mlflow.set_experiment.assert_called_once_with(trainer.experiment_name)
             mock_mlflow.start_run.assert_called_once()
 
             # Params logged
-            mock_mlflow.log_params.assert_called_once_with(
-                trainer.model_params
-            )
+            mock_mlflow.log_params.assert_called_once_with(trainer.model_params)
 
             # Metrics logged (val + test × 4 metrics each)
             metric_calls = mock_mlflow.log_metric.call_args_list

@@ -40,9 +40,7 @@ def _make_silver_df() -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for zone in [1, 2]:
         for hour_offset in range(4):
-            ts = pd.Timestamp("2022-01-01") + pd.Timedelta(
-                hours=hour_offset
-            )
+            ts = pd.Timestamp("2022-01-01") + pd.Timedelta(hours=hour_offset)
             # Zone 1: 2 trips per hour; Zone 2: 1 trip per hour
             n_trips = 2 if zone == 1 else 1
             for _ in range(n_trips):
@@ -209,9 +207,7 @@ class TestAddCyclicalFeatures:
         for base in ["hour_of_day", "day_of_week", "month"]:
             sin2 = result[f"{base}_sin"] ** 2
             cos2 = result[f"{base}_cos"] ** 2
-            np.testing.assert_allclose(
-                sin2 + cos2, 1.0, atol=1e-10
-            )
+            np.testing.assert_allclose(sin2 + cos2, 1.0, atol=1e-10)
 
 
 # -- Test: add_lag_features -------------------------------------------------
@@ -240,13 +236,9 @@ class TestAddLagFeatures:
                     (panel["pulocationid"] == 1) & (panel["hour"] == lag_hour)
                 ]
                 if not prior.empty:
-                    assert row[f"trip_count_lag_{h}"] == prior.iloc[0][
-                        "trip_count"
-                    ]
+                    assert row[f"trip_count_lag_{h}"] == prior.iloc[0]["trip_count"]
 
-    def test_insufficient_history_dropped(
-        self, fe: FeatureEngineer
-    ) -> None:
+    def test_insufficient_history_dropped(self, fe: FeatureEngineer) -> None:
         """Rows with NaN lags (insufficient history) are dropped."""
         panel = _make_hourly_panel()
         result = fe.add_lag_features(panel)
@@ -259,9 +251,7 @@ class TestAddLagFeatures:
         result = fe.add_lag_features(panel)
 
         for zone in result["pulocationid"].unique():
-            zone_data = result[result["pulocationid"] == zone].sort_values(
-                "hour"
-            )
+            zone_data = result[result["pulocationid"] == zone].sort_values("hour")
             for h in fe.lag_hours:
                 shifted = zone_data["trip_count"].shift(h)
                 valid = shifted.dropna()
@@ -346,9 +336,7 @@ class TestRunEndToEnd:
         assert result[lag_cols].isna().sum().sum() == 0
 
         # Sorted by (zone, hour)
-        sorted_result = result.sort_values(
-            ["pulocationid", "hour"]
-        ).reset_index(drop=True)
-        pd.testing.assert_frame_equal(
-            result.reset_index(drop=True), sorted_result
+        sorted_result = result.sort_values(["pulocationid", "hour"]).reset_index(
+            drop=True
         )
+        pd.testing.assert_frame_equal(result.reset_index(drop=True), sorted_result)

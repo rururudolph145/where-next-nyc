@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -39,9 +38,7 @@ def zone_lookup() -> dict[int, str]:
 
 
 @pytest.fixture()
-def client(
-    sample_predictions: pd.DataFrame, zone_lookup: dict[int, str]
-) -> TestClient:
+def client(sample_predictions: pd.DataFrame, zone_lookup: dict[int, str]) -> TestClient:
     """Create a test client with mocked predictions and zone lookup."""
     import app.api.main as serving_module
 
