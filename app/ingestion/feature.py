@@ -29,6 +29,11 @@ class FeatureEngineer:
         """
         self.config = config or load_config()
         self.lag_hours: list[int] = self.config["feature"]["lag_hours"]
+        # Aggregation bucket width (pandas offset alias). Defaults to "h"
+        # so existing configs without the key keep their hourly behavior.
+        # PBI A1 introduces this knob; PBI A2/A3 build on top of it for
+        # 15-min refresh and shifted-horizon forecasting.
+        self.bucket: str = self.config["feature"].get("bucket", "h")
         self.zone_shapefile_path: str = self.config["feature"]["zone_shapefile_path"]
         self.silver_path: str = self.config["data"]["silver_path"]
         self.gold_path: str = self.config["data"]["gold_path"]
@@ -57,7 +62,7 @@ class FeatureEngineer:
             DataFrame with columns ``[pulocationid, hour, trip_count]``.
         """
         df = df.copy()
-        df["hour"] = df[datetime_col].dt.floor("h")
+        df["hour"] = df[datetime_col].dt.floor(self.bucket)
 
         trip_counts = (
             df.groupby([zone_col, "hour"]).size().rename("trip_count").reset_index()
@@ -67,7 +72,7 @@ class FeatureEngineer:
         all_hours = pd.date_range(
             start=trip_counts["hour"].min(),
             end=trip_counts["hour"].max(),
-            freq="h",
+            freq=self.bucket,
         )
         full_grid = pd.MultiIndex.from_product(
             [all_zones, all_hours], names=[zone_col, "hour"]

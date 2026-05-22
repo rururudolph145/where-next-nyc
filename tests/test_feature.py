@@ -129,6 +129,83 @@ class TestBuildHourlyDemand:
         assert (hour_1["trip_count"] == 0).all()
 
 
+# -- PBI A1: Configurable bucket width --------------------------------------
+#
+# Locks the contract that the aggregation bucket is a config knob, not a
+# hard-coded "h". Default ("h") must reproduce legacy behavior bit-identically;
+# "15min" must produce 4× the rows over the same time range.
+
+
+class TestBucketParameterization:
+    """Tests for the ``feature.bucket`` configuration knob (PBI A1)."""
+
+    @staticmethod
+    def _config(bucket: str | None) -> dict[str, Any]:
+        cfg: dict[str, Any] = {
+            **MINIMAL_CONFIG,
+            "feature": {**MINIMAL_CONFIG["feature"]},
+        }
+        if bucket is not None:
+            cfg["feature"]["bucket"] = bucket
+        return cfg
+
+    def test_default_bucket_matches_hourly_legacy(self) -> None:
+        """Omitting ``feature.bucket`` must reproduce hourly-legacy output."""
+        silver = _make_silver_df()
+
+        legacy = FeatureEngineer(config=self._config(bucket=None)).build_hourly_demand(
+            silver
+        )
+        explicit = FeatureEngineer(config=self._config(bucket="h")).build_hourly_demand(
+            silver
+        )
+
+        pd.testing.assert_frame_equal(
+            legacy.reset_index(drop=True), explicit.reset_index(drop=True)
+        )
+
+    def test_15min_bucket_yields_finer_grid(self) -> None:
+        """``bucket='15min'`` must produce a 15-min grid that strictly contains
+        every hourly bucket and adds 3 sub-buckets between them.
+
+        Inclusive ``pd.date_range`` means an hourly grid of ``N`` rows covers
+        ``N-1`` hours, while the matching 15-min grid covers the same span
+        with ``4*(N-1) + 1`` rows. The test pins this exact relationship so
+        regressions to floor("h") would fail immediately.
+        """
+        silver = _make_silver_df()
+
+        hourly = FeatureEngineer(config=self._config(bucket="h")).build_hourly_demand(
+            silver
+        )
+        quarter = FeatureEngineer(
+            config=self._config(bucket="15min")
+        ).build_hourly_demand(silver)
+
+        n_zones = silver["pulocationid"].nunique()
+        n_hours_per_zone = len(hourly) // n_zones
+        expected_quarters_per_zone = 4 * (n_hours_per_zone - 1) + 1
+        assert len(quarter) == n_zones * expected_quarters_per_zone
+
+        # Every hourly timestamp must appear in the 15-min grid.
+        assert set(hourly["hour"]).issubset(set(quarter["hour"]))
+
+    def test_15min_bucket_preserves_trip_totals(self) -> None:
+        """Switching to 15-min buckets must not change total trips per zone."""
+        silver = _make_silver_df()
+
+        hourly = FeatureEngineer(config=self._config(bucket="h")).build_hourly_demand(
+            silver
+        )
+        quarter = FeatureEngineer(
+            config=self._config(bucket="15min")
+        ).build_hourly_demand(silver)
+
+        hourly_totals = hourly.groupby("pulocationid")["trip_count"].sum()
+        quarter_totals = quarter.groupby("pulocationid")["trip_count"].sum()
+        pd.testing.assert_series_equal(hourly_totals, quarter_totals)
+
+
 # -- Test: add_time_features -----------------------------------------------
 
 

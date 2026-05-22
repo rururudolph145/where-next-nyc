@@ -34,6 +34,7 @@ data:
   gold_path: data/gold/yellow_tripdata
 
 feature:
+  bucket: "h"  # aggregation bucket width (pandas offset alias). "h" = hourly (legacy), "15min" = 15-min refresh
   lag_hours: [1, 3, 6, 12, 24, 168]  # t-lag pickup count features
   zone_shapefile_path: data/reference/taxi_zones.shp
 
