@@ -28,12 +28,24 @@ class FeatureEngineer:
                 from ``config.yml`` via :func:`app.core.config.load_config`.
         """
         self.config = config or load_config()
-        self.lag_hours: list[int] = self.config["feature"]["lag_hours"]
         # Aggregation bucket width (pandas offset alias). Defaults to "h"
         # so existing configs without the key keep their hourly behavior.
         # PBI A1 introduces this knob; PBI A2/A3 build on top of it for
         # 15-min refresh and shifted-horizon forecasting.
         self.bucket: str = self.config["feature"].get("bucket", "h")
+        # ``feature.lags`` is the canonical key (values are bucket offsets,
+        # not hours). PBI A2 generalizes the unit; the legacy
+        # ``feature.lag_hours`` key is accepted as a back-compat alias so
+        # existing configs and notebooks keep working. When both are
+        # present, ``lags`` wins. ``self.lag_hours`` mirrors ``self.lags``
+        # so downstream code that still reads the old attribute name
+        # continues to work.
+        feature_cfg = self.config["feature"]
+        if "lags" in feature_cfg:
+            self.lags: list[int] = feature_cfg["lags"]
+        else:
+            self.lags = feature_cfg["lag_hours"]
+        self.lag_hours: list[int] = self.lags
         self.zone_shapefile_path: str = self.config["feature"]["zone_shapefile_path"]
         self.silver_path: str = self.config["data"]["silver_path"]
         self.gold_path: str = self.config["data"]["gold_path"]
@@ -144,12 +156,14 @@ class FeatureEngineer:
     ) -> pd.DataFrame:
         """Add lagged pickup count columns per zone.
 
-        For each value in ``self.lag_hours``, creates a column
-        ``trip_count_lag_{h}`` containing the pickup count ``h`` hours
-        earlier for the same zone.
+        For each value ``n`` in ``self.lags``, creates a column
+        ``trip_count_lag_{n}`` containing the pickup count ``n`` *buckets*
+        earlier for the same zone. Under the default ``bucket="h"``, one
+        bucket equals one hour (legacy semantics). Under ``bucket="15min"``,
+        ``lag_1`` is 15 minutes earlier and so on.
 
         The DataFrame must be sorted by ``(zone, hour)`` and contain a
-        complete hourly grid so that a simple ``shift(h)`` within each
+        complete bucket grid so that a simple ``shift(n)`` within each
         zone group produces the correct lag.
 
         Args:
@@ -159,16 +173,16 @@ class FeatureEngineer:
 
         Returns:
             DataFrame with new lag columns. Rows where any lag is NaN
-            (i.e. the first ``max(lag_hours)`` rows per zone) are dropped.
+            (i.e. the first ``max(lags)`` rows per zone) are dropped.
         """
         df = df.sort_values([zone_col, "hour"]).copy()
-        for h in self.lag_hours:
-            df[f"{target_col}_lag_{h}"] = df.groupby(zone_col)[target_col].shift(h)
+        for n in self.lags:
+            df[f"{target_col}_lag_{n}"] = df.groupby(zone_col)[target_col].shift(n)
 
-        lag_cols = [f"{target_col}_lag_{h}" for h in self.lag_hours]
+        lag_cols = [f"{target_col}_lag_{n}" for n in self.lags]
         df = df.dropna(subset=lag_cols)
-        for h in self.lag_hours:
-            df[f"{target_col}_lag_{h}"] = df[f"{target_col}_lag_{h}"].astype(int)
+        for n in self.lags:
+            df[f"{target_col}_lag_{n}"] = df[f"{target_col}_lag_{n}"].astype(int)
 
         return df
 

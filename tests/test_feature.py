@@ -206,6 +206,77 @@ class TestBucketParameterization:
         pd.testing.assert_series_equal(hourly_totals, quarter_totals)
 
 
+# -- PBI A2: Generalize lags to bucket units --------------------------------
+#
+# Pins the contract that ``feature.lags`` is the canonical key (values are
+# interpreted as bucket offsets, not hours). The legacy ``feature.lag_hours``
+# key remains accepted as a back-compat alias so existing configs and notebooks
+# continue to work. When both keys are present, ``lags`` wins.
+
+
+class TestLagsConfig:
+    """Tests for the ``feature.lags`` configuration knob (PBI A2)."""
+
+    @staticmethod
+    def _config(
+        lags: list[int] | None = None, lag_hours: list[int] | None = None
+    ) -> dict[str, Any]:
+        feature: dict[str, Any] = {
+            "zone_shapefile_path": MINIMAL_CONFIG["feature"]["zone_shapefile_path"],
+        }
+        if lags is not None:
+            feature["lags"] = lags
+        if lag_hours is not None:
+            feature["lag_hours"] = lag_hours
+        return {**MINIMAL_CONFIG, "feature": feature}
+
+    def test_lags_key_is_honored(self) -> None:
+        """``feature.lags`` must produce lag columns matching the configured offsets."""
+        fe = FeatureEngineer(config=self._config(lags=[1, 2]))
+        panel = _make_hourly_panel()
+        result = fe.add_lag_features(panel)
+
+        assert "trip_count_lag_1" in result.columns
+        assert "trip_count_lag_2" in result.columns
+        # Spot-check: within each zone, ``lag_1`` equals ``trip_count`` from the
+        # previous bucket. ``add_lag_features`` drops rows where any lag is NaN,
+        # so after lags=[1, 2] the first 2 rows per zone are gone; the reference
+        # is the original ``trip_count`` shifted by 1 with the matching rows
+        # taken from the result's index slice.
+        for zone in result["pulocationid"].unique():
+            zone_actual = result[result["pulocationid"] == zone].sort_values("hour")
+            zone_panel = panel[panel["pulocationid"] == zone].sort_values("hour")
+            reference = (
+                zone_panel["trip_count"]
+                .shift(1)
+                .iloc[2:]
+                .astype(int)
+                .reset_index(drop=True)
+            )
+            actual = zone_actual["trip_count_lag_1"].reset_index(drop=True)
+            pd.testing.assert_series_equal(actual, reference, check_names=False)
+
+    def test_legacy_lag_hours_back_compat(self) -> None:
+        """Configs using only ``feature.lag_hours`` (no ``lags``) must keep working."""
+        fe = FeatureEngineer(config=self._config(lag_hours=[1, 3]))
+        panel = _make_hourly_panel()
+        result = fe.add_lag_features(panel)
+        for h in [1, 3]:
+            assert f"trip_count_lag_{h}" in result.columns
+
+    def test_lags_takes_precedence_over_lag_hours(self) -> None:
+        """When both keys are present, ``lags`` wins."""
+        fe = FeatureEngineer(config=self._config(lags=[1, 2], lag_hours=[5, 7]))
+        assert fe.lags == [1, 2]
+        # Old alias mirrors the canonical attribute, not the deprecated key.
+        assert fe.lag_hours == [1, 2]
+
+    def test_missing_both_keys_raises(self) -> None:
+        """Omitting both ``lags`` and ``lag_hours`` must raise a KeyError."""
+        with pytest.raises(KeyError):
+            FeatureEngineer(config=self._config(lags=None, lag_hours=None))
+
+
 # -- Test: add_time_features -----------------------------------------------
 
 
