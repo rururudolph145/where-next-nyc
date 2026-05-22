@@ -277,6 +277,138 @@ class TestLagsConfig:
             FeatureEngineer(config=self._config(lags=None, lag_hours=None))
 
 
+# -- PBI A3: Shifted-target generation --------------------------------------
+#
+# Pins the contract that ``feature.horizon_buckets`` produces a ``target_t{N}``
+# column via ``groupby(zone).shift(-N)``. Direction of shift is critical:
+# ``shift(-N)`` looks *forward* (target = future demand), whereas
+# ``shift(+N)`` would leak past as target — the classic silent-leakage bug.
+# These tests lock the contract before any consumer (trainer, simulator,
+# heatmap API) depends on it.
+
+
+class TestShiftedTarget:
+    """Tests for ``FeatureEngineer.add_shifted_target`` (PBI A3)."""
+
+    @staticmethod
+    def _config(horizon_buckets: int | None) -> dict[str, Any]:
+        cfg: dict[str, Any] = {
+            **MINIMAL_CONFIG,
+            "feature": {**MINIMAL_CONFIG["feature"]},
+        }
+        if horizon_buckets is not None:
+            cfg["feature"]["horizon_buckets"] = horizon_buckets
+        return cfg
+
+    def test_horizon_zero_equals_trip_count(self) -> None:
+        """``horizon_buckets=0`` → ``target_t0`` equals ``trip_count`` row-for-row.
+
+        No rows are dropped because no shift produces NaN.
+        """
+        fe = FeatureEngineer(config=self._config(horizon_buckets=0))
+        panel = _make_hourly_panel()
+        result = fe.add_shifted_target(panel)
+
+        assert "target_t0" in result.columns
+        assert len(result) == len(panel)
+        pd.testing.assert_series_equal(
+            result["target_t0"].astype(int).reset_index(drop=True),
+            result["trip_count"].astype(int).reset_index(drop=True),
+            check_names=False,
+        )
+
+    def test_horizon_two_shifts_forward(self) -> None:
+        """``horizon_buckets=2`` → for each ``(zone, t)``, ``target_t2`` equals
+        ``trip_count`` at ``(zone, t + 2*bucket)``.
+
+        Trailing 2 rows per zone are dropped (no future to look at).
+        """
+        fe = FeatureEngineer(config=self._config(horizon_buckets=2))
+        panel = _make_hourly_panel()
+        n_zones = panel["pulocationid"].nunique()
+        n_rows_per_zone = len(panel) // n_zones
+
+        result = fe.add_shifted_target(panel)
+
+        assert "target_t2" in result.columns
+        # 2 trailing rows dropped per zone
+        assert len(result) == n_zones * (n_rows_per_zone - 2)
+
+        # For each zone, target_t2 at bucket t equals trip_count at bucket t+2
+        for zone in result["pulocationid"].unique():
+            panel_zone = (
+                panel[panel["pulocationid"] == zone]
+                .sort_values("hour")
+                .reset_index(drop=True)
+            )
+            result_zone = (
+                result[result["pulocationid"] == zone]
+                .sort_values("hour")
+                .reset_index(drop=True)
+            )
+            expected = panel_zone["trip_count"].shift(-2).dropna().astype(int)
+            actual = result_zone["target_t2"].astype(int).reset_index(drop=True)
+            pd.testing.assert_series_equal(
+                actual, expected.reset_index(drop=True), check_names=False
+            )
+
+    def test_shift_direction_is_forward_not_backward(self) -> None:
+        """Regression guard: ``target_t{N}`` must point at the FUTURE, not the past.
+
+        If a refactor ever flips the sign in ``shift(-N)`` → ``shift(+N)``, the
+        model would train on past observations as the "target", producing
+        leakage-perfect backtest scores that collapse in production. This test
+        constructs a panel with monotonically-increasing trip_count so a forward
+        shift yields strictly larger targets than the row's own trip_count.
+        """
+        # Strictly increasing trip_count over time within a single zone.
+        panel = pd.DataFrame(
+            {
+                "pulocationid": [1] * 10,
+                "hour": pd.date_range("2022-01-01", periods=10, freq="h"),
+                "trip_count": list(range(10)),
+            }
+        )
+        fe = FeatureEngineer(config=self._config(horizon_buckets=2))
+        result = fe.add_shifted_target(panel)
+
+        # Every retained row's target must be strictly greater than its
+        # own trip_count (because trip_count is strictly increasing and
+        # we shifted forward by 2).
+        assert (result["target_t2"] > result["trip_count"]).all()
+
+    def test_no_cross_zone_bleed(self) -> None:
+        """Shifting in zone A must not pull rows from zone B's tail in as targets."""
+        # Two zones; zone 1 has small values, zone 2 has large values.
+        # If shift leaked across zones, zone 1's tail would carry zone 2's first
+        # values (or zone 2's tail would be NaN-but-not-dropped).
+        panel = pd.DataFrame(
+            {
+                "pulocationid": [1] * 5 + [2] * 5,
+                "hour": (
+                    list(pd.date_range("2022-01-01", periods=5, freq="h"))
+                    + list(pd.date_range("2022-01-01", periods=5, freq="h"))
+                ),
+                "trip_count": [1, 2, 3, 4, 5] + [100, 200, 300, 400, 500],
+            }
+        )
+        fe = FeatureEngineer(config=self._config(horizon_buckets=2))
+        result = fe.add_shifted_target(panel)
+
+        # 2 trailing rows per zone dropped → 3 retained per zone
+        assert len(result) == 6
+        zone1 = result[result["pulocationid"] == 1].sort_values("hour")
+        # Zone 1's targets must all be small (< 100). If cross-zone bleed
+        # occurred, the last retained row of zone 1 would carry zone 2's
+        # first value (100) — this assertion catches that.
+        assert (zone1["target_t2"] < 100).all()
+
+    def test_default_horizon_is_zero(self) -> None:
+        """Omitting ``feature.horizon_buckets`` must default to 0 (legacy)."""
+        fe = FeatureEngineer(config=self._config(horizon_buckets=None))
+        assert fe.horizon_buckets == 0
+
+
 # -- Test: add_time_features -----------------------------------------------
 
 

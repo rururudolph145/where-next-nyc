@@ -46,6 +46,12 @@ class FeatureEngineer:
         else:
             self.lags = feature_cfg["lag_hours"]
         self.lag_hours: list[int] = self.lags
+        # Forecast horizon expressed in *buckets*. Default 0 = predict the
+        # current bucket (legacy ``trip_count``). Set to 2 under bucket="15min"
+        # for the t+30 design (see docs/design_t30_15min_refresh.html §4.2).
+        # PBI A3 introduces the knob; downstream consumers (trainer, simulator,
+        # heatmap API) point at the resulting ``target_t{N}`` column.
+        self.horizon_buckets: int = feature_cfg.get("horizon_buckets", 0)
         self.zone_shapefile_path: str = self.config["feature"]["zone_shapefile_path"]
         self.silver_path: str = self.config["data"]["silver_path"]
         self.gold_path: str = self.config["data"]["gold_path"]
@@ -187,6 +193,54 @@ class FeatureEngineer:
         return df
 
     # ------------------------------------------------------------------
+    # Shifted target (forecast horizon)
+    # ------------------------------------------------------------------
+
+    def add_shifted_target(
+        self,
+        df: pd.DataFrame,
+        zone_col: str = "pulocationid",
+        target_col: str = "trip_count",
+    ) -> pd.DataFrame:
+        """Add a forward-shifted target column ``target_t{horizon_buckets}``.
+
+        For each ``(zone, bucket=t)`` row, the new column contains the
+        ``target_col`` value from ``(zone, bucket=t + horizon_buckets*bucket_width)``
+        — the demand we want to *predict* from features observable at ``t``.
+
+        Implementation uses ``groupby(zone).shift(-horizon_buckets)``. The
+        negative sign points the shift FORWARD in time (target = future
+        demand). A positive sign would produce the opposite — past as target —
+        which is the classic silent leakage bug. PBI A3 locks the sign with
+        ``tests/test_feature.py::TestShiftedTarget``.
+
+        When ``self.horizon_buckets == 0`` the target equals the current
+        bucket's ``target_col`` (legacy behavior) and no rows are dropped.
+        For positive horizons, the trailing ``horizon_buckets`` rows per
+        zone become NaN (no future to observe) and are dropped.
+
+        Args:
+            df: DataFrame sorted by ``(zone, hour)`` with a complete bucket
+                grid.
+            zone_col: Column name for the zone ID.
+            target_col: Column name for the demand to be shifted.
+
+        Returns:
+            DataFrame with a new ``target_t{horizon_buckets}`` column.
+            Trailing NaN rows (per zone) are dropped when horizon > 0.
+        """
+        n = self.horizon_buckets
+        out_col = f"target_t{n}"
+        df = df.sort_values([zone_col, "hour"]).copy()
+        if n == 0:
+            df[out_col] = df[target_col]
+            return df
+        df[out_col] = df.groupby(zone_col)[target_col].shift(-n)
+        df = df.dropna(subset=[out_col])
+        df[out_col] = df[out_col].astype(int)
+        return df
+
+    # ------------------------------------------------------------------
     # Zone coordinates
     # ------------------------------------------------------------------
 
@@ -258,6 +312,12 @@ class FeatureEngineer:
         panel = self.add_time_features(panel)
         panel = self.add_cyclical_features(panel)
         panel = self.add_lag_features(panel)
+        # Only materialize a shifted-target column when explicitly configured.
+        # Under the default ``horizon_buckets=0`` the trainer still reads the
+        # legacy ``trip_count`` column, so Gold's schema stays bit-identical
+        # for back-compat with existing training/serving paths.
+        if self.horizon_buckets > 0:
+            panel = self.add_shifted_target(panel)
         panel = self.add_zone_coordinates(panel)
 
         os.makedirs(self.gold_path, exist_ok=True)

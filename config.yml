@@ -36,6 +36,7 @@ data:
 feature:
   bucket: "h"  # aggregation bucket width (pandas offset alias). "h" = hourly (legacy), "15min" = 15-min refresh
   lags: [1, 3, 6, 12, 24, 168]  # lag offsets in *buckets* (under bucket="h" these are hours; under "15min" they are 15-min steps). Legacy key ``lag_hours`` is still accepted as a back-compat alias.
+  horizon_buckets: 0  # forecast horizon in buckets. 0 = predict current bucket (legacy). Set to 2 under bucket="15min" for t+30 forecast. Generates ``target_t{N}`` column when > 0.
   zone_shapefile_path: data/reference/taxi_zones.shp
 
 clean:
