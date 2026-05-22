@@ -1,6 +1,7 @@
 """Data ingestion: consolidate raw daily parquets into a single Bronze file."""
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,11 @@ import numpy as np
 import pandas as pd
 
 from app.core.config import load_config
+
+# Default thread-pool size for parallel parquet reads. Parquet reads
+# release the GIL on the I/O syscall, so threads are sufficient and we
+# avoid the pickling cost of a process pool.
+_DEFAULT_MAX_WORKERS = 8
 
 
 class Ingestion:
@@ -31,6 +37,9 @@ class Ingestion:
         self.bronze_path: str = self.config["data"]["bronze_path"]
         self.start_ym: str = self.config["ingest"]["start_year_month"]
         self.end_ym: str = self.config["ingest"]["end_year_month"]
+        self.max_workers: int = self.config["ingest"].get(
+            "max_workers", _DEFAULT_MAX_WORKERS
+        )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -67,11 +76,15 @@ class Ingestion:
     def load_raw(self) -> pd.DataFrame:
         """Scan the raw folder for daily parquets and concatenate them.
 
-        Iterates through each ``YYYY_MM`` subfolder within the configured
-        date range and reads every ``.parquet`` file found.
+        Reads each ``YYYY_MM/*.parquet`` in parallel via a
+        ``ThreadPoolExecutor``. Parquet I/O releases the GIL, so threads
+        let independent file reads overlap. Order-independence is
+        preserved by a stable sort on ``tpep_pickup_datetime`` after
+        ``pd.concat`` — this is the canonical contract enforced by
+        ``tests/test_dataset.py::test_load_raw_parallel_equivalence``.
 
         Returns:
-            Concatenated DataFrame of all raw daily files.
+            Concatenated, time-sorted DataFrame of all raw daily files.
 
         Raises:
             FileNotFoundError: If no parquet files are found in the range.
@@ -82,7 +95,16 @@ class Ingestion:
         schema: dict[str, str] = self.config["ingest"]["bronze_schema"]
         canonical: dict[str, str] = {name.lower(): name for name in schema}
 
-        frames: list[pd.DataFrame] = []
+        def _read_one(pq_file: Path) -> pd.DataFrame:
+            chunk = pd.read_parquet(pq_file)
+            rename_map = {
+                c: canonical[c.lower()]
+                for c in chunk.columns
+                if c.lower() in canonical and c != canonical[c.lower()]
+            }
+            return chunk.rename(columns=rename_map) if rename_map else chunk
+
+        paths: list[Path] = []
         for tag in tags:
             month_dir = raw_root / tag
             if not month_dir.is_dir():
@@ -92,25 +114,28 @@ class Ingestion:
             if not parquets:
                 print(f"  Warning: no parquet files in {month_dir}, skipping.")
                 continue
-            for pq_file in parquets:
-                chunk = pd.read_parquet(pq_file)
-                rename_map = {
-                    c: canonical[c.lower()]
-                    for c in chunk.columns
-                    if c.lower() in canonical and c != canonical[c.lower()]
-                }
-                if rename_map:
-                    chunk = chunk.rename(columns=rename_map)
-                frames.append(chunk)
-            print(f"  {tag}: read {len(parquets)} file(s)")
+            paths.extend(parquets)
+            print(f"  {tag}: queued {len(parquets)} file(s)")
 
-        if not frames:
+        if not paths:
             raise FileNotFoundError(
                 f"No raw parquet files found under {raw_root} "
                 f"for range {self.start_ym} → {self.end_ym}."
             )
 
-        return pd.concat(frames, ignore_index=True)
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            frames = list(executor.map(_read_one, paths))
+
+        df = pd.concat(frames, ignore_index=True)
+        # Restore canonical temporal order. Stable mergesort keeps rows
+        # from the same timestamp in their submission order, so the
+        # output is deterministic regardless of how parallel reads
+        # interleaved.
+        if "tpep_pickup_datetime" in df.columns:
+            df = df.sort_values("tpep_pickup_datetime", kind="mergesort").reset_index(
+                drop=True
+            )
+        return df
 
     def _enforce_schema(self, df: pd.DataFrame) -> pd.DataFrame:
         """Cast DataFrame columns to the types defined in config bronze_schema.

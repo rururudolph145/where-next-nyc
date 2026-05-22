@@ -166,13 +166,6 @@ def out_of_order_raw_tree(tmp_path: Path) -> Path:
     return raw_root
 
 
-@pytest.mark.xfail(
-    reason="PBI 14: load_raw must add post-concat stable sort by "
-    "tpep_pickup_datetime to be order-independent. Marked xfail until "
-    "PBI 14 lands so the suite signal stays clean; xpass will alert "
-    "that PBI 14 is in.",
-    strict=True,
-)
 def test_load_raw_parallel_equivalence(
     tmp_path: Path, out_of_order_raw_tree: Path, bronze_schema: dict[str, str]
 ) -> None:
@@ -212,12 +205,15 @@ def test_load_raw_parallel_equivalence(
         .sort_values("tpep_pickup_datetime", kind="mergesort")
         .reset_index(drop=True)
     )
-    # Align dtypes against what _enforce_schema produces in Bronze.
-    reference["tpep_pickup_datetime"] = reference["tpep_pickup_datetime"].astype(
-        "datetime64[us]"
+    # Align dtypes against what _enforce_schema + parquet round-trip
+    # actually produce in Bronze: pd.to_datetime → datetime64[ns]
+    # regardless of the config's [us] declaration (a pre-existing
+    # behavior of _enforce_schema, out of scope for PBI 14).
+    reference["tpep_pickup_datetime"] = pd.to_datetime(
+        reference["tpep_pickup_datetime"]
     )
-    reference["tpep_dropoff_datetime"] = reference["tpep_dropoff_datetime"].astype(
-        "datetime64[us]"
+    reference["tpep_dropoff_datetime"] = pd.to_datetime(
+        reference["tpep_dropoff_datetime"]
     )
 
     assert bronze_df["tpep_pickup_datetime"].is_monotonic_increasing

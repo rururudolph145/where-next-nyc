@@ -82,11 +82,13 @@ test-first invariant locking → equivalence test → implementation, per TDD ru
   - Marked `@pytest.mark.xfail(strict=True)` so the suite stays GREEN until PBI 14 lands; `strict=True` ensures the test will *fail* (xpass) the moment PBI 14 introduces the post-concat sort, providing automatic signal that PBI 14 is in
   - Acceptance: confirmed RED today (Bronze comes out `[Jan 15 × 4, Jan 5 × 4]`, not monotonic) — codifies the order-independence contract for PBI 14
 
-- [ ] **PBI 14 — Parallelize `load_raw` with `ThreadPoolExecutor`**
-  - Replace the sequential `for pq_file in parquets` loop in `app/ingestion/ingest.py` with `ThreadPoolExecutor.map(pd.read_parquet, paths)`
-  - Add `ingest.max_workers` (default 8) to `config.yml`; thread the value through `Ingestion.__init__`
-  - After `pd.concat`, call `df.sort_values("tpep_pickup_datetime", kind="mergesort").reset_index(drop=True)` to restore canonical time order
-  - Acceptance: PBIs 12 + 13 pass; all 58 existing tests still pass; ingestion runtime measurably improves (informal benchmark in PR description)
+- [x] **PBI 14 — Parallelize `load_raw` with `ThreadPoolExecutor`** — *shipped in a follow-up commit*
+  - Replace the sequential `for pq_file in parquets` loop in `app/ingestion/ingest.py` with `ThreadPoolExecutor.map(_read_one, paths)` (inner helper applies the rename map so parallelization is column-safe)
+  - Add `ingest.max_workers: 8` to `config.yml`; threaded through `Ingestion.__init__` via `.get(..., 8)` so legacy configs without the key still work
+  - After `pd.concat`, call `df.sort_values("tpep_pickup_datetime", kind="mergesort").reset_index(drop=True)` to restore canonical time order (guarded by `if "tpep_pickup_datetime" in df.columns` for schema-flexibility)
+  - Acceptance: PBIs 12 + 13 pass; pytest 58 → 59 passing; ruff + mypy clean on `app/ tests/`
+  - Informal benchmark (30 daily files × 50k rows = 1.5M rows): max_workers=1 → 482ms baseline, max_workers=4 → 186ms (**2.6× speedup**), max_workers=8 → 201ms (plateau). Default of 8 keeps headroom for larger production files.
+  - Side fix: PBI 13's reference-dtype alignment cast to `[us]` was wrong (pre-existing `_enforce_schema` produces `[ns]` via `pd.to_datetime`); corrected to use `pd.to_datetime(...)` for both columns. Hidden by xfail-strict before PBI 14 landed.
 
 - [ ] **PBI 15 — Streaming Bronze Write (Generator Compliance) — *stretch***
   - Replace `frames.append` accumulator + `pd.concat` with streaming `pyarrow.parquet.ParquetWriter`

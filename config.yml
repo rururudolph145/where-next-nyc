@@ -3,6 +3,7 @@ env: local  # local | cloud
 ingest:
   start_year_month: "2021-01"
   end_year_month: "2021-03"
+  max_workers: 8  # ThreadPoolExecutor size for parallel parquet reads
   bronze_schema:
     VendorID: float64
     tpep_pickup_datetime: datetime64[us]
