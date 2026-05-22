@@ -39,13 +39,81 @@ Supports **Step 1 (Start Shift) → Step 2 (Check Demand)** in the driver journe
 
 ### Activity 3: Multi-Horizon Upgrade
 
-- [ ] **PBI 4 — Multi-Horizon Forecasting (t+30, t+60)**
-  - Extend training to produce shifted targets (trip_count at t+30, t+60)
-  - Only changes: target column generation in feature engineering + retrain
-  - Inference pipeline structure stays identical
+- [ ] **PBI 4 — Multi-Horizon Forecasting (t+30, t+60)** — *MVP-deferred; superseded by B1*
+  - Original plan: extend training to produce shifted targets (trip_count at t+30, t+60)
+  - Status: replaced for MVP by the simpler **B1 nowcast** path (see Activity 3b). Multi-horizon shift remains available via the already-shipped `add_shifted_target` knob (PBI A3, commit `4ea0a03`) if/when product asks for true forecasting.
   - Input: Gold layer features with shifted targets
   - Output: predicted trip_count per zone per horizon
   - Acceptance: separate models or multi-output model; metrics logged per horizon
+
+### Activity 3b: Nowcast MVP (30-min bucket + spatial smoothing) — *B-track*
+
+> **Why this exists.** End-to-end smoke testing of the 15-min + shifted-horizon design (A1-A3 shipped: commits `6ab31f1`, `e546e3d`, `4ea0a03`) surfaced that bucketed counts are sparse at fine granularity (busiest zones: 6-15 trips/30-min bucket; most zones: 0-3). Coefficient of variation σ/μ = 1/√λ doubles when buckets are quartered. Pranshu's notebook (`experiment/NYC_Yellow_Taxi_Pickup_Density.ipynb`) achieves ~13% MAPE at 10-min binning *only* because it coarsens space to 40 k-means clusters. We retain the 263 TLC zones, so we coarsen time instead (30-min) and add spatial smoothing.
+>
+> **Framing.** Predict `trip_count` for the current 30-min bucket `[t, t+30min)` from features observable at `t` — no target shift required, because the lag features (`lag_1`, `lag_2`, …) reference *prior* buckets and the trainer's explicit feature list excludes the target. L2 loss on the count. The driver-facing "lead time" is naturally 0-30 min (whatever fraction of the bucket has elapsed when the prediction is served).
+>
+> **Supersedes** A1-A5 plan for MVP: A1 (`bucket` knob) is reused; A2 (lag generalization) and A3 (shifted target) are kept in the codebase but `horizon_buckets` stays 0; A4 (Poisson loss) and A5 (spatial-spillover) are subsumed by B1's design choices (L2 + k-NN smoothing).
+
+- [x] **B1 — 30-Min Bucket + Neighbor-Mean Lag Smoothing** — *shipped*
+  - Config changes (`config.yml`):
+    - `feature.bucket: "30min"` (was `"h"`)
+    - `feature.lags: [1, 2, 4, 6, 12, 48, 336]` (1×30min, 1h, 2h, 3h, 6h, 1d, 1w) — replaces hourly lag schedule
+    - `feature.horizon_buckets: 0` (unchanged — pure nowcast)
+    - `feature.n_neighbors: 5` (new — k for spatial smoothing)
+    - `train.features`: add `trip_count_lag_1_neighbor_mean`; lag column names remain `trip_count_lag_{n}` (now 30-min offsets)
+  - Code changes (`app/ingestion/feature.py`):
+    - New method `FeatureEngineer.add_neighbor_lag_smoothing(df, k=5)`:
+      - Builds `sklearn.neighbors.BallTree` over zone centroids (lat, lon in radians) with `metric="haversine"`
+      - For each zone, queries k+1 neighbors (self + k); drops self
+      - Per `(zone, hour)` row, computes `mean(trip_count_lag_1 of k nearest neighbors at same hour)` → column `trip_count_lag_1_neighbor_mean`
+      - Mean (not sum) so the feature stays on the same count scale as `trip_count_lag_1`
+    - Wire into `run()` *after* `add_lag_features` and *after* `add_zone_coordinates` (needs lat/lon present, lags present, post-shapefile-orphan drop for stable neighbor sets)
+  - Test plan (`tests/test_feature.py` — new `TestNeighborLagSmoothing` class):
+    1. `test_neighbor_mean_matches_manual_calculation` — synthetic 6-zone grid on a line, k=2, hand-verify the neighbor-mean
+    2. `test_neighbor_mean_scale_preserved` — `trip_count_lag_1_neighbor_mean.mean()` ≈ `trip_count_lag_1.mean()` (within 5%) on a uniform-zone fixture; locks the "mean not sum" choice
+    3. `test_neighbor_mean_no_self_inclusion` — synthetic zone with lag_1=100 surrounded by zeros: its neighbor-mean must be 0, not include itself
+    4. `test_orphan_zones_dropped` — zones missing from shapefile (e.g. 57, 264, 265) absent from output, no NaN neighbor-means
+  - Acceptance:
+    - All 4 unit tests + 3 synthetic E2E tests (B0 below) green
+    - On the 3.8M-row 7-day Silver slice: Gold output has ≥ 1 row per (zone, 30-min bucket), no NaN in `trip_count_lag_1_neighbor_mean`, neighbor-mean column shape matches trip_count_lag_1
+    - Trainer runs to completion against the new Gold schema; val/test MAE ≤ current hourly baseline + 20% tolerance (sparser bucket is harder; smoothing should compensate)
+    - ruff + mypy clean on `app/ tests/`
+
+- [x] **B0 — Synthetic-Data E2E Test Suite** (test-first, landed before B1) — *shipped*
+  - New file `tests/test_e2e_synthetic.py`:
+    1. `test_legacy_pipeline_smoke` — bucket=h, horizon=0, no neighbor feature: full Silver→Gold→Train→Predict on a synthetic ~50-row Silver fixture; asserts non-empty predictions, expected schema. **GREEN today** — pins legacy behaviour before B1 touches it.
+    2. `test_b1_pipeline_smoke` — bucket=30min, horizon=0, n_neighbors=5: same pipeline; asserts `trip_count_lag_1_neighbor_mean` column present and finite. **RED until B1 implementation lands** (`@pytest.mark.xfail(strict=True)`).
+    3. `test_no_target_leakage` — invariant check across both modes: no feature column equals `trip_count` of the same row; lag columns reference strictly prior buckets; neighbor-mean reads `lag_1`, never `trip_count`. Static schema assertion + a generated-data ablation (corrupt one lag, assert model error rises).
+  - Acceptance: B0 tests written and committed; (1) green, (2) xfail-RED, (3) green on current code. Pytest count grows by 3.
+
+- [x] **B2 — 15-Min Bucket + 30-Min Summed-Horizon Target** — *shipped*
+  - **Motivation.** B1 served as a 30-min nowcast (target = current 30-min bucket). Product framing for the driver UX is "what will demand be over the next 30 minutes from *right now*?" — i.e. refresh every 15 min and predict the *sum* of the next two 15-min bins. This is still a nowcast (target window starts at `t`, the prediction time) but extends 30 min into the future — an "extended nowcast" in the taxonomy below.
+  - **Nowcast vs forecast.** B1 target = `[t, t+30)` (one 30-min bin) — pure nowcast, window fully concurrent with prediction time. B2 target = `[t, t+30)` as a *sum of two 15-min bins* — extended nowcast: the second bin spans `[t+15, t+30)` which is in the future relative to the most recent observed lag bin. True forecast = `[t+30, t+60)` (zero overlap with `t`) — explicitly out of scope for MVP.
+  - Config changes (`config.yml`):
+    - `feature.bucket: "30min"` → `"15min"`
+    - `feature.lags: [1, 2, 4, 6, 12, 48, 336]` → `[1, 2, 4, 8, 12, 24, 96, 672]` (recomputed in 15-min units: 15min, 30min, 1h, 2h, 3h, 6h, 1d, 1w)
+    - `feature.horizon_sum_buckets: 2` (new — number of future buckets to sum into the target)
+    - `feature.n_neighbors: 5` (unchanged — B1 spatial smoothing preserved)
+    - `train.target: "trip_count"` → `"target_sum_t1_t2"`
+    - `train.features`: lag column names unchanged (now 15-min offsets); `trip_count_lag_1_neighbor_mean` preserved
+  - Code changes (`app/ingestion/feature.py`):
+    - New init knob `self.horizon_sum_buckets` (default 0 — disables, so legacy configs untouched)
+    - New method `add_summed_horizon_target(df, zone_col, target_col)`:
+      - For `k in 1..N`: build `df.groupby(zone_col)[target_col].shift(-k)` (negative = forward in time)
+      - Sum across the N shifted columns into `target_sum_t1_t{N}`
+      - Drop the trailing N rows per zone where any contributing shift is NaN
+    - Wire into `run()` *after* `add_shifted_target` (A3) and *before* `add_zone_coordinates` — independent of A3, both columns emitted when both knobs set
+  - Test plan (`tests/test_feature.py` — new `TestSummedHorizonTarget` class):
+    1. `test_sum_of_two_future_buckets` — synthetic 6-row zone with known counts, hand-verify each row's `target_sum_t1_t2`
+    2. `test_shift_direction_is_forward` — corrupt a future bucket, assert it changes the current row's target; anti-leakage guard
+    3. `test_no_cross_zone_bleed` — two zones interleaved; assert zone A's target sums only zone A's future buckets
+    4. `test_horizon_sum_zero_is_noop` — `horizon_sum_buckets=0` leaves the frame untouched (B1 default path)
+    5. `test_trailing_rows_dropped` — output is shorter than input by exactly N rows per zone
+  - E2E test (`tests/test_e2e_synthetic.py`): `test_b2_pipeline_smoke` — full Silver→Gold→Train against B2 config, asserts `target_sum_t1_t2` column present and trainer converges.
+  - Acceptance:
+    - All 5 unit tests + 1 E2E test + B1 + B0 tests green (44 total in `test_feature.py` + `test_e2e_synthetic.py`)
+    - ruff + mypy clean on `app/ tests/`
+    - `config.yml` flipped to B2 defaults so `python -m pipeline.run_all` produces the B2 Gold schema
 
 ---
 
@@ -210,7 +278,11 @@ Supports the "Use pagination when API responses are large" rule.
 ```
 PBI 1 (train t) ──> PBI 2 (inference t) ──> PBI 3 (heatmap API) ──> PBI 16 (paginate heatmap)
                                   │
-                                  ├──> PBI 4 (multi-horizon)
+                                  ├──> PBI 4 (multi-horizon) — superseded for MVP by B-track
+                                  │
+                                  │   A1 (bucket knob, shipped) ──┐
+                                  │   A2 (lag units, shipped) ────┼──> B0 (E2E synthetic tests) ──> B1 (30-min + neighbor smoothing) ──> B2 (15-min + 30-min summed target)
+                                  │   A3 (shift target, shipped) ─┘
                                   │
                                   ├──> PBI 11 (simulated streaming) ──> PBI 3 (heatmap refreshes)
                                   │
@@ -236,7 +308,10 @@ PBI 17 (Socrata HTTP compliance) — blocked: requires downloader to migrate int
 | 1 | PBI 1 | Validate existing single-horizon model end-to-end |
 | 2 | PBI 2 | Inference pipeline — completes the full ML loop |
 | 3 | PBI 3 | Heatmap API — serves predictions to drivers (MVP complete) |
-| 4 | PBI 4 | Multi-horizon — only changes training target, pipeline reused |
+| 4a | B0 | Synthetic E2E test suite — pins legacy, RED-locks B1 |
+| 4b | B1 | 30-min nowcast + neighbor-mean smoothing — superseded by B2 as default; method preserved |
+| 4c | B2 | 15-min refresh + 30-min summed-horizon target — current MVP forecasting path |
+| 4d | PBI 4 | Multi-horizon — deferred; A3 knob (`horizon_buckets`) already shipped |
 | 5 | PBI 5 | Zone lookup — needed by personalized ranking |
 | 6 | PBI 6 | Location capture — simple, enables testing |
 | 7 | PBI 7 | Scoring function — pure math, unit testable |
