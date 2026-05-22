@@ -620,3 +620,121 @@ class TestRunEndToEnd:
             drop=True
         )
         pd.testing.assert_frame_equal(result.reset_index(drop=True), sorted_result)
+
+
+# -- Test: add_neighbor_lag_smoothing (PBI B1) ------------------------------
+
+
+def _make_neighbor_panel(zone_lag1: dict[int, int]) -> pd.DataFrame:
+    """Build a 1-bucket panel with deterministic lag_1 values per zone.
+
+    Zones are placed on a line: zone z at longitude -74.00 - 0.01*z, so
+    zone 1 and zone 2 are the closest pair, zone 2 and zone 3 are next, etc.
+    """
+    rows: list[dict[str, object]] = []
+    for z, lag1 in zone_lag1.items():
+        rows.append(
+            {
+                "pulocationid": z,
+                "hour": pd.Timestamp("2022-01-01 00:00"),
+                "trip_count_lag_1": lag1,
+                "pickup_longitude": -74.00 - 0.01 * z,
+                "pickup_latitude": 40.70,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _fe_with_neighbors(k: int) -> FeatureEngineer:
+    cfg: dict[str, Any] = {
+        "env": "local",
+        "data": {
+            "silver_path": "data/silver/test.parquet",
+            "gold_path": "data/gold/yellow_tripdata",
+        },
+        "feature": {
+            "lags": [1],
+            "n_neighbors": k,
+            "zone_shapefile_path": "data/reference/taxi_zones.shp",
+        },
+    }
+    return FeatureEngineer(config=cfg)
+
+
+class TestNeighborLagSmoothing:
+    """Tests for FeatureEngineer.add_neighbor_lag_smoothing (PBI B1)."""
+
+    def test_neighbor_mean_matches_manual_calculation(self) -> None:
+        """k=2 neighbour-mean on a known line matches hand-computed values."""
+        # Zones on a line at increasing longitude. Lag_1 values per zone:
+        # 1→10, 2→20, 3→30, 4→40, 5→50, 6→60
+        panel = _make_neighbor_panel({1: 10, 2: 20, 3: 30, 4: 40, 5: 50, 6: 60})
+        result = _fe_with_neighbors(k=2).add_neighbor_lag_smoothing(panel)
+
+        means = result.set_index("pulocationid")["trip_count_lag_1_neighbor_mean"]
+        # Zone 1's two nearest neighbours are 2 and 3: mean(20, 30) = 25
+        assert means.loc[1] == pytest.approx(25.0)
+        # Zone 3's two nearest are 2 and 4: mean(20, 40) = 30
+        assert means.loc[3] == pytest.approx(30.0)
+        # Zone 6's two nearest are 5 and 4: mean(50, 40) = 45
+        assert means.loc[6] == pytest.approx(45.0)
+
+    def test_neighbor_mean_scale_preserved(self) -> None:
+        """Neighbour-mean stays on the same count scale as the source lag.
+
+        With every zone holding the same lag_1 value, the neighbour-mean
+        for every zone must equal that value exactly — the "mean (not sum)"
+        choice locked here.
+        """
+        panel = _make_neighbor_panel({z: 7 for z in range(1, 6)})
+        result = _fe_with_neighbors(k=2).add_neighbor_lag_smoothing(panel)
+        means = result["trip_count_lag_1_neighbor_mean"]
+        assert (means == 7).all()
+
+    def test_neighbor_mean_no_self_inclusion(self) -> None:
+        """A zone's own lag value must not contribute to its own neighbour-mean.
+
+        Zone 1 holds lag_1=100, every other zone holds 0. Zone 1's
+        neighbour-mean must be 0 — if self were included it would be > 0.
+        """
+        panel = _make_neighbor_panel({1: 100, 2: 0, 3: 0, 4: 0, 5: 0})
+        result = _fe_with_neighbors(k=2).add_neighbor_lag_smoothing(panel)
+        means = result.set_index("pulocationid")["trip_count_lag_1_neighbor_mean"]
+        assert means.loc[1] == 0
+
+    def test_orphan_zones_dropped_upstream(self) -> None:
+        """Zones missing centroids before this step yield NaN neighbour-mean.
+
+        ``add_neighbor_lag_smoothing`` trusts ``add_zone_coordinates`` to
+        have already dropped shapefile-orphan zones (e.g. 57, 264, 265).
+        If a stray orphan slips through, the haversine query can't place
+        it on the tree and the row must surface as NaN rather than silently
+        get the global mean.
+        """
+        panel = _make_neighbor_panel({1: 10, 2: 20, 3: 30})
+        # Inject an orphan: zone 99 with NaN coordinates
+        orphan = pd.DataFrame(
+            [
+                {
+                    "pulocationid": 99,
+                    "hour": pd.Timestamp("2022-01-01 00:00"),
+                    "trip_count_lag_1": 5,
+                    "pickup_longitude": np.nan,
+                    "pickup_latitude": np.nan,
+                }
+            ]
+        )
+        panel_with_orphan = pd.concat([panel, orphan], ignore_index=True)
+        result = _fe_with_neighbors(k=2).add_neighbor_lag_smoothing(
+            panel_with_orphan
+        )
+        means = result.set_index("pulocationid")["trip_count_lag_1_neighbor_mean"]
+        # Zone 99 has NaN centroid → BallTree can't place it → NaN result
+        assert pd.isna(means.loc[99])
+
+    def test_n_neighbors_zero_is_noop(self) -> None:
+        """``n_neighbors=0`` (legacy back-compat) must not modify the panel."""
+        panel = _make_neighbor_panel({1: 10, 2: 20, 3: 30})
+        result = _fe_with_neighbors(k=0).add_neighbor_lag_smoothing(panel)
+        assert "trip_count_lag_1_neighbor_mean" not in result.columns
+        pd.testing.assert_frame_equal(result, panel)

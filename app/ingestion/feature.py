@@ -13,6 +13,7 @@ from typing import Any
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+from sklearn.neighbors import BallTree  # type: ignore[import-untyped]
 
 from app.core.config import load_config
 
@@ -52,6 +53,10 @@ class FeatureEngineer:
         # PBI A3 introduces the knob; downstream consumers (trainer, simulator,
         # heatmap API) point at the resulting ``target_t{N}`` column.
         self.horizon_buckets: int = feature_cfg.get("horizon_buckets", 0)
+        # Number of nearest neighbours used by ``add_neighbor_lag_smoothing``
+        # (PBI B1). Default 0 disables the smoothing path so legacy configs
+        # without the key keep their pre-B1 Gold schema.
+        self.n_neighbors: int = feature_cfg.get("n_neighbors", 0)
         self.zone_shapefile_path: str = self.config["feature"]["zone_shapefile_path"]
         self.silver_path: str = self.config["data"]["silver_path"]
         self.gold_path: str = self.config["data"]["gold_path"]
@@ -289,6 +294,106 @@ class FeatureEngineer:
         return df
 
     # ------------------------------------------------------------------
+    # Spatial smoothing (PBI B1)
+    # ------------------------------------------------------------------
+
+    def add_neighbor_lag_smoothing(
+        self,
+        df: pd.DataFrame,
+        zone_col: str = "pulocationid",
+        lag_col: str = "trip_count_lag_1",
+    ) -> pd.DataFrame:
+        """Add neighbour-mean smoothing of the lag_1 column.
+
+        For each zone we find its ``self.n_neighbors`` nearest peers by
+        great-circle distance over the (longitude, latitude) centroids
+        already attached by :meth:`add_zone_coordinates`. For every
+        ``(zone, bucket)`` row we then write the mean of those neighbours'
+        ``lag_col`` values at the *same* bucket into a new column named
+        ``{lag_col}_neighbor_mean``.
+
+        Design choices locked by ``tests/test_feature.py::TestNeighborLagSmoothing``:
+
+        * **Mean, not sum** — keeps the smoothed feature on the same count
+          scale as ``lag_col`` so a single coefficient covers both.
+        * **Self excluded** — only the k nearest *other* zones contribute,
+          so a zone with no nearby demand can't smuggle its own value back
+          in via the smoother.
+        * **Reads lag_1, not trip_count** — the smoother feeds on lagged
+          history, never on the current bucket's count. This is the
+          anti-leakage invariant guarded by
+          ``tests/test_e2e_synthetic.py::test_no_target_leakage``.
+
+        Args:
+            df: Gold-layer panel with ``zone_col``, ``hour``,
+                ``pickup_longitude``, ``pickup_latitude``, and ``lag_col``.
+            zone_col: Zone-id column.
+            lag_col: Source lag column to smooth (default ``trip_count_lag_1``).
+
+        Returns:
+            DataFrame with new ``{lag_col}_neighbor_mean`` column.
+        """
+        out_col = f"{lag_col}_neighbor_mean"
+        k = self.n_neighbors
+        if k <= 0:
+            # Smoothing disabled — leave the panel untouched.
+            return df
+
+        # One representative centroid per zone (haversine wants radians).
+        # Drop zones with NaN coordinates — BallTree rejects them. Their
+        # rows fall out of the merge below as NaN, signalling the upstream
+        # bug rather than silently fabricating a neighbour-mean.
+        zone_centroids = (
+            df[[zone_col, "pickup_longitude", "pickup_latitude"]]
+            .dropna(subset=["pickup_longitude", "pickup_latitude"])
+            .drop_duplicates(subset=[zone_col])
+            .reset_index(drop=True)
+        )
+        coords_rad = np.radians(
+            zone_centroids[["pickup_latitude", "pickup_longitude"]].to_numpy()
+        )
+        n_zones = len(zone_centroids)
+        # Cap k at n_zones-1 so we always have *some* neighbour to mean over
+        # (tiny test fixtures with 3-4 zones would otherwise blow up).
+        effective_k = min(k, n_zones - 1)
+        if effective_k <= 0:
+            df = df.copy()
+            df[out_col] = np.nan
+            return df
+
+        tree = BallTree(coords_rad, metric="haversine")
+        # +1 because the closest match is always the zone itself; we drop it.
+        _, idx = tree.query(coords_rad, k=effective_k + 1)
+        neighbour_idx = idx[:, 1:]  # shape: (n_zones, effective_k)
+
+        zone_ids = zone_centroids[zone_col].to_numpy()
+        # neighbours_by_zone[z] = list of neighbour zone-ids for zone z
+        neighbours_by_zone: dict[Any, list[Any]] = {
+            zone_ids[i]: zone_ids[neighbour_idx[i]].tolist()
+            for i in range(n_zones)
+        }
+
+        # Pivot lag_col to a (hour × zone) matrix so neighbour-mean is just
+        # a per-row column selection + mean. Much cheaper than a per-row loop.
+        wide = df.pivot_table(
+            index="hour", columns=zone_col, values=lag_col, aggfunc="first"
+        )
+        neighbour_means = pd.DataFrame(index=wide.index, columns=wide.columns)
+        for z in wide.columns:
+            cols = [n for n in neighbours_by_zone.get(z, []) if n in wide.columns]
+            if not cols:
+                neighbour_means[z] = np.nan
+            else:
+                neighbour_means[z] = wide[cols].mean(axis=1)
+
+        # Name the columns axis so stack().reset_index() produces a tidy
+        # (hour, zone_col, value) frame without a fragile "level_1" label.
+        neighbour_means.columns.name = zone_col
+        stacked: pd.Series[Any] = neighbour_means.stack()  # type: ignore[assignment]
+        long = stacked.rename(out_col).reset_index()
+        return df.merge(long, on=["hour", zone_col], how="left")
+
+    # ------------------------------------------------------------------
     # Orchestration
     # ------------------------------------------------------------------
 
@@ -319,6 +424,11 @@ class FeatureEngineer:
         if self.horizon_buckets > 0:
             panel = self.add_shifted_target(panel)
         panel = self.add_zone_coordinates(panel)
+        # Spatial smoothing must run *after* zone coordinates (needs lat/lon)
+        # and *after* the orphan-zone drop, so the neighbour set is stable.
+        # No-op when ``feature.n_neighbors`` is unset/0 (legacy back-compat).
+        if self.n_neighbors > 0:
+            panel = self.add_neighbor_lag_smoothing(panel)
 
         os.makedirs(self.gold_path, exist_ok=True)
         output_path = os.path.join(self.gold_path, "hourly_demand_featured.parquet")
