@@ -53,6 +53,12 @@ class FeatureEngineer:
         # PBI A3 introduces the knob; downstream consumers (trainer, simulator,
         # heatmap API) point at the resulting ``target_t{N}`` column.
         self.horizon_buckets: int = feature_cfg.get("horizon_buckets", 0)
+        # PBI B2: number of *future* buckets to sum into a single target column.
+        # Under bucket="15min" with horizon_sum_buckets=2 this builds the
+        # 30-min lookahead target = shift(-1) + shift(-2) of trip_count, i.e.
+        # the "extended nowcast" design. 0 disables the feature so B1 stays
+        # the default once horizon_sum_buckets is omitted from config.
+        self.horizon_sum_buckets: int = feature_cfg.get("horizon_sum_buckets", 0)
         # Number of nearest neighbours used by ``add_neighbor_lag_smoothing``
         # (PBI B1). Default 0 disables the smoothing path so legacy configs
         # without the key keep their pre-B1 Gold schema.
@@ -246,6 +252,69 @@ class FeatureEngineer:
         return df
 
     # ------------------------------------------------------------------
+    # Summed horizon target (PBI B2)
+    # ------------------------------------------------------------------
+
+    def add_summed_horizon_target(
+        self,
+        df: pd.DataFrame,
+        zone_col: str = "pulocationid",
+        target_col: str = "trip_count",
+    ) -> pd.DataFrame:
+        """Add a forward-summed target column ``target_sum_t1_t{n}``.
+
+        Computes::
+
+            target_sum_t1_tN(zone, t) = sum_{k=1..N} target_col(zone, t + k*bucket)
+
+        This is the "extended nowcast" target used by PBI B2: under
+        ``bucket="15min"`` with ``horizon_sum_buckets=2`` the column equals
+        ``demand[t+15..t+30) + demand[t+30..t+45)`` — the cumulative pickups
+        over the next 30 minutes. (See `docs/design_t30_15min_refresh.html`
+        §4.2 for why a sum is the right shape for driver-facing demand.)
+
+        Distinct from :meth:`add_shifted_target` (PBI A3) which emits a
+        *single* future bucket. B2 emits a *sum across N future buckets*.
+
+        Implementation uses ``groupby(zone).shift(-k)`` for k=1..N. The
+        negative sign points the shift FORWARD in time (target = future
+        demand). Positive would produce past-as-target — the classic
+        silent leakage bug — and is locked out by
+        ``tests/test_feature.py::TestSummedHorizonTarget``.
+
+        Args:
+            df: DataFrame sorted by ``(zone, hour)`` with a complete bucket
+                grid.
+            zone_col: Column name for the zone ID.
+            target_col: Column name for the demand to be summed.
+
+        Returns:
+            DataFrame with a new ``target_sum_t1_t{N}`` column. The
+            trailing ``N`` rows per zone (where any contributing shift is
+            NaN) are dropped, so the output is shorter than the input.
+        """
+        n = self.horizon_sum_buckets
+        if n <= 0:
+            return df
+        out_col = f"target_sum_t1_t{n}"
+        df = df.sort_values([zone_col, "hour"]).copy()
+
+        # Build each future-shift column, then sum. We materialise
+        # intermediates rather than chaining .add() so the dropna step
+        # below can see all NaNs in one pass.
+        shift_cols = []
+        for k in range(1, n + 1):
+            col = f"_shift_{k}"
+            df[col] = df.groupby(zone_col)[target_col].shift(-k)
+            shift_cols.append(col)
+
+        df[out_col] = df[shift_cols].sum(axis=1, skipna=False)
+        df = df.drop(columns=shift_cols)
+        df = df.dropna(subset=[out_col])
+        df[out_col] = df[out_col].astype(int)
+        return df
+
+    # ------------------------------------------------------------------
     # Zone coordinates
     # ------------------------------------------------------------------
 
@@ -423,6 +492,12 @@ class FeatureEngineer:
         # for back-compat with existing training/serving paths.
         if self.horizon_buckets > 0:
             panel = self.add_shifted_target(panel)
+        # PBI B2: extended-nowcast target = sum of next N future buckets.
+        # Independent of horizon_buckets — typical config uses only one or
+        # the other. When both are set, both columns are emitted and the
+        # trainer picks which one via ``train.target``.
+        if self.horizon_sum_buckets > 0:
+            panel = self.add_summed_horizon_target(panel)
         panel = self.add_zone_coordinates(panel)
         # Spatial smoothing must run *after* zone coordinates (needs lat/lon)
         # and *after* the orphan-zone drop, so the neighbour set is stable.

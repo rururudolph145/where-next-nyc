@@ -34,9 +34,10 @@ data:
   gold_path: data/gold/yellow_tripdata
 
 feature:
-  bucket: "30min"  # aggregation bucket width (pandas offset alias). PBI B1: 30-min nowcast. "h" = hourly (legacy), "15min" = quarter-hourly refresh.
-  lags: [1, 2, 4, 6, 12, 48, 336]  # lag offsets in *buckets*. Under bucket="30min": 30min, 1h, 2h, 3h, 6h, 1d, 1w. Legacy key ``lag_hours`` is still accepted as a back-compat alias.
-  horizon_buckets: 0  # forecast horizon in buckets. 0 = predict current bucket (B1 nowcast). Set to 2 under bucket="15min" for t+30 shifted-horizon forecast. Generates ``target_t{N}`` column when > 0.
+  bucket: "15min"  # aggregation bucket width (pandas offset alias). PBI B2: 15-min refresh. "30min" = B1 nowcast, "h" = legacy hourly.
+  lags: [1, 2, 4, 8, 12, 24, 96, 672]  # lag offsets in *buckets*. Under bucket="15min": 15min, 30min, 1h, 2h, 3h, 6h, 1d, 1w.
+  horizon_buckets: 0  # PBI A3: single-bucket forecast horizon. 0 = disabled. Generates ``target_t{N}`` when > 0. Mutually independent of horizon_sum_buckets.
+  horizon_sum_buckets: 2  # PBI B2: sum of next N future buckets as target. Under bucket="15min" with N=2 → 30-min lookahead = demand[t+15..t+30) + demand[t+30..t+45). Generates ``target_sum_t1_t{N}`` when > 0.
   n_neighbors: 5  # PBI B1: k for spatial smoothing of trip_count_lag_1. 0 disables and reverts to legacy schema.
   zone_shapefile_path: data/reference/taxi_zones.shp
 
@@ -62,15 +63,16 @@ train:
     - month_cos
     - pickup_longitude
     - pickup_latitude
-    - trip_count_lag_1     # 30 min ago
-    - trip_count_lag_2     # 1 h ago
-    - trip_count_lag_4     # 2 h ago
-    - trip_count_lag_6     # 3 h ago
-    - trip_count_lag_12    # 6 h ago
-    - trip_count_lag_48    # 1 day ago
-    - trip_count_lag_336   # 1 week ago
+    - trip_count_lag_1     # 15 min ago
+    - trip_count_lag_2     # 30 min ago
+    - trip_count_lag_4     # 1 h ago
+    - trip_count_lag_8     # 2 h ago
+    - trip_count_lag_12    # 3 h ago
+    - trip_count_lag_24    # 6 h ago
+    - trip_count_lag_96    # 1 day ago
+    - trip_count_lag_672   # 1 week ago
     - trip_count_lag_1_neighbor_mean  # PBI B1: spatial smoothing
-  target: trip_count
+  target: target_sum_t1_t2   # PBI B2: 30-min lookahead = sum of next two 15-min bins
 
 model:
   name: LGBMRegressor

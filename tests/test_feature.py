@@ -738,3 +738,118 @@ class TestNeighborLagSmoothing:
         result = _fe_with_neighbors(k=0).add_neighbor_lag_smoothing(panel)
         assert "trip_count_lag_1_neighbor_mean" not in result.columns
         pd.testing.assert_frame_equal(result, panel)
+
+
+# -- Test: add_summed_horizon_target (PBI B2) -------------------------------
+
+
+def _fe_with_horizon_sum(n: int) -> FeatureEngineer:
+    cfg: dict[str, Any] = {
+        "env": "local",
+        "data": {
+            "silver_path": "data/silver/test.parquet",
+            "gold_path": "data/gold/yellow_tripdata",
+        },
+        "feature": {
+            "lags": [1],
+            "horizon_sum_buckets": n,
+            "zone_shapefile_path": "data/reference/taxi_zones.shp",
+        },
+    }
+    return FeatureEngineer(config=cfg)
+
+
+class TestSummedHorizonTarget:
+    """Tests for FeatureEngineer.add_summed_horizon_target (PBI B2)."""
+
+    def test_sum_of_two_future_buckets(self) -> None:
+        """target_sum_t1_t2 must equal shift(-1) + shift(-2) of trip_count."""
+        panel = _make_hourly_panel().sort_values(["pulocationid", "hour"])
+        result = _fe_with_horizon_sum(n=2).add_summed_horizon_target(panel)
+
+        # For each (zone, hour) in result, the column must equal
+        # trip_count[t+1] + trip_count[t+2] in the original panel.
+        for zone in panel["pulocationid"].unique():
+            orig = (
+                panel[panel["pulocationid"] == zone]
+                .sort_values("hour")
+                .reset_index(drop=True)
+            )
+            out = (
+                result[result["pulocationid"] == zone]
+                .sort_values("hour")
+                .reset_index(drop=True)
+            )
+            for i in range(len(out)):
+                expected = int(
+                    orig["trip_count"].iloc[i + 1] + orig["trip_count"].iloc[i + 2]
+                )
+                assert out["target_sum_t1_t2"].iloc[i] == expected, (
+                    f"zone={zone} row={i}: "
+                    f"got {out['target_sum_t1_t2'].iloc[i]}, expected {expected}"
+                )
+
+    def test_shift_direction_is_forward(self) -> None:
+        """Anti-leakage guard: target must come from the FUTURE, not the past.
+
+        Construct a strictly-increasing trip_count series. If the shift
+        direction were wrong (past as target), the summed target would be
+        *smaller* than trip_count. Forward shift guarantees it's *larger*.
+        """
+        zone_data = pd.DataFrame(
+            {
+                "pulocationid": [1] * 10,
+                "hour": pd.date_range("2022-01-01", periods=10, freq="h"),
+                "trip_count": list(range(1, 11)),  # 1, 2, 3, ..., 10
+            }
+        )
+        result = _fe_with_horizon_sum(n=2).add_summed_horizon_target(zone_data)
+
+        # For each retained row, target_sum > trip_count (future > present
+        # when the underlying series is strictly increasing)
+        assert (result["target_sum_t1_t2"] > result["trip_count"]).all()
+
+    def test_no_cross_zone_bleed(self) -> None:
+        """Summing must not pull values from a different zone."""
+        # Zone 1: counts 1..5; Zone 2: counts 100..104. If summing leaked
+        # across zones, zone 1's last retained row would include zone 2's
+        # values and explode upward.
+        df = pd.DataFrame(
+            {
+                "pulocationid": [1] * 5 + [2] * 5,
+                "hour": list(pd.date_range("2022-01-01", periods=5, freq="h")) * 2,
+                "trip_count": list(range(1, 6)) + list(range(100, 105)),
+            }
+        )
+        result = _fe_with_horizon_sum(n=2).add_summed_horizon_target(df)
+
+        zone1 = result[result["pulocationid"] == 1]
+        # Zone 1's maximum summed target = trip_count[3] + trip_count[4] = 4+5 = 9.
+        # If zone 2 leaked in, this would be 100+ instead.
+        assert zone1["target_sum_t1_t2"].max() < 50
+
+    def test_horizon_sum_zero_is_noop(self) -> None:
+        """``horizon_sum_buckets=0`` must leave the panel untouched."""
+        panel = _make_hourly_panel()
+        result = _fe_with_horizon_sum(n=0).add_summed_horizon_target(panel)
+        assert "target_sum_t1_t2" not in result.columns
+        assert "target_sum_t1_t1" not in result.columns
+        pd.testing.assert_frame_equal(result, panel)
+
+    def test_trailing_rows_dropped(self) -> None:
+        """The last N rows per zone (no future to sum) must be dropped."""
+        n_per_zone = 10
+        df = pd.DataFrame(
+            {
+                "pulocationid": [1] * n_per_zone + [2] * n_per_zone,
+                "hour": list(
+                    pd.date_range("2022-01-01", periods=n_per_zone, freq="h")
+                )
+                * 2,
+                "trip_count": [5] * (2 * n_per_zone),
+            }
+        )
+        result = _fe_with_horizon_sum(n=2).add_summed_horizon_target(df)
+        # With N=2, each zone loses its last 2 rows
+        for zone in (1, 2):
+            assert (result["pulocationid"] == zone).sum() == n_per_zone - 2

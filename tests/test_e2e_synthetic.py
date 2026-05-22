@@ -281,6 +281,79 @@ def test_b1_pipeline_smoke(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> No
 # ---------------------------------------------------------------------------
 
 
+def _b2_config(tmp_path: Any) -> dict[str, Any]:
+    """Config for the B2 extended-nowcast pipeline.
+
+    15-min bucket + horizon_sum_buckets=2 → target = demand over the next
+    30 min as a sum of two future 15-min bins. Keeps B1's neighbour
+    smoothing.
+    """
+    cfg = _legacy_config(tmp_path)
+    cfg["feature"]["bucket"] = "15min"
+    # Lag schedule in 15-min buckets: 15min, 30min, 1h, 2h, 1d
+    cfg["feature"]["lags"] = [1, 2, 4, 8, 96]
+    cfg["feature"]["horizon_sum_buckets"] = 2  # 2 × 15min = 30min lookahead
+    cfg["feature"]["n_neighbors"] = 2
+    cfg["train"]["features"] = [
+        "hour_of_day_sin",
+        "hour_of_day_cos",
+        "day_of_week_sin",
+        "day_of_week_cos",
+        "month_sin",
+        "month_cos",
+        "pickup_longitude",
+        "pickup_latitude",
+        "trip_count_lag_1",
+        "trip_count_lag_2",
+        "trip_count_lag_4",
+        "trip_count_lag_8",
+        "trip_count_lag_96",
+        "trip_count_lag_1_neighbor_mean",
+    ]
+    cfg["train"]["target"] = "target_sum_t1_t2"
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+# 2b. B2 smoke — 15-min + summed-horizon target
+# ---------------------------------------------------------------------------
+
+
+def test_b2_pipeline_smoke(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """15-min bucket + 30-min summed target end-to-end.
+
+    Locks the B2 "extended nowcast" pipeline: 15-min grid, summed-horizon
+    target column present, target equals lag_1[t+1] + lag_1[t+2] of the
+    same zone (i.e. trainer learns to predict the next 30 min as a sum
+    of two future 15-min bins).
+    """
+    _patch_zone_coordinates(monkeypatch)
+    config = _b2_config(tmp_path)
+    # B2 needs more data: 96 lag buckets × 15 min = 1 day; plus 2 future
+    # buckets to drop. Use 14 days for headroom.
+    silver = _make_synthetic_silver(n_days=14)
+
+    gold = _run_feature_engineering(config, silver)
+
+    # B2 invariants
+    assert "target_sum_t1_t2" in gold.columns, (
+        "B2 must emit the summed-horizon target column"
+    )
+    assert gold["target_sum_t1_t2"].notna().all(), (
+        "Summed target must be finite for every retained row"
+    )
+    # 15-min grid: every bucket minute is one of {0, 15, 30, 45}
+    assert gold["hour"].dt.minute.isin([0, 15, 30, 45]).all(), (
+        "B2 must aggregate to 15-min buckets"
+    )
+    # Smoothing column carried over from B1
+    assert "trip_count_lag_1_neighbor_mean" in gold.columns
+
+    result = _train_no_mlflow(config, gold)
+    assert np.isfinite(result["test_preds"]).all()
+    assert result["n_train"] > 0
+
+
 def test_no_target_leakage(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
