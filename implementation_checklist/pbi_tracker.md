@@ -75,10 +75,12 @@ test-first invariant locking → equivalence test → implementation, per TDD ru
   - Acceptance: test passes on current code; pins the invariant before any parallelization touches the read path
   - Outcome: pytest baseline grew 57 → 58 passing; ruff + mypy clean on `app/ tests/`; the invariant currently holds by coincidence of the sequential loop — PBI 14 will be forced to add an explicit `sort_values` to keep it green
 
-- [ ] **PBI 13 — Parallel-Equivalence Regression Test**
+- [x] **PBI 13 — Parallel-Equivalence Regression Test** — *shipped (xfail-tracked) in a follow-up commit*
   - Add `test_load_raw_parallel_equivalence` to `tests/test_dataset.py`
-  - Assertion: `load_raw(max_workers=1)` and `load_raw(max_workers=8)` produce equal DataFrames (after sort)
-  - Acceptance: test fails until PBI 14 lands; codifies the contract that parallelism is order-independent
+  - Approach: outcome-based contract test rather than `max_workers=1` vs `max_workers=8` API check — the fixture arranges raw files so that **glob/concat order ≠ temporal order**, exercising the exact hazard parallel reads will introduce
+  - Assertion: Bronze output is globally monotonic on `tpep_pickup_datetime` AND equals the canonical sorted reference
+  - Marked `@pytest.mark.xfail(strict=True)` so the suite stays GREEN until PBI 14 lands; `strict=True` ensures the test will *fail* (xpass) the moment PBI 14 introduces the post-concat sort, providing automatic signal that PBI 14 is in
+  - Acceptance: confirmed RED today (Bronze comes out `[Jan 15 × 4, Jan 5 × 4]`, not monotonic) — codifies the order-independence contract for PBI 14
 
 - [ ] **PBI 14 — Parallelize `load_raw` with `ThreadPoolExecutor`**
   - Replace the sequential `for pq_file in parquets` loop in `app/ingestion/ingest.py` with `ThreadPoolExecutor.map(pd.read_parquet, paths)`
