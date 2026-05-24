@@ -19,6 +19,7 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 
 from app.core.config import load_config
+from app.ingestion.feature import build_centroid_lookup
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 _predictions_df: pd.DataFrame | None = None
 _zone_lookup: dict[int, str] = {}
+_centroid_lookup: dict[int, tuple[float, float]] = {}
 _generated_at: str = ""
 
 
@@ -77,12 +79,15 @@ def _load_zone_lookup(config: dict[str, Any]) -> dict[int, str]:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """Load predictions and zone lookup into memory at server start."""
-    global _predictions_df, _zone_lookup, _generated_at  # noqa: PLW0603
+    global _predictions_df, _zone_lookup, _centroid_lookup, _generated_at  # noqa: PLW0603
 
     config = load_config()
     try:
         _predictions_df = _load_predictions(config)
         _zone_lookup = _load_zone_lookup(config)
+        _centroid_lookup = build_centroid_lookup(
+            config["serving"]["zone_shapefile_path"]
+        )
         _generated_at = datetime.now(tz=timezone.utc).isoformat()
         logger.info(
             "Loaded %d predictions, %d zones",
@@ -172,11 +177,15 @@ async def get_heatmap(
     predictions: list[dict[str, object]] = []
     for _, row in df.iterrows():
         zone_id = int(row["pulocationid"])
+        centroid = _centroid_lookup.get(zone_id)
         predictions.append(
             {
                 "pulocationid": zone_id,
                 "zone_name": _zone_lookup.get(zone_id, "Unknown"),
                 "predicted_trip_count": round(float(row["predicted_trip_count"]), 2),
+                "latitude": centroid[0] if centroid is not None else None,
+                "longitude": centroid[1] if centroid is not None else None,
+                "bucket_time": target_hour.isoformat(),
             }
         )
 
@@ -187,7 +196,7 @@ async def get_heatmap(
 
     return {
         "generated_at": _generated_at,
-        "hour": str(target_hour),
+        "hour": target_hour.isoformat(),
         "zone_count": len(predictions),
         "predictions": predictions,
     }

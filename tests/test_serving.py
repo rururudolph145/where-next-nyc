@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -38,15 +40,43 @@ def zone_lookup() -> dict[int, str]:
 
 
 @pytest.fixture()
-def client(sample_predictions: pd.DataFrame, zone_lookup: dict[int, str]) -> TestClient:
-    """Create a test client with mocked predictions and zone lookup."""
+def centroid_lookup() -> dict[int, tuple[float, float]]:
+    """Create a small zone ID → (lat, lon) mapping with 3 d.p. values."""
+    return {
+        1: (40.693, -74.174),
+        2: (40.618, -73.825),
+        3: (40.866, -73.868),
+    }
+
+
+@pytest.fixture()
+def client(
+    sample_predictions: pd.DataFrame,
+    zone_lookup: dict[int, str],
+    centroid_lookup: dict[int, tuple[float, float]],
+) -> Generator[TestClient, None, None]:
+    """Create a test client with mocked predictions, zone lookup, and centroid lookup.
+
+    Restores all mutated module globals on teardown so tests are isolated.
+    """
     import app.api.main as serving_module
+
+    orig_predictions = serving_module._predictions_df
+    orig_zone_lookup = serving_module._zone_lookup
+    orig_centroid_lookup = serving_module._centroid_lookup
+    orig_generated_at = serving_module._generated_at
 
     serving_module._predictions_df = sample_predictions
     serving_module._zone_lookup = zone_lookup
+    serving_module._centroid_lookup = centroid_lookup
     serving_module._generated_at = "2021-03-01T12:00:00+00:00"
 
-    return TestClient(serving_module.app)
+    yield TestClient(serving_module.app)
+
+    serving_module._predictions_df = orig_predictions
+    serving_module._zone_lookup = orig_zone_lookup
+    serving_module._centroid_lookup = orig_centroid_lookup
+    serving_module._generated_at = orig_generated_at
 
 
 class TestHealthCheck:
@@ -68,7 +98,7 @@ class TestHeatmapEndpoint:
         resp = client.get("/heatmap")
         assert resp.status_code == 200
         body: dict[str, Any] = resp.json()
-        assert body["hour"] == "2021-03-01 01:00:00"
+        assert body["hour"] == "2021-03-01T01:00:00"
         assert body["zone_count"] == 3
         assert len(body["predictions"]) == 3
 
@@ -105,7 +135,7 @@ class TestHeatmapEndpoint:
         resp = client.get("/heatmap", params={"hour": "2021-03-01T00:00:00"})
         assert resp.status_code == 200
         body: dict[str, Any] = resp.json()
-        assert body["hour"] == "2021-03-01 00:00:00"
+        assert body["hour"] == "2021-03-01T00:00:00"
         assert body["zone_count"] == 3
 
     def test_heatmap_invalid_hour_returns_404(self, client: TestClient) -> None:
@@ -131,14 +161,563 @@ class TestHeatmapEndpoint:
 class TestHeatmapNoData:
     """Tests for GET /heatmap when predictions are not loaded."""
 
-    def test_heatmap_returns_503_when_no_predictions(self) -> None:
+    def test_heatmap_returns_503_when_no_predictions(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """GET /heatmap returns 503 if predictions are not loaded."""
         import app.api.main as serving_module
 
-        serving_module._predictions_df = None
-        serving_module._zone_lookup = {}
-        serving_module._generated_at = ""
+        monkeypatch.setattr(serving_module, "_predictions_df", None)
+        monkeypatch.setattr(serving_module, "_zone_lookup", {})
+        monkeypatch.setattr(serving_module, "_centroid_lookup", {})
+        monkeypatch.setattr(serving_module, "_generated_at", "")
 
-        client = TestClient(serving_module.app)
-        resp = client.get("/heatmap")
+        local_client = TestClient(serving_module.app)
+        resp = local_client.get("/heatmap")
         assert resp.status_code == 503
+
+
+class TestHeatmapEnrichedFields:
+    """Tests for enriched prediction fields: latitude, longitude, bucket_time (AC #1–#8)."""
+
+    def test_get_heatmap_prediction_schema_includes_lat_lon_bucket_time(
+        self, client: TestClient
+    ) -> None:
+        """Every prediction object must contain latitude, longitude, and bucket_time.
+
+        AC #1: all six required fields present on each prediction.
+        """
+        resp = client.get("/heatmap")
+        assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+        for pred in body["predictions"]:
+            assert "pulocationid" in pred
+            assert "zone_name" in pred
+            assert "predicted_trip_count" in pred
+            assert "latitude" in pred
+            assert "longitude" in pred
+            assert "bucket_time" in pred
+            assert isinstance(pred["pulocationid"], int)
+            assert isinstance(pred["zone_name"], str)
+            assert isinstance(pred["predicted_trip_count"], float)
+
+    def test_get_heatmap_lat_lon_rounded_to_3dp(self, client: TestClient) -> None:
+        """latitude and longitude must be rounded to exactly 3 decimal places.
+
+        AC #3: values match the centroid_lookup fixture which already holds
+        3 d.p. values; the assertion verifies no extra precision is added.
+        """
+        resp = client.get("/heatmap")
+        body: dict[str, Any] = resp.json()
+        for pred in body["predictions"]:
+            if pred["latitude"] is not None:
+                assert pred["latitude"] == round(pred["latitude"], 3)
+            if pred["longitude"] is not None:
+                assert pred["longitude"] == round(pred["longitude"], 3)
+
+    def test_get_heatmap_bucket_time_equals_hour_iso_formatted(
+        self, client: TestClient
+    ) -> None:
+        """bucket_time must equal the envelope ``hour`` formatted as ISO-8601.
+
+        AC #4: for the default (latest) hour, every prediction's bucket_time
+        must equal the envelope hour string as an ISO timestamp.
+        """
+        resp = client.get("/heatmap")
+        body: dict[str, Any] = resp.json()
+        envelope_hour = body["hour"]
+        expected_bucket_time = pd.Timestamp(envelope_hour).isoformat()
+        for pred in body["predictions"]:
+            assert pred["bucket_time"] == expected_bucket_time
+
+    def test_get_heatmap_missing_centroid_zone_returns_null_lat_lon(
+        self,
+        client: TestClient,
+        centroid_lookup: dict[int, tuple[float, float]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A zone absent from _centroid_lookup must have null lat/lon.
+
+        AC #7: zone 99 has no centroid entry → latitude and longitude are None;
+        zone_name falls back to "Unknown".
+        """
+        import app.api.main as serving_module
+
+        # Override with a prediction set that includes zone 99 (no centroid).
+        predictions_with_unknown = pd.DataFrame(
+            {
+                "pulocationid": [1, 99],
+                "hour": pd.to_datetime(["2021-03-01 01:00:00", "2021-03-01 01:00:00"]),
+                "predicted_trip_count": [12.0, 3.0],
+                "actual_trip_count": [13.0, 2.0],
+            }
+        )
+        monkeypatch.setattr(serving_module, "_predictions_df", predictions_with_unknown)
+        # centroid_lookup has no entry for zone 99 — reuse fixture as-is
+        local_client = TestClient(serving_module.app)
+        resp = local_client.get("/heatmap")
+        assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+
+        preds_by_zone = {p["pulocationid"]: p for p in body["predictions"]}
+        assert preds_by_zone[99]["latitude"] is None
+        assert preds_by_zone[99]["longitude"] is None
+        assert preds_by_zone[99]["zone_name"] == "Unknown"
+
+    def test_get_heatmap_enriched_with_hour_filter(self, client: TestClient) -> None:
+        """?hour=<iso> must still return enriched prediction objects.
+
+        AC #8: explicit hour parameter returns predictions with all six fields.
+        """
+        resp = client.get("/heatmap", params={"hour": "2021-03-01T00:00:00"})
+        assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+        for pred in body["predictions"]:
+            assert "latitude" in pred
+            assert "longitude" in pred
+            assert "bucket_time" in pred
+
+    def test_get_heatmap_zone_count_equals_prediction_count(
+        self, client: TestClient
+    ) -> None:
+        """zone_count must equal len(predictions).
+
+        AC #5: all zones returned; no extra or missing entries.
+        """
+        resp = client.get("/heatmap")
+        body: dict[str, Any] = resp.json()
+        assert body["zone_count"] == len(body["predictions"])
+
+    def test_get_heatmap_envelope_fields_unchanged(self, client: TestClient) -> None:
+        """generated_at, hour, zone_count must still be present and correct.
+
+        AC #6: envelope shape unchanged after enrichment.
+        """
+        resp = client.get("/heatmap")
+        body: dict[str, Any] = resp.json()
+        assert body["generated_at"] == "2021-03-01T12:00:00+00:00"
+        assert body["hour"] == "2021-03-01T01:00:00"
+        assert body["zone_count"] == 3
+
+    def test_get_heatmap_sorted_descending_with_enrichment(
+        self, client: TestClient
+    ) -> None:
+        """Predictions must remain sorted descending by predicted_trip_count.
+
+        AC #6: sort order preserved after enrichment.
+        """
+        resp = client.get("/heatmap")
+        body: dict[str, Any] = resp.json()
+        counts = [p["predicted_trip_count"] for p in body["predictions"]]
+        assert counts == sorted(counts, reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# Story-level acceptance tests — one test per acceptance criterion
+# ---------------------------------------------------------------------------
+
+
+class TestHeatmapAcceptance:
+    """Acceptance tests for the /heatmap enrichment story.
+
+    Each test maps directly to one numbered acceptance criterion (AC #1–#11)
+    from the approved user story. These tests exercise the endpoint as an API
+    consumer would: via ``TestClient`` with realistic-shape fixtures. They
+    are intentionally higher-level than ``TestHeatmapEnrichedFields`` and
+    include user-visible error-body assertions that the unit-style tests omit.
+    """
+
+    # ------------------------------------------------------------------
+    # AC #1 — all six required fields present on every prediction object
+    # ------------------------------------------------------------------
+
+    def test_ac1_every_prediction_has_all_six_required_fields(
+        self, client: TestClient
+    ) -> None:
+        """AC #1: pulocationid, zone_name, predicted_trip_count, latitude,
+        longitude, bucket_time must all be present on every prediction.
+
+        Arrange: client fixture has 3 zones for 2 hours.
+        Act: GET /heatmap (default = latest hour, 3 zones).
+        Assert: each of the 3 prediction objects contains exactly the six
+        fields with their documented types.
+        """
+        resp = client.get("/heatmap")
+
+        assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+        predictions: list[dict[str, Any]] = body["predictions"]
+        assert len(predictions) == 3, "Expected 3 zones in fixture"
+        for pred in predictions:
+            assert isinstance(pred["pulocationid"], int)
+            assert isinstance(pred["zone_name"], str)
+            assert isinstance(pred["predicted_trip_count"], float)
+            assert isinstance(pred["latitude"], float)
+            assert isinstance(pred["longitude"], float)
+            # bucket_time must be a non-empty string (ISO-8601 parsability
+            # is checked in AC #4)
+            assert isinstance(pred["bucket_time"], str)
+            assert pred["bucket_time"] != ""
+
+    # ------------------------------------------------------------------
+    # AC #2 — latitude / longitude come from the shared centroid helper
+    # ------------------------------------------------------------------
+
+    def test_ac2_lat_lon_values_match_centroid_fixture(
+        self,
+        client: TestClient,
+        centroid_lookup: dict[int, tuple[float, float]],
+    ) -> None:
+        """AC #2: lat/lon must equal the values from the shared centroid lookup.
+
+        The ``centroid_lookup`` fixture is injected into ``_centroid_lookup``
+        in ``app.api.main`` before the request, so any value that does not
+        come from that dict would be incorrect.
+
+        Arrange: centroid_lookup maps zone 1→(40.693, -74.174), etc.
+        Act: GET /heatmap.
+        Assert: each prediction's latitude/longitude exactly matches the
+        fixture centroid for that zone.
+        """
+        resp = client.get("/heatmap")
+
+        assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+        for pred in body["predictions"]:
+            zone_id: int = pred["pulocationid"]
+            expected_lat, expected_lon = centroid_lookup[zone_id]
+            assert pred["latitude"] == expected_lat, (
+                f"zone {zone_id}: expected lat {expected_lat}, got {pred['latitude']}"
+            )
+            assert pred["longitude"] == expected_lon, (
+                f"zone {zone_id}: expected lon {expected_lon}, got {pred['longitude']}"
+            )
+
+    # ------------------------------------------------------------------
+    # AC #3 — lat/lon rounded to exactly 3 decimal places
+    # ------------------------------------------------------------------
+
+    def test_ac3_lat_lon_rounded_to_3_decimal_places(self, client: TestClient) -> None:
+        """AC #3: latitude and longitude must have at most 3 decimal places.
+
+        Verifies this at the JSON level — any value that would require a
+        4th decimal place when serialised is a violation visible to the consumer.
+
+        Arrange: centroid_lookup fixture already contains 3-d.p. values.
+        Act: GET /heatmap.
+        Assert: for each prediction, round(value, 3) == value (no extra precision).
+        """
+        resp = client.get("/heatmap")
+
+        assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+        for pred in body["predictions"]:
+            lat = pred["latitude"]
+            lon = pred["longitude"]
+            if lat is not None:
+                assert round(lat, 3) == lat, (
+                    f"latitude {lat} has more than 3 decimal places"
+                )
+            if lon is not None:
+                assert round(lon, 3) == lon, (
+                    f"longitude {lon} has more than 3 decimal places"
+                )
+
+    # ------------------------------------------------------------------
+    # AC #4 — bucket_time equals envelope hour, ISO-8601 formatted
+    # ------------------------------------------------------------------
+
+    def test_ac4_bucket_time_equals_envelope_hour_iso8601(
+        self, client: TestClient
+    ) -> None:
+        """AC #4: every prediction's bucket_time must be literally equal to the
+        envelope ``hour`` field (both are ISO-8601 T-separated strings).
+
+        Arrange: default request targets the latest hour (2021-03-01T01:00:00).
+        Act: GET /heatmap.
+        Assert: bucket_time == body["hour"] (strict string equality, not just
+        timestamp equality) AND the string is parseable as ISO-8601.
+        """
+        resp = client.get("/heatmap")
+
+        assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+        envelope_hour: str = body["hour"]
+        # Sanity: envelope hour must itself be parseable ISO-8601
+        pd.Timestamp(envelope_hour)
+        for pred in body["predictions"]:
+            bucket_time: str = pred["bucket_time"]
+            # Strict literal equality — both strings are produced by .isoformat()
+            assert bucket_time == envelope_hour, (
+                f"bucket_time {bucket_time!r} != envelope hour {envelope_hour!r}"
+            )
+
+    # ------------------------------------------------------------------
+    # AC #5 — all zones in parquet returned; zone_count == len(predictions)
+    # ------------------------------------------------------------------
+
+    def test_ac5_zone_count_equals_number_of_predictions(
+        self, client: TestClient
+    ) -> None:
+        """AC #5: zone_count in the envelope must equal len(predictions).
+        No zones may be silently dropped or duplicated.
+
+        Arrange: fixture has 3 zones for the latest hour.
+        Act: GET /heatmap.
+        Assert: zone_count == 3 == len(predictions); zone IDs are unique.
+        """
+        resp = client.get("/heatmap")
+
+        assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+        predictions: list[dict[str, Any]] = body["predictions"]
+        assert body["zone_count"] == len(predictions), (
+            "zone_count envelope field does not match actual prediction count"
+        )
+        zone_ids = [p["pulocationid"] for p in predictions]
+        assert len(zone_ids) == len(set(zone_ids)), "Duplicate zone IDs in response"
+
+    # ------------------------------------------------------------------
+    # AC #6 — envelope fields unchanged; predictions sorted desc
+    # ------------------------------------------------------------------
+
+    def test_ac6_envelope_fields_present_and_predictions_sorted_desc(
+        self, client: TestClient
+    ) -> None:
+        """AC #6: generated_at / hour / zone_count must be present and unchanged;
+        predictions must be sorted descending by predicted_trip_count.
+
+        Arrange: client fixture sets _generated_at = '2021-03-01T12:00:00+00:00'.
+        Act: GET /heatmap.
+        Assert: all three envelope fields match expected values AND trip counts
+        are in non-ascending order.
+        """
+        resp = client.get("/heatmap")
+
+        assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+        # Envelope fields
+        assert body["generated_at"] == "2021-03-01T12:00:00+00:00"
+        assert body["hour"] == "2021-03-01T01:00:00"
+        assert body["zone_count"] == 3
+        # Sort order
+        counts: list[float] = [p["predicted_trip_count"] for p in body["predictions"]]
+        assert counts == sorted(counts, reverse=True), (
+            "predictions are not sorted descending by predicted_trip_count"
+        )
+
+    # ------------------------------------------------------------------
+    # AC #7 — missing centroid → null lat/lon; zone_name fallback "Unknown"
+    # ------------------------------------------------------------------
+
+    def test_ac7_missing_centroid_yields_null_coords_and_unknown_name(
+        self,
+        centroid_lookup: dict[int, tuple[float, float]],
+        zone_lookup: dict[int, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """AC #7: a zone absent from _centroid_lookup must have latitude=null,
+        longitude=null, and zone_name="Unknown" in the response.
+
+        Arrange: inject predictions that include zone 99, which has no entry
+        in the centroid_lookup or zone_lookup fixtures.
+        Act: GET /heatmap.
+        Assert: zone 99's prediction has null coordinates and Unknown name;
+        zone 1 (which is in the lookup) still has valid coordinates.
+        """
+        import app.api.main as serving_module
+
+        predictions_with_unknown = pd.DataFrame(
+            {
+                "pulocationid": [1, 99],
+                "hour": pd.to_datetime(["2021-03-01 02:00:00", "2021-03-01 02:00:00"]),
+                "predicted_trip_count": [15.0, 3.5],
+                "actual_trip_count": [14.0, 2.0],
+            }
+        )
+        monkeypatch.setattr(serving_module, "_predictions_df", predictions_with_unknown)
+        monkeypatch.setattr(serving_module, "_zone_lookup", zone_lookup)
+        monkeypatch.setattr(serving_module, "_centroid_lookup", centroid_lookup)
+        monkeypatch.setattr(
+            serving_module, "_generated_at", "2021-03-01T12:00:00+00:00"
+        )
+
+        local_client = TestClient(serving_module.app)
+        resp = local_client.get("/heatmap")
+
+        assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+        preds_by_zone: dict[int, dict[str, Any]] = {
+            p["pulocationid"]: p for p in body["predictions"]
+        }
+        # Zone 99: no centroid, no name
+        assert preds_by_zone[99]["latitude"] is None
+        assert preds_by_zone[99]["longitude"] is None
+        assert preds_by_zone[99]["zone_name"] == "Unknown"
+        # Zone 1: valid centroid retained
+        assert preds_by_zone[1]["latitude"] == centroid_lookup[1][0]
+        assert preds_by_zone[1]["longitude"] == centroid_lookup[1][1]
+
+    # ------------------------------------------------------------------
+    # AC #8 — ?hour=<iso> returns enriched objects
+    # ------------------------------------------------------------------
+
+    def test_ac8_hour_filter_returns_enriched_predictions(
+        self, client: TestClient
+    ) -> None:
+        """AC #8: an explicit ?hour= query must return fully-enriched predictions
+        (all six fields present) for that hour.
+
+        Arrange: fixture has data for 2021-03-01 00:00:00 and 01:00:00.
+        Act: GET /heatmap?hour=2021-03-01T00:00:00.
+        Assert: 200, correct hour, 3 predictions each with latitude, longitude,
+        bucket_time all populated.
+        """
+        resp = client.get("/heatmap", params={"hour": "2021-03-01T00:00:00"})
+
+        assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+        assert body["hour"] == "2021-03-01T00:00:00"
+        assert len(body["predictions"]) == 3
+        for pred in body["predictions"]:
+            assert "latitude" in pred and pred["latitude"] is not None
+            assert "longitude" in pred and pred["longitude"] is not None
+            assert "bucket_time" in pred
+            assert pred["bucket_time"] == body["hour"]
+
+    # ------------------------------------------------------------------
+    # AC #9 — 503 when predictions not loaded
+    # ------------------------------------------------------------------
+
+    def test_ac9_returns_503_with_detail_when_predictions_not_loaded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC #9: GET /heatmap must return 503 when no predictions are available.
+        The response body must contain a 'detail' field explaining the issue.
+
+        Arrange: set _predictions_df = None (simulates a cold start before
+        the pipeline has run).
+        Act: GET /heatmap.
+        Assert: status 503, body contains 'detail' key (FastAPI error shape).
+        """
+        import app.api.main as serving_module
+
+        monkeypatch.setattr(serving_module, "_predictions_df", None)
+        monkeypatch.setattr(serving_module, "_zone_lookup", {})
+        monkeypatch.setattr(serving_module, "_centroid_lookup", {})
+        monkeypatch.setattr(serving_module, "_generated_at", "")
+
+        local_client = TestClient(serving_module.app)
+        resp = local_client.get("/heatmap")
+
+        assert resp.status_code == 503
+        body: dict[str, Any] = resp.json()
+        assert "detail" in body, "503 response must include a 'detail' field"
+        assert body["detail"]  # non-empty
+
+    # ------------------------------------------------------------------
+    # AC #10 — 404 for unknown hour
+    # ------------------------------------------------------------------
+
+    def test_ac10_returns_404_with_detail_for_unknown_hour(
+        self, client: TestClient
+    ) -> None:
+        """AC #10: requesting a valid-format but non-existent hour must return 404.
+        The response body must contain a 'detail' field.
+
+        Arrange: fixture has hours for 2021-03-01 only; request 2099-01-01.
+        Act: GET /heatmap?hour=2099-01-01T00:00:00.
+        Assert: status 404, body has 'detail'.
+        """
+        resp = client.get("/heatmap", params={"hour": "2099-01-01T00:00:00"})
+
+        assert resp.status_code == 404
+        body: dict[str, Any] = resp.json()
+        assert "detail" in body, "404 response must include a 'detail' field"
+        assert body["detail"]
+
+    # ------------------------------------------------------------------
+    # AC #11 — 400 for malformed hour
+    # ------------------------------------------------------------------
+
+    def test_ac11_returns_400_with_detail_for_malformed_hour(
+        self, client: TestClient
+    ) -> None:
+        """AC #11: a syntactically invalid hour string must return 400.
+        The response body must contain a 'detail' field.
+
+        Arrange: pass the string 'not-a-date' as the hour parameter.
+        Act: GET /heatmap?hour=not-a-date.
+        Assert: status 400, body has 'detail'.
+        """
+        resp = client.get("/heatmap", params={"hour": "not-a-date"})
+
+        assert resp.status_code == 400
+        body: dict[str, Any] = resp.json()
+        assert "detail" in body, "400 response must include a 'detail' field"
+        assert body["detail"]
+
+
+# ---------------------------------------------------------------------------
+# I3 — Lifespan integration: verify build_centroid_lookup wiring
+# ---------------------------------------------------------------------------
+
+
+class TestLifespanCentroidWiring:
+    """Verify that lifespan() calls build_centroid_lookup and stores the result.
+
+    All file I/O is patched so the test exercises only the wiring inside
+    ``lifespan()`` without touching the filesystem.
+    """
+
+    def test_lifespan_populates_centroid_lookup_via_helper(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """lifespan must call build_centroid_lookup once and store its return
+        value in ``_centroid_lookup``.
+
+        Arrange:
+        - Patch ``app.api.main.build_centroid_lookup`` to return a known dict.
+        - Patch ``app.api.main._load_predictions`` to return a trivial DataFrame.
+        - Patch ``app.api.main._load_zone_lookup`` to return a trivial dict.
+        - Patch ``app.core.config.load_config`` so lifespan gets a valid config.
+        Act: enter the FastAPI app via ``TestClient`` (triggers lifespan).
+        Assert: the mock was called exactly once AND ``_centroid_lookup``
+        matches the dict the mock returned.
+        """
+        import app.api.main as serving_module
+
+        expected_centroids: dict[int, tuple[float, float]] = {
+            1: (40.693, -74.174),
+            2: (40.618, -73.825),
+        }
+        fake_predictions = pd.DataFrame(
+            {
+                "pulocationid": [1],
+                "hour": pd.to_datetime(["2021-03-01 00:00:00"]),
+                "predicted_trip_count": [5.0],
+                "actual_trip_count": [4.0],
+            }
+        )
+
+        mock_build_centroid = MagicMock(return_value=expected_centroids)
+        mock_load_predictions = MagicMock(return_value=fake_predictions)
+        mock_load_zone_lookup = MagicMock(return_value={1: "Newark Airport"})
+        fake_config = {
+            "serving": {
+                "predictions_path": "fake/predictions.parquet",
+                "zone_shapefile_path": "fake/taxi_zones.shp",
+            }
+        }
+
+        monkeypatch.setattr(
+            serving_module, "build_centroid_lookup", mock_build_centroid
+        )
+        monkeypatch.setattr(serving_module, "_load_predictions", mock_load_predictions)
+        monkeypatch.setattr(serving_module, "_load_zone_lookup", mock_load_zone_lookup)
+
+        with patch("app.api.main.load_config", return_value=fake_config):
+            with TestClient(serving_module.app):
+                # Inside the context manager the lifespan has completed.
+                mock_build_centroid.assert_called_once_with("fake/taxi_zones.shp")
+                assert serving_module._centroid_lookup == expected_centroids

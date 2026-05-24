@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import os
 from typing import Any
+from unittest.mock import patch
 
+import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pytest
+from shapely.geometry import Polygon
 
-from app.ingestion.feature import FeatureEngineer
+from app.ingestion.feature import FeatureEngineer, build_centroid_lookup
 
 # -- Shared config fixture used across tests --------------------------------
 
@@ -725,9 +728,7 @@ class TestNeighborLagSmoothing:
             ]
         )
         panel_with_orphan = pd.concat([panel, orphan], ignore_index=True)
-        result = _fe_with_neighbors(k=2).add_neighbor_lag_smoothing(
-            panel_with_orphan
-        )
+        result = _fe_with_neighbors(k=2).add_neighbor_lag_smoothing(panel_with_orphan)
         means = result.set_index("pulocationid")["trip_count_lag_1_neighbor_mean"]
         # Zone 99 has NaN centroid → BallTree can't place it → NaN result
         assert pd.isna(means.loc[99])
@@ -842,9 +843,7 @@ class TestSummedHorizonTarget:
         df = pd.DataFrame(
             {
                 "pulocationid": [1] * n_per_zone + [2] * n_per_zone,
-                "hour": list(
-                    pd.date_range("2022-01-01", periods=n_per_zone, freq="h")
-                )
+                "hour": list(pd.date_range("2022-01-01", periods=n_per_zone, freq="h"))
                 * 2,
                 "trip_count": [5] * (2 * n_per_zone),
             }
@@ -853,3 +852,118 @@ class TestSummedHorizonTarget:
         # With N=2, each zone loses its last 2 rows
         for zone in (1, 2):
             assert (result["pulocationid"] == zone).sum() == n_per_zone - 2
+
+
+# -- Test: build_centroid_lookup -------------------------------------------
+
+
+def _make_fake_geodataframe(
+    location_ids: list[int],
+    lons: list[float],
+    lats: list[float],
+    null_indices: list[int] | None = None,
+) -> gpd.GeoDataFrame:
+    """Build a minimal GeoDataFrame that mimics the taxi zones shapefile.
+
+    Creates simple square polygons so that centroid computation can run
+    without accessing real files on disk.
+
+    Args:
+        location_ids: List of integer zone IDs.
+        lons: Approximate centroid longitude for each zone (WGS84).
+        lats: Approximate centroid latitude for each zone (WGS84).
+        null_indices: Indices (0-based) that should have null geometry.
+
+    Returns:
+        GeoDataFrame with columns ``LocationID`` and ``geometry`` in
+        EPSG:4326.
+    """
+    null_indices = null_indices or []
+    geometries = []
+    for i, (lon, lat) in enumerate(zip(lons, lats)):
+        if i in null_indices:
+            geometries.append(None)
+        else:
+            # 0.01° square centred at (lon, lat)
+            half = 0.005
+            geometries.append(
+                Polygon(
+                    [
+                        (lon - half, lat - half),
+                        (lon + half, lat - half),
+                        (lon + half, lat + half),
+                        (lon - half, lat + half),
+                    ]
+                )
+            )
+    gdf = gpd.GeoDataFrame(
+        {"LocationID": location_ids, "geometry": geometries},
+        crs="EPSG:4326",
+    )
+    return gdf
+
+
+class TestBuildCentroidLookup:
+    """Unit tests for the module-level ``build_centroid_lookup`` helper."""
+
+    def test_build_centroid_lookup_returns_expected_keys(self) -> None:
+        """Dict keys must match the LocationIDs in the shapefile.
+
+        Arrange: fake GDF with zones 1, 2, 3.
+        Act: call build_centroid_lookup with a mocked gpd.read_file.
+        Assert: returned dict has exactly those three keys.
+        """
+        fake_gdf = _make_fake_geodataframe(
+            location_ids=[1, 2, 3],
+            lons=[-74.0, -73.9, -73.8],
+            lats=[40.7, 40.8, 40.9],
+        )
+        with patch("app.ingestion.feature.gpd.read_file", return_value=fake_gdf):
+            result = build_centroid_lookup("fake/path.shp")
+
+        assert set(result.keys()) == {1, 2, 3}
+
+    def test_build_centroid_lookup_values_rounded_to_3dp(self) -> None:
+        """Each (lat, lon) pair must be rounded to exactly 3 decimal places.
+
+        Arrange: fake GDF with a single zone at a coordinate that would
+        produce more than 3 d.p. when computed naively.
+        Act: call build_centroid_lookup.
+        Assert: both latitude and longitude in the tuple have at most 3 d.p.
+        """
+        fake_gdf = _make_fake_geodataframe(
+            location_ids=[10],
+            lons=[-73.987654],
+            lats=[40.712345],
+        )
+        with patch("app.ingestion.feature.gpd.read_file", return_value=fake_gdf):
+            result = build_centroid_lookup("fake/path.shp")
+
+        lat, lon = result[10]
+        # Check that the values are rounded: multiply by 1000 and verify
+        # the fractional part is zero (i.e. no digit beyond 3 d.p.).
+        assert lat == round(lat, 3)
+        assert lon == round(lon, 3)
+        # The rounded value must differ from full-precision by at most 0.0005.
+        assert abs(lat - 40.712345) <= 0.0005
+        assert abs(lon - (-73.987654)) <= 0.0005
+
+    def test_build_centroid_lookup_missing_zone_absent_from_dict(self) -> None:
+        """Zones with null geometry must be absent from the returned dict.
+
+        Arrange: fake GDF with zones 1, 2, 3 where zone 2 has null geometry.
+        Act: call build_centroid_lookup.
+        Assert: key 2 is not in the result; keys 1 and 3 are present.
+        """
+        fake_gdf = _make_fake_geodataframe(
+            location_ids=[1, 2, 3],
+            lons=[-74.0, -73.9, -73.8],
+            lats=[40.7, 40.8, 40.9],
+            null_indices=[1],  # zone 2 (index 1) has null geometry
+        )
+        with patch("app.ingestion.feature.gpd.read_file", return_value=fake_gdf):
+            result = build_centroid_lookup("fake/path.shp")
+
+        assert 2 not in result
+        assert 1 in result
+        assert 3 in result

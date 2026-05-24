@@ -18,6 +18,33 @@ from sklearn.neighbors import BallTree  # type: ignore[import-untyped]
 from app.core.config import load_config
 
 
+def build_centroid_lookup(shapefile_path: str) -> dict[int, tuple[float, float]]:
+    """Return ``{LocationID: (lat_3dp, lon_3dp)}`` from shapefile centroids.
+
+    Reads the taxi zones shapefile, projects geometries to EPSG:3857 to
+    compute Euclidean centroids, then reprojects to WGS84 (EPSG:4326) to
+    obtain geographic coordinates. Values are rounded to 3 decimal places
+    at build time. Zones with null geometry are absent from the returned dict.
+
+    Args:
+        shapefile_path: Filesystem path to the taxi zones ``.shp`` file.
+
+    Returns:
+        Dictionary mapping integer ``LocationID`` to a ``(latitude, longitude)``
+        tuple, both rounded to 3 decimal places.
+    """
+    gdf = gpd.read_file(shapefile_path).to_crs("EPSG:4326")
+    centroids = gdf.to_crs("EPSG:3857").geometry.centroid.to_crs("EPSG:4326")
+    result: dict[int, tuple[float, float]] = {}
+    for loc_id, lon, lat in zip(
+        gdf["LocationID"].astype(int), centroids.x, centroids.y, strict=True
+    ):
+        if pd.isna(lon) or pd.isna(lat):
+            continue
+        result[int(loc_id)] = (round(float(lat), 3), round(float(lon), 3))
+    return result
+
+
 class FeatureEngineer:
     """Builds the Gold layer feature set from Silver layer trip data."""
 
@@ -326,7 +353,8 @@ class FeatureEngineer:
         """Merge zone centroid coordinates onto the DataFrame.
 
         Each zone is represented by the centroid of its polygon,
-        reprojected to WGS84.
+        reprojected to WGS84. Delegates centroid computation to
+        :func:`build_centroid_lookup`.
 
         Args:
             df: DataFrame containing a ``pulocationid`` column.
@@ -336,18 +364,9 @@ class FeatureEngineer:
             DataFrame with two new columns: ``pickup_longitude``,
             ``pickup_latitude``.
         """
-        gdf = gpd.read_file(self.zone_shapefile_path).to_crs("EPSG:4326")
-        centroids = gdf.to_crs("EPSG:3857").geometry.centroid.to_crs("EPSG:4326")
-        lookup = pd.DataFrame(
-            {
-                "LocationID": gdf["LocationID"].astype(int),
-                "longitude": centroids.x,
-                "latitude": centroids.y,
-            }
-        ).drop_duplicates(subset="LocationID")
-
-        lon_map = lookup.set_index("LocationID")["longitude"]
-        lat_map = lookup.set_index("LocationID")["latitude"]
+        centroid_lookup = build_centroid_lookup(self.zone_shapefile_path)
+        lon_map = {loc_id: coords[1] for loc_id, coords in centroid_lookup.items()}
+        lat_map = {loc_id: coords[0] for loc_id, coords in centroid_lookup.items()}
 
         df = df.copy()
         df["pickup_longitude"] = df[zone_col].map(lon_map)
@@ -438,8 +457,7 @@ class FeatureEngineer:
         zone_ids = zone_centroids[zone_col].to_numpy()
         # neighbours_by_zone[z] = list of neighbour zone-ids for zone z
         neighbours_by_zone: dict[Any, list[Any]] = {
-            zone_ids[i]: zone_ids[neighbour_idx[i]].tolist()
-            for i in range(n_zones)
+            zone_ids[i]: zone_ids[neighbour_idx[i]].tolist() for i in range(n_zones)
         }
 
         # Pivot lag_col to a (hour × zone) matrix so neighbour-mean is just
