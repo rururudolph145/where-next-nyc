@@ -223,9 +223,7 @@ def _train_no_mlflow(config: dict[str, Any], gold: pd.DataFrame) -> dict[str, An
 # ---------------------------------------------------------------------------
 
 
-def test_legacy_pipeline_smoke(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_legacy_pipeline_smoke(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """Silver → Gold → Train end-to-end on the legacy hourly pipeline."""
     _patch_zone_coordinates(monkeypatch)
     config = _legacy_config(tmp_path)
@@ -354,9 +352,7 @@ def test_b2_pipeline_smoke(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> No
     assert result["n_train"] > 0
 
 
-def test_no_target_leakage(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_no_target_leakage(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """No feature column may equal the row's own target value.
 
     Two checks:
