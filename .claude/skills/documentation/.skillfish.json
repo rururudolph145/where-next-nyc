@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "name": "documentation",
+  "owner": "srstomp",
+  "repo": "pokayokay",
+  "path": "plugins/pokayokay/skills/documentation",
+  "branch": "master",
+  "sha": "994c139c667c4b3743dd452f70eb9b73b1cd8e90",
+  "source": "manual"
+}

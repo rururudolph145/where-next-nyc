@@ -87,6 +87,17 @@
     ]
   },
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Reminder: use Bun, not npm. Run bun test before committing. Current sprint: auth refactor.'"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Edit|Write",
@@ -95,6 +106,15 @@
             "type": "command",
             "command": "GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) && [ \"$(git -C \"$GIT_ROOT\" branch --show-current 2>/dev/null)\" != \"main\" ] || echo 'WARNING: Editing on main branch. Consider creating a feature branch.' >&2",
             "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/protect-files.sh"
           }
         ]
       }
