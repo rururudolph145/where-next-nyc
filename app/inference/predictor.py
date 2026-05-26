@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from app.core.config import load_config
+from app.core.metrics import evaluate as _evaluate
 
 
 class Predictor:
@@ -133,8 +134,7 @@ class Predictor:
     ) -> dict[str, float]:
         """Compute evaluation metrics.
 
-        Uses the same metrics as ``Trainer.evaluate`` for consistency:
-        MAE, RMSE, MAPE, WAPE.
+        Delegates to :func:`app.core.metrics.evaluate`.
 
         Args:
             y_true: True target values.
@@ -143,24 +143,7 @@ class Predictor:
         Returns:
             Dictionary with keys ``mae``, ``rmse``, ``mape``, ``wape``.
         """
-        actual = np.asarray(y_true.values)
-        mae = float(np.mean(np.abs(actual - y_pred)))
-        rmse = float(np.sqrt(np.mean((actual - y_pred) ** 2)))
-
-        mask = actual != 0
-        if bool(mask.any()):
-            mape = float(
-                np.mean(np.abs((actual[mask] - y_pred[mask]) / actual[mask])) * 100
-            )
-        else:
-            mape = 0.0
-
-        total = float(np.sum(np.abs(actual)))
-        wape = (
-            float(np.sum(np.abs(actual - y_pred)) / total * 100) if total > 0 else 0.0
-        )
-
-        return {"mae": mae, "rmse": rmse, "mape": mape, "wape": wape}
+        return _evaluate(y_true, y_pred)
 
     # ------------------------------------------------------------------
     # Persistence

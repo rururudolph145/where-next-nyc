@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from app.core.metrics import evaluate as core_evaluate
 from app.training.trainer import Trainer
 
 
@@ -36,6 +37,7 @@ FEATURES = [
 MINIMAL_CONFIG: dict[str, Any] = {
     "env": "local",
     "data": {"gold_path": "data/gold/yellow_tripdata"},
+    "feature": {"bucket": "h"},
     "train": {
         "features": FEATURES,
         "target": "trip_count",
@@ -269,3 +271,94 @@ class TestRunLogsToMlflow:
 
             # Model logged
             mock_mlflow.lightgbm.log_model.assert_called_once()
+
+    def test_run_logs_baseline_and_lift_metrics(
+        self, trainer: Trainer, gold_df: pd.DataFrame, tmp_path: Any
+    ) -> None:
+        """AC #1: all six new metric names are logged within the MLflow run."""
+        trainer.store_path = str(tmp_path / "models")
+        trainer.tracking_uri = str(tmp_path / "mlruns")
+
+        with patch("app.training.trainer.mlflow") as mock_mlflow:
+            trainer.run(data=gold_df)
+
+            metric_calls = mock_mlflow.log_metric.call_args_list
+            metric_names = {call[0][0] for call in metric_calls}
+
+            expected = {
+                "baseline_test_mae",
+                "baseline_test_wape",
+                "model_test_mae",
+                "model_test_wape",
+                "wape_lift_pct",
+                "recall_at_3",
+            }
+            assert expected.issubset(metric_names)
+
+    def test_run_all_new_metrics_in_same_mlflow_run(
+        self, trainer: Trainer, gold_df: pd.DataFrame, tmp_path: Any
+    ) -> None:
+        """AC #1: start_run called exactly once; all six metrics in that run."""
+        trainer.store_path = str(tmp_path / "models")
+        trainer.tracking_uri = str(tmp_path / "mlruns")
+
+        with patch("app.training.trainer.mlflow") as mock_mlflow:
+            trainer.run(data=gold_df)
+
+            mock_mlflow.start_run.assert_called_once()
+
+            metric_calls = mock_mlflow.log_metric.call_args_list
+            metric_names = {call[0][0] for call in metric_calls}
+            for name in [
+                "baseline_test_mae",
+                "baseline_test_wape",
+                "model_test_mae",
+                "model_test_wape",
+                "wape_lift_pct",
+                "recall_at_3",
+            ]:
+                assert name in metric_names
+
+
+# -- Import-consolidation regression tests ----------------------------------
+
+
+class TestMetricsConsolidation:
+    """Confirm that Trainer, Predictor, and HourlySimulator all resolve
+    to app.core.metrics.evaluate under the hood."""
+
+    def test_trainer_evaluate_delegates_to_core_metrics(self) -> None:
+        """Trainer.evaluate wraps app.core.metrics.evaluate."""
+        from app.training.trainer import Trainer as _Trainer
+
+        y_true = pd.Series([1.0, 2.0, 3.0])
+        y_pred = np.array([1.0, 2.0, 3.0])
+
+        trainer_result = _Trainer.evaluate(y_true, y_pred)
+        core_result = core_evaluate(y_true, y_pred)
+
+        assert trainer_result == core_result
+
+    def test_predictor_evaluate_delegates_to_core_metrics(self) -> None:
+        """Predictor.evaluate wraps app.core.metrics.evaluate."""
+        from app.inference.predictor import Predictor
+
+        y_true = pd.Series([4.0, 5.0, 6.0])
+        y_pred = np.array([4.0, 5.0, 6.0])
+
+        predictor_result = Predictor.evaluate(y_true, y_pred)
+        core_result = core_evaluate(y_true, y_pred)
+
+        assert predictor_result == core_result
+
+    def test_simulator_compute_metrics_delegates_to_core_metrics(self) -> None:
+        """HourlySimulator.compute_metrics wraps app.core.metrics.evaluate."""
+        from app.inference.simulator import HourlySimulator
+
+        actuals = np.array([7.0, 8.0, 9.0])
+        preds = np.array([7.0, 8.0, 9.0])
+
+        sim_result = HourlySimulator.compute_metrics(actuals, preds)
+        core_result = core_evaluate(pd.Series(actuals), preds)
+
+        assert sim_result == core_result

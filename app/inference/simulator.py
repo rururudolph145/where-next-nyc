@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from app.core.config import load_config
+from app.core.metrics import evaluate as _evaluate
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(levelname)s:%(message)s")
 
@@ -122,6 +123,9 @@ class HourlySimulator:
     ) -> dict[str, float]:
         """Compute aggregate error metrics.
 
+        Delegates to :func:`app.core.metrics.evaluate`. Accepts raw numpy
+        arrays (wraps in a ``pd.Series`` for the canonical implementation).
+
         Args:
             actuals: Ground truth values.
             predictions: Predicted values.
@@ -129,26 +133,7 @@ class HourlySimulator:
         Returns:
             Dictionary with ``mae``, ``rmse``, ``mape``, ``wape``.
         """
-        mae = float(np.mean(np.abs(actuals - predictions)))
-        rmse = float(np.sqrt(np.mean((actuals - predictions) ** 2)))
-
-        mask = actuals != 0
-        if bool(mask.any()):
-            mape = float(
-                np.mean(np.abs((actuals[mask] - predictions[mask]) / actuals[mask]))
-                * 100
-            )
-        else:
-            mape = 0.0
-
-        total = float(np.sum(np.abs(actuals)))
-        wape = (
-            float(np.sum(np.abs(actuals - predictions)) / total * 100)
-            if total > 0
-            else 0.0
-        )
-
-        return {"mae": mae, "rmse": rmse, "mape": mape, "wape": wape}
+        return _evaluate(pd.Series(actuals), predictions)
 
     # ------------------------------------------------------------------
     # Simulation

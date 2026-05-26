@@ -16,6 +16,8 @@ import pandas as pd
 from lightgbm import LGBMRegressor
 
 from app.core.config import load_config
+from app.core.metrics import compute_recall_at_k, compute_wape_lift, evaluate
+from app.training.baseline import LastWeekSameHourBaseline
 
 # Re-exported so legacy ``patch("src.training.train.mlflow")`` paths keep
 # working via the src.training.train shim. Listed in __all__ to satisfy
@@ -125,6 +127,8 @@ class Trainer:
     ) -> dict[str, float]:
         """Compute evaluation metrics.
 
+        Delegates to :func:`app.core.metrics.evaluate`.
+
         Args:
             y_true: True target values.
             y_pred: Predicted values.
@@ -132,24 +136,7 @@ class Trainer:
         Returns:
             Dictionary with keys ``mae``, ``rmse``, ``mape``, ``wape``.
         """
-        actual = np.asarray(y_true.values)
-        mae = float(np.mean(np.abs(actual - y_pred)))
-        rmse = float(np.sqrt(np.mean((actual - y_pred) ** 2)))
-
-        mask = actual != 0
-        if bool(mask.any()):
-            mape = float(
-                np.mean(np.abs((actual[mask] - y_pred[mask]) / actual[mask])) * 100
-            )
-        else:
-            mape = 0.0
-
-        total = float(np.sum(np.abs(actual)))
-        wape = (
-            float(np.sum(np.abs(actual - y_pred)) / total * 100) if total > 0 else 0.0
-        )
-
-        return {"mae": mae, "rmse": rmse, "mape": mape, "wape": wape}
+        return evaluate(y_true, y_pred)
 
     # ------------------------------------------------------------------
     # Model persistence
@@ -176,17 +163,22 @@ class Trainer:
         1. Load Gold data (or use provided DataFrame).
         2. Split into train / val / test by time.
         3. Train LGBMRegressor on training set.
-        4. Evaluate on val and test sets.
-        5. Log params, metrics, and model to MLflow.
-        6. Save model artifact to disk.
+        4. Evaluate on val and test sets (full, unfiltered).
+        5. Run last-week-same-hour baseline on the NaN-filtered test subset.
+        6. Log params, metrics (val, test, baseline, lift, recall) to MLflow.
+        7. Save model artifact to disk.
 
         Args:
             data: Optional Gold layer DataFrame. If ``None``, loads from
                 the configured gold path.
 
         Returns:
-            Dictionary with ``val_metrics``, ``test_metrics``, and
-            ``model_path``.
+            Dictionary with ``val_metrics``, ``test_metrics``,
+            ``baseline_metrics``, ``model_aligned_metrics``,
+            ``wape_lift_pct``, ``recall_at_3``, and ``model_path``.
+            ``baseline_metrics``, ``model_aligned_metrics``,
+            ``wape_lift_pct``, and ``recall_at_3`` are ``None`` when the
+            test split has no week-ago overlap (empty ``aligned_df``).
         """
         if data is None:
             data = self.load_gold()
@@ -204,7 +196,7 @@ class Trainer:
         print(f"Training {self.model_name} on {len(train_df):,} rows")
         self.train(x_train, y_train)
 
-        # Evaluate
+        # Evaluate (full unfiltered sets — kept for backward compatibility)
         val_preds = self.model.predict(x_val)
         test_preds = self.model.predict(x_test)
         val_metrics = self.evaluate(y_val, val_preds)
@@ -223,6 +215,74 @@ class Trainer:
             f"WAPE={test_metrics['wape']:.2f}%"
         )
 
+        # Baseline evaluation on NaN-filtered test subset
+        feature_cfg: dict[str, Any] = self.config.get("feature", {})
+        bucket = str(feature_cfg.get("bucket", "h"))
+        baseline = LastWeekSameHourBaseline(target_col=self.target, bucket=bucket)
+        aligned_df = baseline.predict(test_df, data)
+
+        # Filter model predictions to the same (pulocationid, hour) index
+        common_idx = pd.MultiIndex.from_arrays(
+            [aligned_df["pulocationid"], aligned_df["hour"]]
+        )
+        test_mi = pd.MultiIndex.from_arrays([test_df["pulocationid"], test_df["hour"]])
+        mask = test_mi.isin(common_idx)
+        test_df_aligned = test_df.loc[mask]
+        test_preds_aligned = test_preds[mask]
+
+        # Guard: if aligned_df is empty (no week-ago overlap) skip all
+        # baseline/lift/recall computation — logging NaN metrics to MLflow
+        # would produce meaningless run records.
+        baseline_metrics: dict[str, float] | None
+        model_aligned_metrics: dict[str, float] | None
+        wape_lift_pct: float | None
+        recall_at_3: float | None
+
+        if len(aligned_df) == 0:
+            print(
+                "No week-ago data overlap for test split; "
+                "skipping baseline + lift + recall@K metrics."
+            )
+            baseline_metrics = None
+            model_aligned_metrics = None
+            wape_lift_pct = None
+            recall_at_3 = None
+        else:
+            model_aligned_metrics = self.evaluate(
+                test_df_aligned[self.target], test_preds_aligned
+            )
+            baseline_metrics = self.evaluate(
+                aligned_df["y_true"],
+                aligned_df["y_pred_baseline"].to_numpy(),
+            )
+
+            wape_lift_pct = compute_wape_lift(
+                baseline_metrics["wape"], model_aligned_metrics["wape"]
+            )
+
+            # Recall@3
+            predicted_df = pd.DataFrame(
+                {
+                    "pulocationid": test_df_aligned["pulocationid"].values,
+                    "hour": test_df_aligned["hour"].values,
+                    "value": test_preds_aligned,
+                }
+            )
+            actual_df = pd.DataFrame(
+                {
+                    "pulocationid": aligned_df["pulocationid"].values,
+                    "hour": aligned_df["hour"].values,
+                    "value": aligned_df["y_true"].values,
+                }
+            )
+            recall_at_3 = compute_recall_at_k(predicted_df, actual_df, k=3)
+
+            print(
+                f"Baseline WAPE={baseline_metrics['wape']:.2f}%  "
+                f"Model WAPE={model_aligned_metrics['wape']:.2f}%  "
+                f"Lift={wape_lift_pct:.2f}%  Recall@3={recall_at_3:.4f}"
+            )
+
         # MLflow logging
         mlflow.set_tracking_uri(self.tracking_uri)
         mlflow.set_experiment(self.experiment_name)
@@ -240,6 +300,17 @@ class Trainer:
             for key, value in test_metrics.items():
                 mlflow.log_metric(f"test_{key}", value)
 
+            # Only log baseline/lift/recall metrics when they are valid numbers.
+            if baseline_metrics is not None and model_aligned_metrics is not None:
+                mlflow.log_metric("baseline_test_mae", baseline_metrics["mae"])
+                mlflow.log_metric("baseline_test_wape", baseline_metrics["wape"])
+                mlflow.log_metric("model_test_mae", model_aligned_metrics["mae"])
+                mlflow.log_metric("model_test_wape", model_aligned_metrics["wape"])
+            if wape_lift_pct is not None:
+                mlflow.log_metric("wape_lift_pct", wape_lift_pct)
+            if recall_at_3 is not None:
+                mlflow.log_metric("recall_at_3", recall_at_3)
+
             mlflow.lightgbm.log_model(self.model, artifact_path="model")
 
         # Save artifact
@@ -249,5 +320,9 @@ class Trainer:
         return {
             "val_metrics": val_metrics,
             "test_metrics": test_metrics,
+            "baseline_metrics": baseline_metrics,
+            "model_aligned_metrics": model_aligned_metrics,
+            "wape_lift_pct": wape_lift_pct,
+            "recall_at_3": recall_at_3,
             "model_path": model_path,
         }
