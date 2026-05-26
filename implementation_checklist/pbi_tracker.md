@@ -498,39 +498,83 @@ PBI 22 (prediction log + actuals) ──> PBI 23 (drift detector) ──> PBI 24
 
 ## Priority Order
 
-| Order | PBI | Rationale |
-|-------|-----|-----------|
-| 1 | PBI 1 | Validate existing single-horizon model end-to-end |
-| 2 | PBI 2 | Inference pipeline — completes the full ML loop |
-| 3 | PBI 3 | Heatmap API — serves predictions to drivers (MVP complete) |
-| 4a | B0 | Synthetic E2E test suite — pins legacy, RED-locks B1 |
-| 4b | B1 | 30-min nowcast + neighbor-mean smoothing — superseded by B2 as default; method preserved |
-| 4c | B2 | 15-min refresh + 30-min summed-horizon target — current MVP forecasting path |
-| 4d | PBI 4 | Multi-horizon — deferred; A3 knob (`horizon_buckets`) already shipped |
-| 5 | PBI 5 | Zone lookup — needed by personalized ranking |
-| 6 | PBI 6 | Location capture — simple, enables testing |
-| 7 | PBI 7 | Scoring function — pure math, unit testable |
-| 8 | PBI 8 | Recommendation API — personalized ranking endpoint |
-| 9 | PBI 9 | Fallback — reliability layer |
-| 10 | PBI 10 | Monitoring — observability layer |
-| 11 | PBI 11 | Simulated streaming — shows production awareness |
-| 12 | PBI 12 | Bronze temporal-sort invariant test — TDD RED step; safe in isolation |
-| 13 | PBI 13 | Parallel-equivalence regression test — RED for PBI 14 |
-| 14 | PBI 14 | Parallel `load_raw` — closes the "parallelize I/O-bound" gap |
-| 15 | PBI 16 | Paginate `/heatmap` — closes the "pagination for large responses" gap |
-| 16 | PBI 15 | Streaming bronze write — defer until ingestion OOMs in practice |
-| 17 | PBI 17 | Socrata HTTP compliance — blocked until downloader migrates into `app/` |
-| 18 | PBI 18 | Baseline + recall@K + WAPE-lift — turns the README's value claim from "trust me" into a reproducible number; unblocks gate (PBI 20) |
-| 19 | PBI 19 | Pandera schema gate — closes the Data Validation node; independent of everything; ship in parallel with PBI 18 |
-| 20 | PBI 20 | MLflow registry stages + validation gate — first SLA-critical fix; depends on PBI 18 for the comparison metric |
-| 21 | PBI 21 | Inference fallback — completes C04 fallback note; depends on PBI 20 |
-| 22 | PBI 22 | Prediction log + actuals join — foundation for monitoring lane (C05) |
-| 23 | PBI 23 | Drift detector (Evidently) — depends on PBI 22 |
-| 24 | PBI 24 | Alerts + retrain trigger — closes the monitoring → orchestrator feedback arrow; depends on PBI 23 |
-| 25 | PBI 25 | Promote Airflow DAGs to `orchestration/` — depends on PBI 20 + PBI 24 |
-| 26 | PBI 26 | Online feature store — stretch; defer until on-demand inference is actually needed |
-| 27 | PBI 27 | `/health` + `/model-info` + simulated flag — small but visible; depends on PBI 18 + PBI 20 |
-| 28 | PBI 28 | Driver-agent simulation harness — proves the README's "drivers following the heatmap are better off" claim; depends on PBI 18 + PBI 25 |
+> `[x]` = shipped (struck through); `[ ]` = open. Ordered by execution sequence: shipped first (in the order they landed), then open work grouped by phase.
+
+### Shipped — MVP & B-track (forecasting path)
+
+| Done | Order | PBI | Rationale |
+|------|-------|-----|-----------|
+| [x] | 1 | ~~PBI 1~~ | ~~Validate existing single-horizon model end-to-end~~ |
+| [x] | 2 | ~~PBI 2~~ | ~~Inference pipeline — completes the full ML loop~~ |
+| [x] | 3 | ~~PBI 3~~ | ~~Heatmap API — serves predictions to drivers (MVP complete)~~ |
+| [x] | 4 | ~~B0~~ | ~~Synthetic E2E test suite — pins legacy, RED-locks B1~~ |
+| [x] | 5 | ~~B1~~ | ~~30-min nowcast + neighbor-mean smoothing — superseded by B2 as default; method preserved~~ |
+| [x] | 6 | ~~B2~~ | ~~15-min refresh + 30-min summed-horizon target — current MVP forecasting path~~ |
+
+### Shipped — Performance Hardening
+
+| Done | Order | PBI | Rationale |
+|------|-------|-----|-----------|
+| [x] | 7 | ~~PBI 12~~ | ~~Bronze temporal-sort invariant test — TDD RED step; safe in isolation~~ |
+| [x] | 8 | ~~PBI 13~~ | ~~Parallel-equivalence regression test — RED for PBI 14~~ |
+| [x] | 9 | ~~PBI 14~~ | ~~Parallel `load_raw` — closes the "parallelize I/O-bound" gap~~ |
+
+### Open — Phase A · Credibility (start here, ~10h)
+
+| Done | Order | PBI | Rationale |
+|------|-------|-----|-----------|
+| [ ] | 10 | PBI 18 | Baseline + recall@K + WAPE-lift — turns the README's value claim into a reproducible number; unblocks gate (PBI 20) |
+| [ ] | 11 | PBI 19 | Pandera schema gate — closes the Data Validation node; independent; ship in parallel with PBI 18 |
+| [ ] | 12 | PBI 27 | `/health` + `/model-info` + simulated flag — small but visible; depends on PBI 18 + PBI 20 |
+
+### Open — Phase B · SLA-critical safety (~14h)
+
+| Done | Order | PBI | Rationale |
+|------|-------|-----|-----------|
+| [ ] | 13 | PBI 20 | MLflow registry stages + validation gate — first SLA-critical fix; depends on PBI 18 for the comparison metric |
+| [ ] | 14 | PBI 21 | Inference fallback — completes C04 fallback note; depends on PBI 20 |
+
+### Open — Phase C · Closed-loop monitoring (~24h)
+
+| Done | Order | PBI | Rationale |
+|------|-------|-----|-----------|
+| [ ] | 15 | PBI 22 | Prediction log + actuals join — foundation for monitoring lane (C05) |
+| [ ] | 16 | PBI 23 | Drift detector (Evidently) — depends on PBI 22 |
+| [ ] | 17 | PBI 24 | Alerts + retrain trigger — closes the monitoring → orchestrator feedback arrow; depends on PBI 23 |
+
+### Open — Phase D · Production graduation + closed-loop simulation
+
+| Done | Order | PBI | Rationale |
+|------|-------|-----|-----------|
+| [ ] | 18 | PBI 25 | Promote Airflow DAGs to `orchestration/` + `SimulatedClock` abstraction; depends on PBI 20 + PBI 24 |
+| [ ] | 19 | PBI 28 | Driver-agent simulation harness — proves the "drivers following the heatmap are better off" claim; depends on PBI 18 + PBI 25 |
+
+### Open — API & ingestion hardening
+
+| Done | Order | PBI | Rationale |
+|------|-------|-----|-----------|
+| [ ] | 20 | PBI 16 | Paginate `/heatmap` — closes the "pagination for large responses" gap |
+| [ ] | 21 | PBI 15 | Streaming bronze write — defer until ingestion OOMs in practice |
+| [ ] | 22 | PBI 17 | Socrata HTTP compliance — blocked until downloader migrates into `app/` |
+
+### Open — Post-MVP (personalized ranking + reliability)
+
+| Done | Order | PBI | Rationale |
+|------|-------|-----|-----------|
+| [ ] | 23 | PBI 5 | Zone lookup — needed by personalized ranking |
+| [ ] | 24 | PBI 6 | Location capture — simple, enables testing |
+| [ ] | 25 | PBI 7 | Scoring function — pure math, unit testable |
+| [ ] | 26 | PBI 8 | Recommendation API — personalized ranking endpoint |
+| [ ] | 27 | PBI 11 | Simulated streaming — shows production awareness (now largely subsumed by PBI 25's `SimulatedClock`) |
+| [ ] | 28 | PBI 9 | Stale-data handler — historical-averages fallback; complementary to PBI 21's model-level fallback |
+| [ ] | 29 | PBI 10 | Monitoring (L5 signal) — superseded by PBIs 22–24 which decompose this into prediction log + drift + alerts |
+| [ ] | 30 | PBI 4 | Multi-horizon — deferred; A3 knob (`horizon_buckets`) already shipped, just needs a training config flip |
+
+### Stretch
+
+| Done | Order | PBI | Rationale |
+|------|-------|-----|-----------|
+| [ ] | 31 | PBI 26 | Online feature store — defer until on-demand inference is actually needed |
 
 ## Recommended Sequencing for PBIs 18–27
 
