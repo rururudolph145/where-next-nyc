@@ -26,13 +26,56 @@ Model-quality metrics (MAE / RMSE / WAPE) measure the model. They don't measure 
 
 A model that beats the naive baseline by a meaningful WAPE margin *and* keeps recall@3 above the baseline is doing real work. A model that only wins on MAE but offers no recall@K lift is a vanity win.
 
+## How the Demo Works (Compressed Simulated Clock)
+
+Because the underlying data has a publication lag, the system can't actually run live — but it *can* run end-to-end on a compressed clock, exercising the exact same code path a production deployment would. This is the only way to credibly demonstrate a 15-minute-refresh system from a portfolio repo.
+
+**Two layers of simulation, kept deliberately separate:**
+
+### Layer 1 — System-level: the `SimulatedClock`
+
+A `Clock` abstraction (`app/core/clock.py`, PBI 25) replaces every direct call to `datetime.utcnow()` / `time.sleep` in the application. Two implementations:
+
+| Implementation | When used | Behaviour |
+|---|---|---|
+| `WallClock` | production (`DEMO_MODE` unset) | wraps real time |
+| `SimulatedClock(start, speedup=450)` | demo (`DEMO_MODE=1`) | advances 15 simulated minutes per ~2 seconds of wall-clock |
+
+Every component that asks "what time is it" — Airflow sensors, ingestion watermarks, the predictor's "current bucket", the API's "latest hour" lookup — reads from the injected `Clock`, never from the OS. A repo-wide test (`tests/test_clock_discipline.py`) enforces this: no production module is allowed to import `datetime.utcnow` or `time.sleep` directly.
+
+**What this lets a reviewer do:** run `DEMO_MODE=1 make demo`, then `curl /heatmap` repeatedly. The `bucket_time` field advances by 15 simulated minutes every ~2 seconds. They see Midtown light up at simulated 5pm, JFK at simulated 6am, and so on — on a real timeline, in a few minutes total. The `/health` endpoint reports `{"simulated": true, "simulated_now": "...", "wall_clock_now": "..."}` so nothing is hidden.
+
+### Layer 2 — Business-level: the driver-agent harness
+
+A `SimulatedClock` proves the *system* runs. It does **not** prove that drivers following the heatmap are better off. That requires a closed-loop simulation with synthetic drivers (`app/simulation/`, PBI 28).
+
+The harness spawns N synthetic drivers, gives each one a policy, and replays a held-out week of historical TLC data:
+
+| Policy | Behaviour |
+|---|---|
+| `HeatmapFollower` | calls `/heatmap`, drives to a top-K predicted zone |
+| `LastWeekFollower` | baseline — drives to whatever was busy this hour last week |
+| `Stationary` | control — never moves |
+
+At each simulated 15-min tick: idle drivers pick a destination per their policy → en-route drivers travel → on arrival, the harness consults the historical trip table to see if a real trip actually started in that zone during that window → if yes and a driver is there, the driver gets the trip and is locked into its historical duration → repeat.
+
+Output is a per-policy results table in `docs/simulation_results.md`:
+
+| Policy | Trips served | % idle time | Avg miles to pickup | Total fare |
+|---|---|---|---|---|
+| HeatmapFollower | *populated by PBI 28* | | | |
+| LastWeekFollower | | | | |
+| Stationary | | | | |
+
+The lift of `HeatmapFollower` over `LastWeekFollower` is the number that backs up the README's value claim. If lift is zero or negative on a given week, the result is reported honestly — the harness is an evaluator, not a marketing tool.
+
 ## Honest Limitations
 
 - **Data publication lag.** NYC TLC publishes trip records on a 1–2 month lag. This repo treats the data as if it streamed in real time; the 15-minute refresh cadence is *simulated*, not live. A production deployment would need an upstream telemetry feed.
-- **Single-agent assumption.** If every driver follows the same heatmap, supply outruns demand in the predicted zones and the prediction self-defeats. The system implicitly assumes the user is one of many agents, not the marginal one.
+- **Single-agent equivalent.** The driver-agent harness gives all N synthetic drivers the same heatmap and draws trips from a fixed historical pool. It captures recall-style lift, but it does **not** model demand-supply equilibration — if every real driver flocked to the same zone, the prediction would self-defeat. A future iteration could add a supply-aware demand model.
 - **Macro patterns only.** The model captures temporal + spatial regularities. It does not yet incorporate weather, events, or transit disruptions — the cases where intuition most often fails. Those are roadmap items.
 
-Built with **LightGBM**, tracked with **MLflow**, served via **FastAPI**, orchestrated with **Airflow**, and organised as a Bronze / Silver / Gold data pipeline.
+Built with **LightGBM**, tracked with **MLflow**, served via **FastAPI**, orchestrated with **Airflow** (on a `SimulatedClock` in demo mode), and organised as a Bronze / Silver / Gold data pipeline.
 
 ## Current Forecasting Design (PBI B2)
 

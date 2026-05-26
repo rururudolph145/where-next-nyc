@@ -198,6 +198,181 @@ Supports the "Use pagination when API responses are large" rule.
 
 ---
 
+## Release: Architecture Alignment with Updated Five-Lane Design (PBIs 18–27)
+
+> **Why this exists.** The reference system design in `reference/ny_taxi_demand_prediction.html` was updated to a five-lane architecture (C00 Orchestrator, C01–C03 Ingestion with Data Validation, C04 Training with gate + registry stages + fallback, COS Inference with Feature Store, C05 Monitoring & Feedback). The README business story now also names **recall@top-K** and **WAPE-lift over a last-week-same-hour baseline** as the bridging metrics that tie ML output to driver outcome. None of those are present in the current code. PBIs 18–27 close the gap.
+>
+> **Why now.** Five of the eight gaps are SLA-critical (validation gate, fallback, prediction log, drift detector, schema validation). The other three (baseline+recall@K, `/health`, feature store) close the credibility gap between what the README claims and what the code does. Without PBI 18 in particular, the README's "beats the last-week-same-hour baseline" claim is unverifiable — and that's the *first* question a reviewer will ask.
+
+### Activity 8: Business-Metrics Honesty (PBIs 18, 27)
+
+Supports the README's "How Value Is Measured" section. Cheapest gap to close, highest credibility lift.
+
+- [ ] **PBI 18 — Baseline Model + Recall@K + WAPE-Lift Reporting**
+  - Add `app/training/baseline.py` containing `LastWeekSameHourBaseline` — predicts each `(zone, bucket)` as the count from one week earlier in the same `(zone, bucket-of-week)` slot
+  - Add `app/core/metrics.py` (also closes the duplicated-`evaluate()` portfolio finding) containing `compute_recall_at_k(predicted, actual, k=3)` and `compute_wape_lift(baseline_wape, model_wape)`
+  - Wire into `Trainer.run()`: after the LGBM model is trained, also evaluate the baseline on the same test split, log both sets of metrics to MLflow under a single run with prefixes (`baseline_*`, `model_*`), and log the lift as `wape_lift_pct`
+  - Acceptance:
+    - `tests/test_baseline.py` — unit tests on a synthetic 4-week, 3-zone fixture: (a) baseline returns last-week's count for known rows, (b) recall@3 equals manually verified value, (c) WAPE lift positive when LGBM beats baseline
+    - One MLflow run shows both `baseline_wape` and `model_wape` plus `wape_lift_pct` and `recall_at_3`
+    - README gets a results table populated with real numbers from this run
+  - Depends on: nothing
+  - Difficulty: M
+
+- [ ] **PBI 27 — `/health` + `/model-info` + Simulated-Clock Flag**
+  - Add `GET /health` to `app/api/main.py` returning `{status, data_publication_lag_days, simulated, last_prediction_bucket, model_version}`
+  - Add `GET /model-info` returning current model registry stage, version, training date, baseline lift
+  - Add `simulated: true` to `/heatmap` response (since the 15-min cadence is replayed historical data, not live telemetry — README now states this explicitly)
+  - Acceptance: three new endpoint tests in `tests/test_serving.py`; existing `/heatmap` tests still green
+  - Depends on: PBI 18 (for `baseline_lift`), PBI 20 (for `model_version` from registry)
+  - Difficulty: S
+
+### Activity 9: Data Validation Gate (PBI 19)
+
+Closes the **Data Validation** node added to Pipeline 1 in the updated diagram. Without this, schema drift in TLC data (which has shifted columns year-over-year) silently corrupts training.
+
+- [ ] **PBI 19 — Pandera Schema Gate Between Bronze and Silver**
+  - Add `app/ingestion/schema.py` with a Pandera `DataFrameSchema` describing the expected Bronze schema (column names, dtypes, nullness, value ranges for `passenger_count`, `trip_distance`, `PULocationID`, `tpep_pickup_datetime`)
+  - Wire into `DataCleaner.run()` at the start: validate the input frame; on failure, raise `DataValidationError` and halt
+  - Log validation results (rows in, rows passing, rows failing per rule) to a JSON file under `data/silver/_validation/` for the future monitoring lane to consume
+  - Acceptance:
+    - `tests/test_clean.py::TestSchemaValidation` — (a) clean frame passes, (b) frame with missing column fails, (c) frame with out-of-range `PULocationID` fails, (d) validation log JSON is written with expected fields
+    - ruff + mypy clean
+  - Depends on: nothing
+  - Difficulty: M
+
+### Activity 10: Model Registry, Validation Gate, Fallback (PBIs 20, 21)
+
+Closes the **Validation & Deployment** gating step and the **Fallback pipeline** note in C04 of the updated diagram. These are SLA-critical: today a degraded model is silently promoted and an absent model returns 503.
+
+- [ ] **PBI 20 — MLflow Model Registry + Champion-vs-Challenger Gate**
+  - In `Trainer.run()`, after training and baseline evaluation (PBI 18), call `mlflow.register_model(...)` to register the model under `ny_taxi_demand_model` with a new version
+  - Implement champion-vs-challenger gate: load current Production stage; if new model's test WAPE is not at least `train.gate.min_wape_lift_pct` better (default 2%), reject — do NOT transition stages; log rejection reason as MLflow tag `gate_rejected_reason`
+  - If accepted: transition new version → Production; previous Production → Archived
+  - Add `train.gate.min_wape_lift_pct` to `config.yml`
+  - Acceptance:
+    - `tests/test_train.py::TestRegistryGate` — (a) first-ever model is auto-promoted (no incumbent), (b) better challenger is promoted, (c) worse challenger is rejected and Production stays unchanged
+    - MLflow registry stages observable via `mlflow models list`
+  - Depends on: PBI 18 (baseline metrics needed for gate comparison)
+  - Difficulty: L
+
+- [ ] **PBI 21 — Inference Fallback to Previous Approved Model**
+  - In `app/inference/simulator.py` and `app/api/main.py`, load model from MLflow registry Production stage; on `MlflowException` or missing-stage, fall back to most recent Archived stage and log a `model_fallback_active=true` warning
+  - If both Production and Archived are empty, fail loudly (don't silently serve random data)
+  - Tag predictions parquet with `model_version` and `served_from_stage` columns
+  - `/heatmap` response includes the same fields per request
+  - Acceptance:
+    - `tests/test_inference.py::TestFallback` — (a) Production present → uses Production, (b) Production absent + Archived present → uses Archived with warning, (c) both absent → raises `NoApprovedModelError`
+    - `/heatmap` response schema test asserts `model_version` + `served_from_stage` keys present
+  - Depends on: PBI 20
+  - Difficulty: M
+
+### Activity 11: Monitoring & Feedback Lane (PBIs 22, 23, 24)
+
+Closes the entire C05 Monitoring & Feedback lane in the updated diagram. Without these, the validation gate has no incumbent to compare against and the retrain trigger has no signal source.
+
+- [ ] **PBI 22 — Prediction Log + Actuals-Join Job**
+  - Add `app/monitoring/prediction_log.py` — appends every served `/heatmap` response to a partitioned parquet under `data/monitoring/predictions/dt=YYYY-MM-DD/`
+  - Add `app/monitoring/actuals_join.py` — Airflow-friendly script that, given a date window, joins predictions with the eventual ground-truth `trip_count` from Gold and writes `data/monitoring/joined/`
+  - Schema: `(bucket_time, pulocationid, predicted, actual, model_version, served_at)`
+  - Acceptance: `tests/test_monitoring.py` — synthetic predictions + actuals → joined frame has expected row count and non-null `actual` where Gold data exists
+  - Depends on: nothing
+  - Difficulty: M
+
+- [ ] **PBI 23 — Drift & Performance Detector (Evidently)**
+  - Add `app/monitoring/drift.py` — wraps Evidently `DataDriftPreset` (feature drift) and `RegressionPreset` (model performance) over a rolling 7-day window from PBI 22's joined frame
+  - Writes a JSON report to `data/monitoring/drift/dt=YYYY-MM-DD/report.json` with one boolean per check
+  - Acceptance: `tests/test_monitoring.py::TestDrift` — (a) stationary synthetic data produces no-drift report, (b) shifted distribution produces drift=True
+  - Depends on: PBI 22
+  - Difficulty: L
+
+- [ ] **PBI 24 — Alerts + Retrain Trigger**
+  - Add `app/monitoring/alert.py` — reads PBI 23's report; if drift OR WAPE degraded ≥ `monitoring.degradation_threshold_pct` vs the model's training-time WAPE, write a `retrain_required` marker file under `data/monitoring/triggers/`
+  - The Airflow training DAG (PBI 25) watches this directory via a `FileSensor` and fires retraining on demand
+  - For local development, also print a clear log line and (optionally) emit a webhook if `monitoring.webhook_url` is set
+  - Acceptance: `tests/test_monitoring.py::TestAlerts` — drift report with `drift=True` → trigger file written; clean report → no file
+  - Depends on: PBI 23
+  - Difficulty: M
+
+### Activity 12: Production Orchestrator (PBI 25)
+
+Promotes the orchestrator out of `experiment/` and into a first-class lane (C00 in the updated diagram).
+
+- [ ] **PBI 25 — Promote Airflow DAGs to Top-Level `orchestration/` (with `SimulatedClock` injection)**
+  - **Prerequisite refactor — `Clock` abstraction (do this first, in the same PR):**
+    - Add `app/core/clock.py` defining a `Clock` protocol with `now() -> datetime` and `sleep(seconds: float) -> None`
+    - Two implementations: `WallClock` (production — wraps `datetime.utcnow()` and `time.sleep`) and `SimulatedClock(start: datetime, speedup: float = 450.0)` (demo — advances 15 simulated minutes every 2s of wall-clock by default)
+    - Every component that currently calls `datetime.utcnow()` / `datetime.now()` / `time.sleep` — ingestion watermark, Airflow sensor marker logic, predictor's "current bucket" lookup, API's "latest hour" fallback — is refactored to receive a `Clock` and read time through it
+    - One repo-wide grep regression test in `tests/test_clock_discipline.py` asserts that no production module under `app/` imports `datetime.utcnow`, `datetime.now`, or `time.sleep` directly (allowlist: `app/core/clock.py` only)
+    - Selection: `clock = SimulatedClock(...)` when env var `DEMO_MODE=1`, else `WallClock()` — picked up at app startup
+  - Move `experiment/orchestration/` → `orchestration/` at repo root
+  - Add three production DAGs (all driven by the `Clock`, not `datetime.utcnow()`):
+    1. `refresh_15min_dag.py` — ingest → validate (PBI 19) → feature → predict → log (PBI 22); idempotent on `(date, bucket)` watermark
+    2. `train_monthly_dag.py` — cron `@monthly` + manual; train → gate (PBI 20) → register
+    3. `monitor_hourly_dag.py` — runs PBI 23 drift detector; PBI 24 alert step; `FileSensor` on `data/monitoring/triggers/` fires `train_monthly_dag` on retrain demand
+  - Add `orchestration/README.md` with DAG topology, triggering semantics, SLAs, and a "Demo vs Production" section explaining the clock selection
+  - Acceptance:
+    - `airflow dags list` shows the three DAGs after `make airflow-init`
+    - DAGs parse cleanly under `pytest tests/test_dag_integrity.py` (existing pattern)
+    - Idempotency: rerunning the same bucket-date pair is a no-op
+    - Clock-discipline test green: no stray `utcnow()` / `time.sleep` outside `app/core/clock.py`
+    - `DEMO_MODE=1 make demo` brings up the full stack on `SimulatedClock` and the `/heatmap` payload's `bucket_time` advances by 15 simulated minutes per ~2s of wall-clock
+  - Depends on: PBI 20, PBI 24
+  - Difficulty: L
+
+### Activity 13: Feature Store (PBI 26) — *stretch*
+
+Closes the **Feature Store** node added to the inference lane. Only needed if true on-demand inference becomes a requirement; current batch-then-serve is acceptable for the portfolio scope.
+
+- [ ] **PBI 26 — In-Memory Online Feature Store**
+  - Add `app/inference/feature_store.py` — a simple in-memory cache keyed by `(pulocationid, bucket_time)` returning the lag features needed for prediction
+  - The refresh DAG (PBI 25) writes the latest features to this store after each ingestion run
+  - Inference Service (`/heatmap`) reads from the store instead of (or in addition to) the precomputed predictions parquet, enabling arbitrary `?bucket_time=` queries
+  - Acceptance: integration test that adds a feature, queries it, asserts round-trip; latency stays sub-200ms
+  - Depends on: PBI 25
+  - Difficulty: L
+  - Note: defer until product asks for on-demand inference; otherwise YAGNI
+
+### Activity 14: Driver-Agent Simulation Harness (PBI 28)
+
+> **Why this exists.** The README claims the system "guides drivers to higher-demand zones" and that following the heatmap beats following a last-week-same-hour intuition. Today that claim is unverified — it follows from model-quality metrics (MAE/WAPE) but never from a *driver-outcome* measurement. PBI 28 closes that gap: a closed-loop synthetic-driver simulation that replays a held-out week of historical TLC data, gives N synthetic drivers different policies, and reports per-policy trips served, idle time, and miles-to-pickup. This is what turns "the model is accurate" into "drivers following the model are better off."
+>
+> **Why it's separate from PBI 25.** PBI 25 is *system-level* simulation (the pipeline runs on a simulated clock). PBI 28 is *business-level* simulation (synthetic drivers act on the system's output and we measure outcomes). They are independent and complementary.
+
+- [ ] **PBI 28 — Driver-Agent Simulation Harness**
+  - Add `app/simulation/driver_agents.py` with:
+    - `Driver` dataclass: `{driver_id, lat, lon, state: Literal["idle", "en_route", "on_trip"], current_zone, destination_zone, trip_ends_at}`
+    - `Policy` protocol: `choose_next_zone(driver, heatmap_response, clock) -> zone_id`
+    - Three policies:
+      1. `HeatmapFollower` — calls `/heatmap`, picks one of the top-K zones (configurable K) weighted by predicted count
+      2. `LastWeekFollower` — baseline; reads PBI 18's last-week-same-hour lookup, picks top-K zones from *that*
+      3. `Stationary` — control; never moves
+  - Add `app/simulation/harness.py`:
+    - Spawns N drivers (default 50), distributes them across NYC zones with realistic starting positions (sampled from historical pickup density)
+    - At each simulated 15-min tick (driven by the same `SimulatedClock` from PBI 25):
+      1. For each `idle` driver: invoke its policy, set destination, transition → `en_route`, compute ETA from haversine distance / average NYC taxi speed (use 12 mph default)
+      2. For each `en_route` driver whose ETA has passed: transition → `idle` at the destination zone
+      3. For each `idle` driver: check the historical TLC trip table for trips that *actually started* in that driver's zone during this 15-min window; if any are unclaimed by other drivers in that zone, assign one (FIFO by `driver_id`); transition → `on_trip` with `trip_ends_at = pickup_time + historical_trip_duration`
+      4. For each `on_trip` driver whose `trip_ends_at` has passed: transition → `idle` at the historical dropoff zone
+    - Records per-driver, per-tick metrics to `data/simulation/runs/<run_id>/events.parquet`
+  - Add `app/simulation/report.py`:
+    - Aggregates per-policy: total trips completed, % idle time, average miles-to-pickup, total earnings (use `fare_amount + tip_amount` from historical data on the assigned trip)
+    - Emits a Markdown results table to `data/simulation/runs/<run_id>/report.md` and a CSV under the same dir
+    - The CI workflow (PBI 25 era) runs this harness on a tiny synthetic week as a regression test; the full week-long run is documented in the README
+  - Acceptance:
+    - `tests/test_driver_simulation.py`:
+      1. `test_heatmap_follower_visits_top_k` — synthetic 5-zone heatmap with zone 3 at top → idle driver's `destination_zone` is in {top-K}
+      2. `test_trip_assignment_is_exclusive` — two drivers in the same zone, one historical trip → exactly one driver goes `on_trip`, the other stays `idle`
+      3. `test_stationary_policy_serves_only_local_trips` — Stationary driver in a low-demand zone serves fewer trips than HeatmapFollower in the same starting position over the same week
+      4. `test_report_aggregation` — synthetic events frame → report row counts and totals match hand-computed numbers
+    - One full run on a held-out week of TLC data lands the per-policy table in the README under "Results" — with non-zero lift for `HeatmapFollower` over `LastWeekFollower` over `Stationary`, or an honest write-up explaining why not
+    - `data/simulation/runs/` and `data/simulation/` added to `.gitignore`; the latest `report.md` is committed under `docs/simulation_results.md` as the canonical artifact
+  - Depends on: PBI 18 (needs `LastWeekSameHourBaseline` for the comparison policy), PBI 25 (needs `SimulatedClock` so the harness shares the same time abstraction as the live pipeline)
+  - Difficulty: L
+  - **Honest limitation to document in the harness README:** the simulation is *single-agent-equivalent* — all N drivers see the same heatmap and historical trips are a fixed pool, so this captures recall-style lift but not demand-supply equilibration. A future PBI could add a supply-aware demand model.
+
+---
+
 ## Release: Post-MVP
 
 ### Personalized Ranking (upgrade from heatmap to recommendations)
@@ -299,6 +474,26 @@ PBI 12 (sort invariant test) ──> PBI 13 (parallel equivalence test) ──> 
                                                                               └──> PBI 15 (streaming write, stretch)
 
 PBI 17 (Socrata HTTP compliance) — blocked: requires downloader to migrate into app/ first
+
+Architecture-Alignment (PBIs 18–28 — closes gaps vs updated five-lane diagram + driver outcome):
+PBI 18 (baseline + recall@K) ──┬──> PBI 20 (registry + gate) ──> PBI 21 (fallback) ──┐
+                                │                                                       │
+                                ├──> PBI 27 (/health + /model-info)                    │
+                                │                                                       │
+                                └────────────────────────────────────────────────────┐ │
+                                                                                      │ │
+PBI 19 (Pandera schema gate)  ───────────────────────────────────────────────────────┼─┤
+                                                                                      │ │
+PBI 22 (prediction log + actuals) ──> PBI 23 (drift detector) ──> PBI 24 (alerts) ──┐│ │
+                                                                                      ││ │
+                                                                                      ▼▼ ▼
+                                                              PBI 25 (production orchestrator
+                                                                       + SimulatedClock)
+                                                                                        │
+                                                                ┌───────────────────────┼──> PBI 26 (feature store, stretch)
+                                                                │                       │
+                                                                └──> PBI 28 (driver-agent harness — needs PBI 18 baseline policy
+                                                                              + PBI 25 SimulatedClock)
 ```
 
 ## Priority Order
@@ -325,6 +520,40 @@ PBI 17 (Socrata HTTP compliance) — blocked: requires downloader to migrate int
 | 15 | PBI 16 | Paginate `/heatmap` — closes the "pagination for large responses" gap |
 | 16 | PBI 15 | Streaming bronze write — defer until ingestion OOMs in practice |
 | 17 | PBI 17 | Socrata HTTP compliance — blocked until downloader migrates into `app/` |
+| 18 | PBI 18 | Baseline + recall@K + WAPE-lift — turns the README's value claim from "trust me" into a reproducible number; unblocks gate (PBI 20) |
+| 19 | PBI 19 | Pandera schema gate — closes the Data Validation node; independent of everything; ship in parallel with PBI 18 |
+| 20 | PBI 20 | MLflow registry stages + validation gate — first SLA-critical fix; depends on PBI 18 for the comparison metric |
+| 21 | PBI 21 | Inference fallback — completes C04 fallback note; depends on PBI 20 |
+| 22 | PBI 22 | Prediction log + actuals join — foundation for monitoring lane (C05) |
+| 23 | PBI 23 | Drift detector (Evidently) — depends on PBI 22 |
+| 24 | PBI 24 | Alerts + retrain trigger — closes the monitoring → orchestrator feedback arrow; depends on PBI 23 |
+| 25 | PBI 25 | Promote Airflow DAGs to `orchestration/` — depends on PBI 20 + PBI 24 |
+| 26 | PBI 26 | Online feature store — stretch; defer until on-demand inference is actually needed |
+| 27 | PBI 27 | `/health` + `/model-info` + simulated flag — small but visible; depends on PBI 18 + PBI 20 |
+| 28 | PBI 28 | Driver-agent simulation harness — proves the README's "drivers following the heatmap are better off" claim; depends on PBI 18 + PBI 25 |
+
+## Recommended Sequencing for PBIs 18–27
+
+**Phase A — Credibility (highest leverage, ~10h total):**
+1. **PBI 18** (baseline + recall@K) — proves the model actually adds value over a naive baseline. Without this, every other PBI is built on an unproven foundation.
+2. **PBI 19** (Pandera schema gate) — ship in parallel; independent.
+3. **PBI 27** (`/health` + `/model-info`) — visible API surface, low effort.
+
+**Phase B — SLA-critical safety (~14h total):**
+4. **PBI 20** (registry + gate)
+5. **PBI 21** (inference fallback)
+
+**Phase C — Closed-loop monitoring (~24h total):**
+6. **PBI 22** (prediction log + actuals join)
+7. **PBI 23** (drift detector)
+8. **PBI 24** (alerts + retrain trigger)
+
+**Phase D — Production graduation + closed-loop simulation:**
+9. **PBI 25** (promote orchestrator out of `experiment/`, plus `SimulatedClock` abstraction — this is the *system-level* simulation layer that lets a reviewer watch the heatmap update on a compressed clock)
+10. **PBI 28** (driver-agent harness — the *business-level* simulation that produces the per-policy trips-served table the README references)
+
+**Phase E — Stretch:**
+11. **PBI 26** (online feature store — only if on-demand inference becomes a requirement)
 
 ## Known Limitations & Future Considerations
 
