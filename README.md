@@ -1,6 +1,38 @@
 # New York Taxi Demand Forecasting
 
-An end-to-end demand-forecasting service for NYC yellow taxis. The model predicts pickup volume per taxi zone over the next 30 minutes so a driver-facing heatmap can guide drivers toward higher-demand areas. Built with **LightGBM**, tracked with **MLflow**, served via **FastAPI**, and organised as a Bronze / Silver / Gold data pipeline.
+## The Problem
+
+NYC yellow-taxi drivers spend roughly **a third of their shift empty** — circling, idling, or returning from outer-borough drop-offs to areas they *guess* will be busy. Guessing well is a learned skill that takes years; guessing poorly compounds into lower revenue, longer shifts, and worse service for riders who can't find a cab.
+
+Experienced drivers already know Midtown is busy at 5 pm. The hard question is the one they *can't* answer from intuition: **where will demand be 30 minutes from now**, when I finish this drop-off — accounting for weather shifts, event let-outs, weekday-vs-holiday rhythms, and the slow drift of neighbourhoods as the city changes?
+
+## What This System Does
+
+This repository is an **end-to-end demand forecasting system** for NYC yellow taxis. It predicts pickup volume per taxi zone for the next 30 minutes, refreshed every 15 minutes, and serves the result as a ranked heatmap a driver app can render in one API call.
+
+- **Audience.** Drivers / fleet dispatchers who decide *where to position next*, not *what to do right now*.
+- **Decision horizon.** 30 minutes — roughly the time it takes to finish a trip and reposition.
+- **Resolution.** Per taxi zone (263 zones), per 15-minute bucket — matches the granularity of the decision.
+- **Counterfactual claim.** The model is meant to beat what an experienced driver already knows (the obvious time-of-day pattern). Lift is measured against a *last-week-same-hour* baseline, not against zero.
+
+## How Value Is Measured
+
+Model-quality metrics (MAE / RMSE / WAPE) measure the model. They don't measure whether a *driver who follows the heatmap* is better off. Two bridging metrics tie the ML output back to the business question:
+
+| Metric | What it asks |
+|---|---|
+| **Recall @ top-K zones** | Of the trips that actually happened in the next 30 min, what fraction occurred in the top-K predicted zones? |
+| **WAPE lift over baseline** | How much better is LightGBM than "last week, same hour, same zone"? |
+
+A model that beats the naive baseline by a meaningful WAPE margin *and* keeps recall@3 above the baseline is doing real work. A model that only wins on MAE but offers no recall@K lift is a vanity win.
+
+## Honest Limitations
+
+- **Data publication lag.** NYC TLC publishes trip records on a 1–2 month lag. This repo treats the data as if it streamed in real time; the 15-minute refresh cadence is *simulated*, not live. A production deployment would need an upstream telemetry feed.
+- **Single-agent assumption.** If every driver follows the same heatmap, supply outruns demand in the predicted zones and the prediction self-defeats. The system implicitly assumes the user is one of many agents, not the marginal one.
+- **Macro patterns only.** The model captures temporal + spatial regularities. It does not yet incorporate weather, events, or transit disruptions — the cases where intuition most often fails. Those are roadmap items.
+
+Built with **LightGBM**, tracked with **MLflow**, served via **FastAPI**, orchestrated with **Airflow**, and organised as a Bronze / Silver / Gold data pipeline.
 
 ## Current Forecasting Design (PBI B2)
 

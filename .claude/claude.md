@@ -4,20 +4,45 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Hourly demand forecasting system for New York Taxi** — a personal portfolio project to demonstrate an end-to-end MLOps pipeline (data ingestion → model serving → monitoring) on a real-world public dataset.
+**NYC yellow-taxi demand forecasting system** — a personal portfolio project demonstrating an end-to-end MLOps pipeline on a real-world public dataset.
 
-The data pipeline is structured using **medallion architecture** (Bronze → Silver → Gold):
+### The Problem
+NYC yellow-taxi drivers spend roughly a third of their shift empty — circling, idling, or returning from outer-borough drop-offs to areas they *guess* will be busy. Experienced drivers already know Midtown is busy at 5 pm; the hard question is the one they can't answer from intuition: **where will demand be 30 minutes from now**, when they finish the current drop-off.
 
-1. Data ingestion from API → promote to Bronze layer
-2. Data validation and cleaning → promote to Silver layer
-3. Feature engineering → promote to Gold layer
-4. Train and save the demand prediction model
-5. Use the saved model to forecast taxi demand at specific locations (h+3, h+6, h+12)
+### What This System Does
+Predicts pickup volume per taxi zone for the next 30 minutes, refreshed every 15 minutes, and serves the result as a ranked heatmap a driver app can render in one API call.
+
+- **Audience:** Drivers / fleet dispatchers deciding *where to position next*.
+- **Decision horizon:** 30 minutes — roughly the time to finish a trip and reposition.
+- **Resolution:** Per taxi zone (263 zones), per 15-minute bucket.
+- **Counterfactual claim:** Beat what an experienced driver already knows (the obvious time-of-day pattern), measured against a *last-week-same-hour* baseline — not against zero.
+
+### How Value Is Measured
+Model-quality metrics (MAE / RMSE / WAPE) measure the model. Two bridging metrics tie ML output back to the business question:
+
+- **Recall @ top-K zones** — of the trips that actually happened, what fraction occurred in the top-K predicted zones?
+- **WAPE lift over baseline** — how much better is LightGBM than "last week, same hour, same zone"?
+
+### Pipeline Shape
+Medallion architecture (Bronze → Silver → Gold), with monitoring closing the loop:
+
+1. Ingest raw NYC TLC trips → Bronze
+2. Validate schema + quality, clean → Silver
+3. Feature engineering (lags, cyclical time, k-NN spatial smoothing) → Gold
+4. Train LightGBM model with time-ordered split, log to MLflow, gate on validation
+5. Serve `/heatmap` via FastAPI, refreshed every 15 minutes by Airflow
+6. Monitor drift + actuals, trigger retrain on degradation
+
+### Honest Limitations (worth reflecting in any agent-generated docs)
+- TLC publishes trip records on a 1–2 month lag → the 15-min refresh cadence is *simulated*, not live.
+- Single-agent assumption: if every driver follows the same heatmap, supply outruns demand in the predicted zones (self-defeating prediction).
+- Macro patterns only — no weather, events, or transit disruptions yet.
 
 ### Portfolio Goals
-- Showcase a clean **medallion architecture** data pipeline
-- Demonstrate **MLflow** experiment tracking and **DVC** data versioning
-- Provide a working **FastAPI** prediction endpoint as the deployment artifact
+- Showcase a clean **medallion architecture** data pipeline with explicit data-validation and feature-store seams
+- Demonstrate **MLflow** experiment tracking, model registry with staging/production stages, and **DVC** data versioning
+- Provide a working **FastAPI** `/heatmap` endpoint with a refreshable, cache-backed sub-200ms response
+- Show a closed-loop **monitoring** lane (prediction log → actuals join → drift → retrain trigger)
 - Maintain **production-quality** standards (strict typing, tests, lint/format) despite being a personal project
 
 ## Environment
