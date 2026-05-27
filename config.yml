@@ -53,6 +53,8 @@ clean:
     - DOLocationID
 
 train:
+  gate:
+    min_wape_lift_pct: 2.0  # Minimum WAPE lift % to promote challenger to Production
   split_ratios: [0.8, 0.1, 0.1]  # train / val / test
   features:
     - hour_of_day_sin
@@ -97,4 +99,5 @@ serving:
 
 mlflow:
   experiment_name: ny_taxi_demand_model
-  tracking_uri: mlruns
+  tracking_uri: sqlite:///mlflow.db
+  model_name: ny_taxi_demand_model

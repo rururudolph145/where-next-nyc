@@ -18,6 +18,7 @@ from lightgbm import LGBMRegressor
 from app.core.config import load_config
 from app.core.metrics import compute_recall_at_k, compute_wape_lift, evaluate
 from app.training.baseline import LastWeekSameHourBaseline
+from app.training.registry_gate import apply_gate
 
 # Re-exported so legacy ``patch("src.training.train.mlflow")`` paths keep
 # working via the src.training.train shim. Listed in __all__ to satisfy
@@ -58,7 +59,15 @@ class Trainer:
         self.experiment_name: str = mlflow_cfg.get(
             "experiment_name", "ny_taxi_demand_model"
         )
-        self.tracking_uri: str = mlflow_cfg.get("tracking_uri", "mlruns")
+        self.tracking_uri: str = mlflow_cfg.get("tracking_uri", "sqlite:///mlflow.db")
+        self.registry_model_name: str = mlflow_cfg.get(
+            "model_name", "ny_taxi_demand_model"
+        )
+
+        gate_cfg: dict[str, Any] = self.config.get("train", {}).get("gate", {})
+        self.min_wape_lift_pct: float = float(gate_cfg.get("min_wape_lift_pct", 2.0))
+
+        mlflow.set_tracking_uri(self.tracking_uri)
 
     # ------------------------------------------------------------------
     # Data loading
@@ -166,7 +175,8 @@ class Trainer:
         4. Evaluate on val and test sets (full, unfiltered).
         5. Run last-week-same-hour baseline on the NaN-filtered test subset.
         6. Log params, metrics (val, test, baseline, lift, recall) to MLflow.
-        7. Save model artifact to disk.
+        7. Register model in MLflow Model Registry; run champion-vs-challenger gate.
+        8. Save model artifact to disk only when the gate promotes the challenger.
 
         Args:
             data: Optional Gold layer DataFrame. If ``None``, loads from
@@ -179,6 +189,7 @@ class Trainer:
             ``baseline_metrics``, ``model_aligned_metrics``,
             ``wape_lift_pct``, and ``recall_at_3`` are ``None`` when the
             test split has no week-ago overlap (empty ``aligned_df``).
+            ``model_path`` is ``None`` when the gate rejects the challenger.
         """
         if data is None:
             data = self.load_gold()
@@ -284,10 +295,11 @@ class Trainer:
             )
 
         # MLflow logging
-        mlflow.set_tracking_uri(self.tracking_uri)
         mlflow.set_experiment(self.experiment_name)
 
-        with mlflow.start_run():
+        model_path: str | None = None
+
+        with mlflow.start_run() as active_run:
             mlflow.log_params(self.model_params)
             mlflow.log_param("model_name", self.model_name)
             mlflow.log_param("features", self.features)
@@ -313,9 +325,65 @@ class Trainer:
 
             mlflow.lightgbm.log_model(self.model, artifact_path="model")
 
-        # Save artifact
-        model_path = self.save_model()
-        print(f"Model saved → {model_path}")
+            # Register model in MLflow Model Registry.
+            run_id = active_run.info.run_id
+            run_uri = f"runs:/{run_id}/model"
+            registered = mlflow.register_model(run_uri, self.registry_model_name)
+            new_version: str = registered.version
+
+            # Tag the new version with challenger WAPE for future gate reads.
+            # Skip when wape_lift_pct is None (no baseline overlap) — the tag
+            # would be meaningless and would look like a missing champion WAPE
+            # to a future run.
+            gate_result: str
+            rejection_reason: str | None
+            client = mlflow.tracking.MlflowClient()
+            if wape_lift_pct is not None and model_aligned_metrics is not None:
+                mlflow.set_tag("model_test_wape", str(model_aligned_metrics["wape"]))
+                client.set_model_version_tag(
+                    self.registry_model_name,
+                    new_version,
+                    "model_test_wape",
+                    str(model_aligned_metrics["wape"]),
+                )
+                challenger_wape = model_aligned_metrics["wape"]
+                gate_result, rejection_reason = apply_gate(
+                    client,
+                    self.registry_model_name,
+                    new_version,
+                    challenger_wape,
+                    self.min_wape_lift_pct,
+                )
+            else:
+                # No baseline — check whether an incumbent exists.
+                production_versions = client.get_latest_versions(
+                    self.registry_model_name, stages=["Production"]
+                )
+                if production_versions:
+                    gate_result = "rejected"
+                    rejection_reason = "no_baseline_for_comparison"
+                else:
+                    # First-ever run without baseline — auto-promote.
+                    client.transition_model_version_stage(
+                        name=self.registry_model_name,
+                        version=new_version,
+                        stage="Production",
+                    )
+                    gate_result = "promoted"
+                    rejection_reason = None
+
+            mlflow.set_tag("gate_result", gate_result)
+            if rejection_reason is not None:
+                mlflow.set_tag("gate_rejection_reason", rejection_reason)
+
+            if gate_result == "promoted":
+                model_path = self.save_model()
+                print(f"Model saved → {model_path}")
+            else:
+                print(
+                    f"Gate rejected challenger "
+                    f"(reason: {rejection_reason}); disk model unchanged."
+                )
 
         return {
             "val_metrics": val_metrics,
