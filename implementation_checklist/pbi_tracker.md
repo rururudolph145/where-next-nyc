@@ -258,7 +258,7 @@ Closes the **Data Validation** node added to Pipeline 1 in the updated diagram. 
 
 Closes the **Validation & Deployment** gating step and the **Fallback pipeline** note in C04 of the updated diagram. These are SLA-critical: today a degraded model is silently promoted and an absent model returns 503.
 
-- [ ] **PBI 20 — MLflow Model Registry + Champion-vs-Challenger Gate**
+- [x] **PBI 20 — MLflow Model Registry + Champion-vs-Challenger Gate** — *shipped in `17960de`*
   - In `Trainer.run()`, after training and baseline evaluation (PBI 18), call `mlflow.register_model(...)` to register the model under `ny_taxi_demand_model` with a new version
   - Implement champion-vs-challenger gate: load current Production stage; if new model's test WAPE is not at least `train.gate.min_wape_lift_pct` better (default 2%), reject — do NOT transition stages; log rejection reason as MLflow tag `gate_rejected_reason`
   - If accepted: transition new version → Production; previous Production → Archived
@@ -544,7 +544,7 @@ PBI 22 (prediction log + actuals) ──> PBI 23 (drift detector) ──> PBI 24
 
 | Done | Order | PBI | Rationale |
 |------|-------|-----|-----------|
-| [ ] | 13 | PBI 20 | MLflow registry stages + validation gate — first SLA-critical fix; depends on PBI 18 for the comparison metric |
+| [x] | 13 | ~~PBI 20~~ | ~~MLflow registry stages + validation gate — first SLA-critical fix; depends on PBI 18 for the comparison metric~~ — *shipped in `17960de`* |
 | [ ] | 14 | PBI 21 | Inference fallback — completes C04 fallback note; depends on PBI 20 |
 
 ### Open — Phase C · Closed-loop monitoring (~24h)
