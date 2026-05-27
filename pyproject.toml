@@ -32,6 +32,7 @@ dependencies = [
     "fastapi>=0.136.0",
     "uvicorn>=0.34.0",
     "mlflow>=3.11.1",
+    "pandera>=0.20",
 ]
 
 [tool.ruff]

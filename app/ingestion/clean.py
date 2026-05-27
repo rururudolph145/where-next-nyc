@@ -6,6 +6,13 @@ from typing import Any
 
 import pandas as pd
 
+from app.core.paths import validation_log_dir
+from app.ingestion.schema import (
+    DataValidationError,
+    validate_bronze_schema,
+    write_validation_log,
+)
+
 
 class DataCleaner:
     """Cleans raw taxi trip data and promotes it from Bronze to Silver layer."""
@@ -165,6 +172,17 @@ class DataCleaner:
         print(f"Loading bronze data from: {self.bronze_path}")
         raw = self.load_bronze()
         print(f"  Raw rows: {len(raw):,}")
+
+        # Schema validation — write log regardless of pass/fail
+        log_dir = validation_log_dir(self.config)
+        failure_reasons: list[str] = []
+        try:
+            validate_bronze_schema(raw)
+        except DataValidationError as exc:
+            failure_reasons = exc.failure_reasons
+            raise
+        finally:
+            write_validation_log(log_dir, raw, failure_reasons)
 
         # Parse pickup datetimes for splitting
         raw["tpep_pickup_datetime"] = pd.to_datetime(raw["tpep_pickup_datetime"])

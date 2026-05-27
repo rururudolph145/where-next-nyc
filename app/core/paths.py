@@ -30,3 +30,12 @@ def raw_path(config: dict[str, Any]) -> Path:
 def model_store_path(config: dict[str, Any]) -> Path:
     """Return the configured directory where trained models are saved."""
     return Path(config["model"]["store_path"])
+
+
+def validation_log_dir(config: dict[str, Any]) -> Path:
+    """Return the directory where validation log JSON files are written.
+
+    Resolves to the ``_validation`` subdirectory that sits beside the Silver
+    parquet file (i.e. ``<silver_path.parent>/_validation``).
+    """
+    return Path(config["data"]["silver_path"]).parent / "_validation"
