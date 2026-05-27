@@ -231,7 +231,7 @@ Supports the README's "How Value Is Measured" section. Cheapest gap to close, hi
 
 Closes the **Data Validation** node added to Pipeline 1 in the updated diagram. Without this, schema drift in TLC data (which has shifted columns year-over-year) silently corrupts training.
 
-- [x] **PBI 19 — Pandera Schema Gate Between Bronze and Silver** — *shipped*
+- [x] **PBI 19 — Pandera Schema Gate Between Bronze and Silver** — *shipped in `d317be0`*
   - Add `app/ingestion/schema.py` with a Pandera `DataFrameSchema` describing the expected Bronze schema (column names, dtypes, nullness, value ranges for `passenger_count`, `trip_distance`, `PULocationID`, `tpep_pickup_datetime`)
   - Wire into `DataCleaner.run()` at the start: validate the input frame; on failure, raise `DataValidationError` and halt
   - Log validation results (rows in, rows passing, rows failing per rule) to a JSON file under `data/silver/_validation/` for the future monitoring lane to consume
@@ -524,7 +524,7 @@ PBI 22 (prediction log + actuals) ──> PBI 23 (drift detector) ──> PBI 24
 | Done | Order | PBI | Rationale |
 |------|-------|-----|-----------|
 | [x] | 10 | ~~PBI 18~~ | ~~Baseline + recall@K + WAPE-lift — turns the README's value claim into a reproducible number; unblocks gate (PBI 20)~~ — *shipped in `783f5ff`* |
-| [x] | 11 | ~~PBI 19~~ | ~~Pandera schema gate — closes the Data Validation node; independent; ship in parallel with PBI 18~~ — *shipped* |
+| [x] | 11 | ~~PBI 19~~ | ~~Pandera schema gate — closes the Data Validation node; independent; ship in parallel with PBI 18~~ — *shipped in `d317be0`* |
 | [ ] | 12 | PBI 27 | `/health` + `/model-info` + simulated flag — small but visible; depends on PBI 18 + PBI 20 |
 
 ### Open — Phase B · SLA-critical safety (~14h)
