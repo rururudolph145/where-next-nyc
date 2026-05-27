@@ -176,6 +176,19 @@ Supports the "Use pagination when API responses are large" rule.
   - Update `docs/system_design.md` §4.4 and `docs/system_design.html` to document the new parameter
   - Acceptance: default response payload shrinks by ~80%; serving tests stay 100% green
 
+- [ ] **PBI 29 — Latency SLO Baseline + CI Guard**
+  - Closes the **latency arm** of the SLA: `docs/system_design.md` states `< 200ms p95 for GET /heatmap`, but nothing in the repo measures or enforces it today.
+  - Add `scripts/bench_heatmap.py` that spins up the FastAPI app and hits `GET /heatmap` N times (default 500) against a local uvicorn, reporting p50 / p95 / p99 latency
+  - Record the baseline in `docs/system_design.md` — replace `< 200ms target` with `< 200ms target / <X> ms measured on <commit>`
+  - Add a CI smoke check (`make bench` or pytest mark) that fails when p95 exceeds a configurable threshold (default 250ms)
+  - Add a `/health` field for last-recent-request p95 once PBI 27 lands (optional follow-up — keep PBI 29 itself independent)
+  - Acceptance:
+    - `tests/test_bench_heatmap.py` — (a) bench script runs against a fixture predictions parquet, (b) p95 stays under the configured threshold, (c) regression is detected when an artificial 300ms sleep is injected into the handler
+    - `docs/system_design.md` updated with a real measured number
+    - ruff + mypy clean
+  - Depends on: nothing (PBI 27 enriches but does not block)
+  - Difficulty: S
+
 ### Activity 6: Outbound HTTP Compliance — *Forward-looking*
 
 > N/A today — no outbound HTTP calls live in `app/`. Activates when the Socrata
@@ -554,27 +567,28 @@ PBI 22 (prediction log + actuals) ──> PBI 23 (drift detector) ──> PBI 24
 | Done | Order | PBI | Rationale |
 |------|-------|-----|-----------|
 | [ ] | 20 | PBI 16 | Paginate `/heatmap` — closes the "pagination for large responses" gap |
-| [ ] | 21 | PBI 15 | Streaming bronze write — defer until ingestion OOMs in practice |
-| [ ] | 22 | PBI 17 | Socrata HTTP compliance — blocked until downloader migrates into `app/` |
+| [ ] | 21 | PBI 29 | Latency SLO baseline + CI guard — closes the latency arm of the SLA; independent, S-sized |
+| [ ] | 22 | PBI 15 | Streaming bronze write — defer until ingestion OOMs in practice |
+| [ ] | 23 | PBI 17 | Socrata HTTP compliance — blocked until downloader migrates into `app/` |
 
 ### Open — Post-MVP (personalized ranking + reliability)
 
 | Done | Order | PBI | Rationale |
 |------|-------|-----|-----------|
-| [ ] | 23 | PBI 5 | Zone lookup — needed by personalized ranking |
-| [ ] | 24 | PBI 6 | Location capture — simple, enables testing |
-| [ ] | 25 | PBI 7 | Scoring function — pure math, unit testable |
-| [ ] | 26 | PBI 8 | Recommendation API — personalized ranking endpoint |
-| [ ] | 27 | PBI 11 | Simulated streaming — shows production awareness (now largely subsumed by PBI 25's `SimulatedClock`) |
-| [ ] | 28 | PBI 9 | Stale-data handler — historical-averages fallback; complementary to PBI 21's model-level fallback |
-| [ ] | 29 | PBI 10 | Monitoring (L5 signal) — superseded by PBIs 22–24 which decompose this into prediction log + drift + alerts |
-| [ ] | 30 | PBI 4 | Multi-horizon — deferred; A3 knob (`horizon_buckets`) already shipped, just needs a training config flip |
+| [ ] | 24 | PBI 5 | Zone lookup — needed by personalized ranking |
+| [ ] | 25 | PBI 6 | Location capture — simple, enables testing |
+| [ ] | 26 | PBI 7 | Scoring function — pure math, unit testable |
+| [ ] | 27 | PBI 8 | Recommendation API — personalized ranking endpoint |
+| [ ] | 28 | PBI 11 | Simulated streaming — shows production awareness (now largely subsumed by PBI 25's `SimulatedClock`) |
+| [ ] | 29 | PBI 9 | Stale-data handler — historical-averages fallback; complementary to PBI 21's model-level fallback |
+| [ ] | 30 | PBI 10 | Monitoring (L5 signal) — superseded by PBIs 22–24 which decompose this into prediction log + drift + alerts |
+| [ ] | 31 | PBI 4 | Multi-horizon — deferred; A3 knob (`horizon_buckets`) already shipped, just needs a training config flip |
 
 ### Stretch
 
 | Done | Order | PBI | Rationale |
 |------|-------|-----|-----------|
-| [ ] | 31 | PBI 26 | Online feature store — defer until on-demand inference is actually needed |
+| [ ] | 32 | PBI 26 | Online feature store — defer until on-demand inference is actually needed |
 
 ## Recommended Sequencing for PBIs 18–27
 
