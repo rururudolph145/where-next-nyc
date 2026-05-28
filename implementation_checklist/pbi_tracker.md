@@ -186,7 +186,7 @@ Supports the "Use pagination when API responses are large" rule.
     - `tests/test_bench_heatmap.py` — (a) bench script runs against a fixture predictions parquet, (b) p95 stays under the configured threshold, (c) regression is detected when an artificial 300ms sleep is injected into the handler
     - `docs/system_design.md` updated with a real measured number
     - ruff + mypy clean
-  - Depends on: nothing (PBI 27 enriches but does not block)
+  - Depends on: PBI 30 (needs the GitHub Actions workflow to actually run the bench-CI smoke check; PBI 27 enriches but does not block)
   - Difficulty: S
 
 ### Activity 6: Outbound HTTP Compliance — *Forward-looking*
@@ -385,6 +385,38 @@ Closes the **Feature Store** node added to the inference lane. Only needed if tr
   - Difficulty: L
   - **Honest limitation to document in the harness README:** the simulation is *single-agent-equivalent* — all N drivers see the same heatmap and historical trips are a fixed pool, so this captures recall-style lift but not demand-supply equilibration. A future PBI could add a supply-aware demand model.
 
+### Activity 15: GitHub Actions CI/CD (PBI 30)
+
+> **Why this exists.** Today the project documents `uv run ruff check`, `uv run ruff format --check`, `uv run mypy`, and `uv run pytest` as the manual gates (README:186–196), but nothing enforces them on PRs. The only existing GitHub Actions workflow is `docs.yml` (mkdocs deploy). PRs into `main` can land lint/type/test regressions silently. This PBI wires the manual gates into automated CI so the rules in `.claude/rules/coding-style.md` and `.claude/rules/testing.md` are mechanically enforced.
+>
+> **Why now.** Phase A is shipped (PBIs 18, 19, 20, 27 all live on branches awaiting merge). Future PBIs (21, 22–24, 25, 28) all add code paths that need the same gates. Adding CI before those land prevents the maintenance debt of fixing regressions after the fact. Also gates PBI 29's latency-SLO test (`bench_heatmap_p95` cannot be a useful guardrail without a workflow to run it on every PR).
+
+- [ ] **PBI 30 — GitHub Actions CI/CD: Lint + Test (+ Docker, deferred)**
+  - Add `.github/workflows/lint.yml`:
+    - Triggers: `pull_request` against any branch; `push` to `main`
+    - Steps: checkout → `astral-sh/setup-uv@v3` (with cache) → `uv python install 3.13` → `uv sync --dev` → `uv run ruff check .` → `uv run ruff format --check .` → `uv run mypy app tests`
+    - Must pass without modification on the current `main` after PBIs 20/27 merge
+  - Add `.github/workflows/test.yml`:
+    - Triggers: `pull_request` against any branch; `push` to `main`
+    - Steps: checkout → setup-uv → `uv sync --dev` → `uv run pytest tests/ -v --tb=short`
+    - **Torch handling**: verify via `grep -r "import torch" app/ tests/` whether torch is actually used by the test suite. If not, add `--no-install-package torch --no-install-package torchvision` to `uv sync` to save ~2 GB and ~90s of install on CPU runners. If torch IS imported, add a CPU-only override (`UV_INDEX_STRATEGY=unsafe-first-match` + `--extra-index-url https://download.pytorch.org/whl/cpu`)
+    - **Pre-existing failure**: `tests/test_dataset.py::test_load_data` fails with `KeyError: 'raw_path'` (documented in MEMORY.md). Either fix the fixture or mark `@pytest.mark.xfail(reason="known: requires raw_path config key")` before turning CI red
+  - Configure branch protection on `main` (repo settings, not a workflow file):
+    - Require `lint` and `test` workflows to pass before merge
+    - Require at least 1 PR review
+    - Disallow direct pushes to `main` (matches `.claude/rules/git-workflow.md`)
+  - **Deferred — Docker pipeline**: do NOT add `.github/workflows/docker.yml` in this PBI. There is no `Dockerfile` for the FastAPI service today (only `experiment/orchestration/docker-compose.yml` for the Airflow demo). When a Dockerfile is written, follow up with a `docker.yml` that builds and pushes to `ghcr.io/<owner>/<repo>` on tag pushes (`on: push: tags: ['v*']`) using `docker/build-push-action@v5` with GHA cache. Capture this as a separate PBI when a deploy target is chosen.
+  - Acceptance:
+    - Open a draft PR against `main`; both `lint` and `test` checks appear and pass green on the current tree (after handling `test_load_data`)
+    - Open a second PR that introduces a deliberate ruff violation (e.g. unused import); `lint` workflow fails with the rule code in the log
+    - Open a third PR that breaks a serving test; `test` workflow fails with the failing test name in the log
+    - Branch protection prevents merging any of the three PRs while a required check is red
+    - Cold-cache CI run completes in under 4 minutes (lint) + under 5 minutes (test); warm-cache under 1 minute each
+    - README gets a CI badge row pointing at the two workflows
+  - Depends on: nothing (independent of feature PBIs)
+  - Difficulty: S
+  - **Out of scope for this PBI:** Docker build/publish workflow, coverage upload (Codecov/Coveralls), pre-commit hooks, the latency-SLO benchmark workflow (that lives in PBI 29), MLflow tracking-server-based registry tests in CI
+
 ---
 
 ## Release: Post-MVP
@@ -539,7 +571,7 @@ PBI 22 (prediction log + actuals) ──> PBI 23 (drift detector) ──> PBI 24
 |------|-------|-----|-----------|
 | [x] | 10 | ~~PBI 18~~ | ~~Baseline + recall@K + WAPE-lift — turns the README's value claim into a reproducible number; unblocks gate (PBI 20)~~ — *shipped in `783f5ff`* |
 | [x] | 11 | ~~PBI 19~~ | ~~Pandera schema gate — closes the Data Validation node; independent; ship in parallel with PBI 18~~ — *shipped in `d317be0`* |
-| [ ] | 12 | PBI 27 | `/health` + `/model-info` + simulated flag — small but visible; depends on PBI 18 + PBI 20 |
+| [x] | 12 | ~~PBI 27~~ | ~~`/health` + `/model-info` + simulated flag — small but visible; depends on PBI 18 + PBI 20~~ — *shipped in `ba14223` (follow-ups) on top of `adc4ad7`* |
 
 ### Open — Phase B · SLA-critical safety (~14h)
 
@@ -567,29 +599,30 @@ PBI 22 (prediction log + actuals) ──> PBI 23 (drift detector) ──> PBI 24
 
 | Done | Order | PBI | Rationale |
 |------|-------|-----|-----------|
-| [ ] | 20 | PBI 16 | Paginate `/heatmap` — closes the "pagination for large responses" gap |
-| [ ] | 21 | PBI 29 | Latency SLO baseline + CI guard — closes the latency arm of the SLA; independent, S-sized |
-| [ ] | 22 | PBI 15 | Streaming bronze write — defer until ingestion OOMs in practice |
-| [ ] | 23 | PBI 17 | Socrata HTTP compliance — blocked until downloader migrates into `app/` |
+| [ ] | 20 | PBI 30 | GitHub Actions CI/CD (lint + test) — independent, S-sized; unblocks the latency-CI-guard half of PBI 29; do first so subsequent PBIs ship through enforced gates |
+| [ ] | 21 | PBI 16 | Paginate `/heatmap` — closes the "pagination for large responses" gap |
+| [ ] | 22 | PBI 29 | Latency SLO baseline + CI guard — closes the latency arm of the SLA; depends on PBI 30 for the CI workflow to run the benchmark |
+| [ ] | 23 | PBI 15 | Streaming bronze write — defer until ingestion OOMs in practice |
+| [ ] | 24 | PBI 17 | Socrata HTTP compliance — blocked until downloader migrates into `app/` |
 
 ### Open — Post-MVP (personalized ranking + reliability)
 
 | Done | Order | PBI | Rationale |
 |------|-------|-----|-----------|
-| [ ] | 24 | PBI 5 | Zone lookup — needed by personalized ranking |
-| [ ] | 25 | PBI 6 | Location capture — simple, enables testing |
-| [ ] | 26 | PBI 7 | Scoring function — pure math, unit testable |
-| [ ] | 27 | PBI 8 | Recommendation API — personalized ranking endpoint |
-| [ ] | 28 | PBI 11 | Simulated streaming — shows production awareness (now largely subsumed by PBI 25's `SimulatedClock`) |
-| [ ] | 29 | PBI 9 | Stale-data handler — historical-averages fallback; complementary to PBI 21's model-level fallback |
-| [ ] | 30 | PBI 10 | Monitoring (L5 signal) — superseded by PBIs 22–24 which decompose this into prediction log + drift + alerts |
-| [ ] | 31 | PBI 4 | Multi-horizon — deferred; A3 knob (`horizon_buckets`) already shipped, just needs a training config flip |
+| [ ] | 25 | PBI 5 | Zone lookup — needed by personalized ranking |
+| [ ] | 26 | PBI 6 | Location capture — simple, enables testing |
+| [ ] | 27 | PBI 7 | Scoring function — pure math, unit testable |
+| [ ] | 28 | PBI 8 | Recommendation API — personalized ranking endpoint |
+| [ ] | 29 | PBI 11 | Simulated streaming — shows production awareness (now largely subsumed by PBI 25's `SimulatedClock`) |
+| [ ] | 30 | PBI 9 | Stale-data handler — historical-averages fallback; complementary to PBI 21's model-level fallback |
+| [ ] | 31 | PBI 10 | Monitoring (L5 signal) — superseded by PBIs 22–24 which decompose this into prediction log + drift + alerts |
+| [ ] | 32 | PBI 4 | Multi-horizon — deferred; A3 knob (`horizon_buckets`) already shipped, just needs a training config flip |
 
 ### Stretch
 
 | Done | Order | PBI | Rationale |
 |------|-------|-----|-----------|
-| [ ] | 32 | PBI 26 | Online feature store — defer until on-demand inference is actually needed |
+| [ ] | 33 | PBI 26 | Online feature store — defer until on-demand inference is actually needed |
 
 ## Recommended Sequencing for PBIs 18–27
 
