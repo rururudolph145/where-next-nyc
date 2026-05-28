@@ -18,15 +18,22 @@ Coverage map (every numbered AC in the story):
   AC-9  → test_ac9_heatmap_envelope_contains_simulated_true
   AC-10 → test_ac10_heatmap_existing_criteria_still_pass
   AC-11 → test_ac11_trainer_writes_wape_lift_pct_tag_on_promotion
+         + test_ac11_wape_lift_pct_tag_value_is_float_parseable_string
   AC-12 → test_ac12_trainer_skips_wape_lift_pct_tag_when_none
-  AC-13 → test_ac13_wape_lift_pct_tag_value_is_float_parseable_string
-  AC-14 → test_ac14_trainer_skips_wape_lift_pct_tag_when_inf
+         + test_ac12_trainer_skips_wape_lift_pct_tag_when_inf
+  AC-13 → satisfied by structural inspection: TestHealthEndpoint,
+         TestModelInfoEndpoint, TestHeatmapSimulatedFlag in
+         tests/test_serving.py contain >= 3 new test functions
+         covering /health happy + degraded + /model-info happy.
+  AC-14 → satisfied by regression: full `pytest tests/test_serving.py`
+         run passes without modification to pre-existing tests.
 
 Edge cases from story:
   Edge: future bucket  → test_ac2_health_lag_is_zero_when_bucket_in_future
   Edge: empty parquet  → test_ac3_health_lag_is_null_when_predictions_empty
   Edge: missing tag    → test_ac6_model_info_happy_path_returns_all_fields (null branch)
   Edge: mlflow raises  → test_health_degraded_when_mlflow_client_raises
+                       + test_model_info_no_production_model_when_mlflow_raises
   Edge: tag absent     → test_model_info_returns_null_wape_when_tag_absent
 """
 
@@ -142,12 +149,8 @@ def _make_4week_gold(tmp_path: Path) -> tuple[Path, pd.DataFrame]:
                         "trip_count": float(zone * 10 + hour),
                         "hour_of_day_sin": float(np.sin(2 * np.pi * hour / 24)),
                         "hour_of_day_cos": float(np.cos(2 * np.pi * hour / 24)),
-                        "day_of_week_sin": float(
-                            np.sin(2 * np.pi * ts.dayofweek / 7)
-                        ),
-                        "day_of_week_cos": float(
-                            np.cos(2 * np.pi * ts.dayofweek / 7)
-                        ),
+                        "day_of_week_sin": float(np.sin(2 * np.pi * ts.dayofweek / 7)),
+                        "day_of_week_cos": float(np.cos(2 * np.pi * ts.dayofweek / 7)),
                         "month_sin": float(np.sin(2 * np.pi * ts.month / 12)),
                         "month_cos": float(np.cos(2 * np.pi * ts.month / 12)),
                         "pickup_longitude": float(-74.00 - zone * 0.01),
@@ -266,9 +269,7 @@ class TestHealthHappyPath:
 
         # Act
         with patch("app.api.main.load_config", return_value=_FAKE_SERVING_CONFIG):
-            with patch(
-                "app.api.main.MlflowClient", return_value=mock_client_instance
-            ):
+            with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
                 local_client = TestClient(serving_module.app)
                 resp = local_client.get("/health")
 
@@ -312,9 +313,7 @@ class TestHealthLagClamping:
 
         # Act
         with patch("app.api.main.load_config", return_value=_FAKE_SERVING_CONFIG):
-            with patch(
-                "app.api.main.MlflowClient", return_value=mock_client_instance
-            ):
+            with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
                 local_client = TestClient(serving_module.app)
                 resp = local_client.get("/health")
 
@@ -352,9 +351,7 @@ class TestHealthEmptyPredictions:
 
         # Act
         with patch("app.api.main.load_config", return_value=_FAKE_SERVING_CONFIG):
-            with patch(
-                "app.api.main.MlflowClient", return_value=mock_client_instance
-            ):
+            with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
                 local_client = TestClient(serving_module.app)
                 resp = local_client.get("/health")
 
@@ -394,9 +391,7 @@ class TestHealthDegraded:
 
         # Act
         with patch("app.api.main.load_config", return_value=_FAKE_SERVING_CONFIG):
-            with patch(
-                "app.api.main.MlflowClient", return_value=mock_client_instance
-            ):
+            with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
                 local_client = TestClient(serving_module.app)
                 resp = local_client.get("/health")
 
@@ -505,9 +500,7 @@ class TestModelInfoHappyPath:
 
         # Act
         with patch("app.api.main.load_config", return_value=_FAKE_SERVING_CONFIG):
-            with patch(
-                "app.api.main.MlflowClient", return_value=mock_client_instance
-            ):
+            with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
                 local_client = TestClient(serving_module.app)
                 resp = local_client.get("/model-info")
 
@@ -543,9 +536,7 @@ class TestModelInfoHappyPath:
 
         # Act
         with patch("app.api.main.load_config", return_value=_FAKE_SERVING_CONFIG):
-            with patch(
-                "app.api.main.MlflowClient", return_value=mock_client_instance
-            ):
+            with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
                 local_client = TestClient(serving_module.app)
                 resp = local_client.get("/model-info")
 
@@ -588,9 +579,7 @@ class TestModelInfoProductionOnly:
 
         # Act
         with patch("app.api.main.load_config", return_value=_FAKE_SERVING_CONFIG):
-            with patch(
-                "app.api.main.MlflowClient", return_value=mock_client_instance
-            ):
+            with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
                 local_client = TestClient(serving_module.app)
                 resp = local_client.get("/model-info")
 
@@ -603,7 +592,9 @@ class TestModelInfoProductionOnly:
         call_kwargs = mock_client_instance.get_latest_versions.call_args
         assert call_kwargs is not None
         _, kwargs = call_kwargs
-        assert "Production" in kwargs.get("stages", call_kwargs.args[1] if len(call_kwargs.args) > 1 else [])
+        assert "Production" in kwargs.get(
+            "stages", call_kwargs.args[1] if len(call_kwargs.args) > 1 else []
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -612,7 +603,8 @@ class TestModelInfoProductionOnly:
 
 
 class TestModelInfoNoProduction:
-    """AC-8: /model-info returns no_production_model when registry is empty."""
+    """AC-8: /model-info returns no_production_model when registry is empty
+    or unreachable (graceful-degrade — never 5xx)."""
 
     def test_ac8_model_info_no_production_model_returns_null_fields(
         self, monkeypatch: pytest.MonkeyPatch
@@ -632,11 +624,43 @@ class TestModelInfoNoProduction:
 
         # Act
         with patch("app.api.main.load_config", return_value=_FAKE_SERVING_CONFIG):
-            with patch(
-                "app.api.main.MlflowClient", return_value=mock_client_instance
-            ):
+            with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
                 local_client = TestClient(serving_module.app)
                 resp = local_client.get("/model-info")
+
+        # Assert
+        assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+        assert body["status"] == "no_production_model"
+        assert body["model_version"] is None
+        assert body["stage"] is None
+        assert body["training_date"] is None
+        assert body["model_test_wape"] is None
+        assert body["wape_lift_pct"] is None
+
+    def test_model_info_no_production_model_when_mlflow_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Edge (registry unreachable): MlflowClient raises → 200, no_production_model.
+
+        The brief states /model-info must NEVER return 5xx when the registry is
+        unreachable (e.g., mlflow.db missing on a fresh checkout). Same shape as
+        the no-Production-version case.
+
+        Arrange: MlflowClient constructor raises RuntimeError.
+        Act: GET /model-info.
+        Assert: 200, status=='no_production_model', all other fields null.
+        """
+        import app.api.main as serving_module
+
+        # Arrange
+        def _raise(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("registry unreachable")
+
+        # Act
+        with patch("app.api.main.MlflowClient", side_effect=_raise):
+            local_client = TestClient(serving_module.app)
+            resp = local_client.get("/model-info")
 
         # Assert
         assert resp.status_code == 200
@@ -857,9 +881,7 @@ class TestTrainerWapeLiftPctTag:
         # Patching only registry_gate is not enough: the 4-week fixture produces
         # baseline_wape=0, so the unpatched trainer copy returns inf.
         with patch("app.training.trainer.mlflow", mock_mlflow):
-            with patch(
-                "app.training.trainer.compute_wape_lift", return_value=5.0
-            ):
+            with patch("app.training.trainer.compute_wape_lift", return_value=5.0):
                 with patch(
                     "app.training.registry_gate.compute_wape_lift", return_value=5.0
                 ):
@@ -908,7 +930,8 @@ class TestTrainerWapeLiftPctTag:
 
         trainer = Trainer(config=_registry_config(tmp_path))
         mock_mlflow = _build_mlflow_mock(
-            registered_version="1", production_versions=[]  # no incumbent → auto-promote
+            registered_version="1",
+            production_versions=[],  # no incumbent → auto-promote
         )
         mock_client = mock_mlflow.tracking.MlflowClient.return_value
 
@@ -922,12 +945,12 @@ class TestTrainerWapeLiftPctTag:
         tag_keys = [c.args[2] for c in mock_client.set_model_version_tag.call_args_list]
         assert "wape_lift_pct" not in tag_keys
 
-    def test_ac13_wape_lift_pct_tag_value_is_float_parseable_string(
+    def test_ac11_wape_lift_pct_tag_value_is_float_parseable_string(
         self, tmp_path: Path
     ) -> None:
-        """AC-13: the tag value stored in the registry is str(float) — no 'None' or 'inf'.
+        """AC-11 (tag format): the tag value is str(float) — no 'None' or 'inf'.
 
-        Arrange: same promotion scenario as AC-11.
+        Arrange: same promotion scenario as AC-11 main test.
         Act: Trainer.run() with patched compute_wape_lift returning a normal float.
         Assert: every wape_lift_pct tag call uses a str-typed value that
                 float() can parse without raising ValueError.
@@ -943,9 +966,7 @@ class TestTrainerWapeLiftPctTag:
 
         # Act: patch both compute_wape_lift copies to force finite local value
         with patch("app.training.trainer.mlflow", mock_mlflow):
-            with patch(
-                "app.training.trainer.compute_wape_lift", return_value=7.5
-            ):
+            with patch("app.training.trainer.compute_wape_lift", return_value=7.5):
                 with patch(
                     "app.training.registry_gate.compute_wape_lift", return_value=7.5
                 ):
@@ -965,10 +986,10 @@ class TestTrainerWapeLiftPctTag:
                 assert tag_value not in ("None", "inf", "Inf", "INF")
                 float(tag_value)  # must not raise
 
-    def test_ac14_trainer_skips_wape_lift_pct_tag_when_inf(
+    def test_ac12_trainer_skips_wape_lift_pct_tag_when_inf(
         self, tmp_path: Path
     ) -> None:
-        """AC-14: wape_lift_pct tag is NOT written when wape_lift_pct is float('inf').
+        """AC-12 (inf edge): wape_lift_pct tag is NOT written when value is float('inf').
 
         Arrange: 4-week Gold; both compute_wape_lift copies patched to return inf so
                  that the local wape_lift_pct variable is inf AND apply_gate still
