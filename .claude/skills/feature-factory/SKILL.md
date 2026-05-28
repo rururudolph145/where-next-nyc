@@ -5,7 +5,7 @@ description: |
   codebase-researcher → story-writer → (human approval) → spec-writer
   → (human approval) → backend-builder → test-verifier →
   implementation-validator → (loop on critical findings) →
-  (human PR review).
+  (human PR review) → PBI tracker update.
 
   TRIGGER when the user asks to "build a feature", "ship a feature",
   "implement a feature", "run the feature factory", "run the full chain",
@@ -94,7 +94,12 @@ If either is missing, ask before invoking any agent.
        ┌───────┐
        │ HUMAN │  final PR review
        │ GATE  │
-       └───────┘
+       └───┬───┘
+           ▼
+┌─────────────────────┐
+│  PBI tracker        │  ─► mark shipped, link commit, commit + push
+│  update             │
+└─────────────────────┘
 ```
 
 ## Workflow
@@ -243,10 +248,59 @@ Produce a consolidated summary with:
 - Any deferred frontend work surfaced at Step 4.
 
 Use `AskUserQuestion` with two options:
-- **Open PR** — the chain is complete. Hand off to the user (or to
-  `/commit` + `gh pr create` if the user has those commands).
+- **Open PR** — continue to Step 11 (tracker update). After the
+  tracker is updated, hand off to the user (or to `/commit` +
+  `gh pr create` if the user has those commands).
 - **More work needed** — collect free-text feedback and ask which
   agent should pick it up.
+
+### Step 11 — PBI tracker update
+
+The user has repeatedly pointed out that the tracker drifts when this
+chain ends at Step 10. This step is **mandatory** when the user
+selects "Open PR" at Step 10 and there is a matching PBI in the
+tracker. Skip only when there is no PBI for the feature (e.g., a
+one-off bugfix).
+
+Do all of this without asking the user — it is a routine bookkeeping
+step:
+
+1. **Find the PBI entry.** Look in
+   `implementation_checklist/pbi_tracker.md` for the PBI the feature
+   implements. If you cannot find one, ask the user which PBI this
+   covers (or whether to skip the tracker update entirely).
+2. **Mark the PBI shipped.** In both places the PBI appears:
+   - The Activity-section checklist row: change `- [ ] **PBI N — …**`
+     to `- [x] **PBI N — …** — *shipped in `<short-sha>`*`. If you
+     added meaningful context during the build (e.g. follow-up
+     commits, new test counts that differ from the original acceptance
+     criteria), append a one-sentence note.
+   - The Priority Order table row: change `| [ ]` to `| [x]`, wrap
+     the PBI ID and rationale in `~~…~~` strikethrough, and append
+     `— *shipped in `<short-sha>`*` to the rationale cell.
+3. **Handle gitignored trackers.** Many repos (this one included)
+   gitignore `implementation_checklist/`. Use `git add -f
+   implementation_checklist/pbi_tracker.md` — plain `git add` will
+   silently skip it.
+4. **Commit and push the tracker.** Use a single dedicated commit:
+
+   ```
+   📝 docs(tracker): mark PBI N shipped (<short-sha>)
+   ```
+
+   followed by a one-line body describing what landed (file count,
+   test count). Push to the same branch the feature was built on.
+
+5. **Report back.** Once pushed, tell the user one line:
+   `Tracker updated and pushed (commit <short-sha-of-tracker-commit>).`
+
+**Do not** modify the tracker mid-chain (e.g. while the validator is
+still looping) — only after the user picks "Open PR" at Step 10.
+
+**Do not** create new PBI entries during this step. If the work
+revealed missing tracker entries (e.g. follow-up tickets from the
+validator's Important findings), surface them to the user at Step 10
+and ask whether to add them; do not silently invent PBIs.
 
 ## Output Discipline
 
@@ -280,8 +334,10 @@ Throughout the chain:
 - **Skipping a gate because the user "seems busy".** Always ask.
 - **Auto-approving "looks fine" outputs.** The skill never approves
   on the user's behalf.
-- **Editing files directly inside this skill.** This skill only
-  orchestrates agents — it does not Read/Edit/Write production code.
+- **Editing production files directly inside this skill.** This skill
+  only orchestrates agents — it does not Read/Edit/Write production
+  code. The one exception is the PBI tracker update at Step 11, which
+  is a bookkeeping edit, not a production-code change.
 - **Running agents in parallel that should be sequential.** The chain
   is strictly sequential. Parallel branches break the
   story→brief→build dependency.
