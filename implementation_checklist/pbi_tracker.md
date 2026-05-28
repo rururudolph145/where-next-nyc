@@ -270,7 +270,7 @@ Closes the **Validation & Deployment** gating step and the **Fallback pipeline**
   - Depends on: PBI 18 (baseline metrics needed for gate comparison)
   - Difficulty: L
 
-- [ ] **PBI 21 — Inference Fallback to Previous Approved Model**
+- [x] **PBI 21 — Inference Fallback to Previous Approved Model** — *shipped in `ac0e73c`*
   - In `app/inference/simulator.py` and `app/api/main.py`, load model from MLflow registry Production stage; on `MlflowException` or missing-stage, fall back to most recent Archived stage and log a `model_fallback_active=true` warning
   - If both Production and Archived are empty, fail loudly (don't silently serve random data)
   - Tag predictions parquet with `model_version` and `served_from_stage` columns
@@ -280,6 +280,7 @@ Closes the **Validation & Deployment** gating step and the **Fallback pipeline**
     - `/heatmap` response schema test asserts `model_version` + `served_from_stage` keys present
   - Depends on: PBI 20
   - Difficulty: M
+  - Note: new `app/inference/exceptions.py` houses `NoApprovedModelError`; shared `tests/conftest.py::make_mock_version` extracted to deduplicate across 4 test modules; `Predictor.load_model()` rewire deferred (out of scope per story).
 
 ### Activity 11: Monitoring & Feedback Lane (PBIs 22, 23, 24)
 
@@ -578,7 +579,7 @@ PBI 22 (prediction log + actuals) ──> PBI 23 (drift detector) ──> PBI 24
 | Done | Order | PBI | Rationale |
 |------|-------|-----|-----------|
 | [x] | 13 | ~~PBI 20~~ | ~~MLflow registry stages + validation gate — first SLA-critical fix; depends on PBI 18 for the comparison metric~~ — *shipped in `17960de`* |
-| [ ] | 14 | PBI 21 | Inference fallback — completes C04 fallback note; depends on PBI 20 |
+| [x] | 14 | ~~PBI 21~~ | ~~Inference fallback — completes C04 fallback note; depends on PBI 20~~ — *shipped in `ac0e73c`* |
 
 ### Open — Phase C · Closed-loop monitoring (~24h)
 
