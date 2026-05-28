@@ -1,17 +1,20 @@
-"""Tests for the inference module (src/inference/predictor.py)."""
+"""Tests for the inference module (app/inference/predictor.py and simulator.py)."""
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
+from unittest.mock import MagicMock, patch
 
-import joblib
 import numpy as np
 import pandas as pd
 import pytest
 
-from src.inference.predictor import Predictor
-from src.training.train import Trainer
+from app.inference.exceptions import NoApprovedModelError
+from app.inference.predictor import Predictor
+from app.training.trainer import Trainer
+from tests.conftest import make_mock_version
 
 
 # -- Shared config and data fixtures ----------------------------------------
@@ -157,9 +160,7 @@ class TestPredict:
         preds = predictor.predict(gold_df)
         assert len(preds) == len(gold_df)
 
-    def test_finite_values(
-        self, predictor: Predictor, gold_df: pd.DataFrame
-    ) -> None:
+    def test_finite_values(self, predictor: Predictor, gold_df: pd.DataFrame) -> None:
         """All predictions are finite numbers."""
         predictor.load_model()
         preds = predictor.predict(gold_df)
@@ -172,9 +173,11 @@ class TestPredict:
 class TestBuildPredictionsTable:
     """Tests for Predictor.build_predictions_table."""
 
-    def test_correct_columns(
-        self, predictor: Predictor, gold_df: pd.DataFrame
-    ) -> None:
+    # NOTE: This test exercises Predictor.build_predictions_table, which is
+    # out of scope for PBI 21. The simulator's parquet (which DOES include
+    # model_version + served_from_stage) is covered by
+    # TestFallback::test_simulator_parquet_columns_exact_set below.
+    def test_correct_columns(self, predictor: Predictor, gold_df: pd.DataFrame) -> None:
         """Output has expected columns."""
         predictor.load_model()
         preds = predictor.predict(gold_df)
@@ -215,9 +218,7 @@ class TestBuildPredictionsTable:
 class TestEvaluate:
     """Tests for Predictor.evaluate."""
 
-    def test_metric_keys(
-        self, predictor: Predictor, gold_df: pd.DataFrame
-    ) -> None:
+    def test_metric_keys(self, predictor: Predictor, gold_df: pd.DataFrame) -> None:
         """Returns dict with expected metric keys."""
         predictor.load_model()
         preds = predictor.predict(gold_df)
@@ -241,9 +242,7 @@ class TestEvaluate:
 class TestSavePredictions:
     """Tests for Predictor.save_predictions."""
 
-    def test_file_created(
-        self, predictor: Predictor, gold_df: pd.DataFrame
-    ) -> None:
+    def test_file_created(self, predictor: Predictor, gold_df: pd.DataFrame) -> None:
         """Parquet file is created at configured path."""
         predictor.load_model()
         preds = predictor.predict(gold_df)
@@ -293,3 +292,346 @@ class TestRun:
         """n_predictions matches input row count."""
         result = predictor.run(data=gold_df)
         assert result["n_predictions"] == len(gold_df)
+
+
+# ---------------------------------------------------------------------------
+# Helpers for HourlySimulator / fallback tests
+# ---------------------------------------------------------------------------
+
+SIM_FEATURES = [
+    "hour_of_day_sin",
+    "hour_of_day_cos",
+    "day_of_week_sin",
+    "day_of_week_cos",
+    "month_sin",
+    "month_cos",
+    "pickup_longitude",
+    "pickup_latitude",
+    "trip_count_lag_1",
+    "trip_count_lag_3",
+    "trip_count_lag_6",
+    "trip_count_lag_12",
+    "trip_count_lag_24",
+    "trip_count_lag_168",
+]
+
+SIMULATOR_CONFIG: dict[str, Any] = {
+    "data": {"gold_path": "data/gold/yellow_tripdata"},
+    "train": {
+        "features": SIM_FEATURES,
+        "target": "trip_count",
+    },
+    "model": {"store_path": "models/", "name": "LGBMRegressor", "params": {}},
+    "mlflow": {
+        "tracking_uri": "mlruns",
+        "model_name": "ny_taxi_demand_model",
+    },
+    "inference": {
+        "simulation": {
+            "start_hour": "2022-01-01 00:00:00",
+            "end_hour": "2022-01-01 02:00:00",
+        },
+    },
+}
+
+
+def _make_sim_gold_df() -> pd.DataFrame:
+    """Build a tiny synthetic Gold DataFrame covering the simulator window."""
+    rng = np.random.RandomState(0)
+    hours = pd.date_range("2022-01-01 00:00:00", periods=3, freq="h")
+    n = len(hours) * 5  # 5 zones per hour
+    data: dict[str, Any] = {
+        "hour": np.tile(hours, 5),
+        "pulocationid": np.repeat(np.arange(1, 6), 3),
+    }
+    for feat in SIM_FEATURES:
+        data[feat] = rng.rand(n)
+    data["trip_count"] = rng.randint(0, 50, n)
+    return pd.DataFrame(data)
+
+
+def _make_stub_model() -> MagicMock:
+    """Return a model stub that returns a constant prediction array."""
+    stub = MagicMock()
+    stub.predict.side_effect = lambda x: np.ones(len(x))
+    return stub
+
+
+# ---------------------------------------------------------------------------
+# PBI 21 — TestFallback
+# ---------------------------------------------------------------------------
+
+
+class TestFallback:
+    """Tests for HourlySimulator registry-aware model loading (PBI 21)."""
+
+    def _make_simulator(self, tmp_path: Any) -> Any:
+        """Build a HourlySimulator with tmp_path output and inline gold data."""
+        from app.inference.simulator import HourlySimulator
+
+        cfg = {
+            **SIMULATOR_CONFIG,
+            "inference": {
+                **SIMULATOR_CONFIG.get("inference", {}),
+                "output_path": str(
+                    tmp_path / "predictions" / "demand_predictions.parquet"
+                ),
+            },
+        }
+        sim = HourlySimulator(config=cfg)
+        return sim
+
+    def test_production_present_uses_production(self, tmp_path: Any) -> None:
+        """Production version available → loads Production model; parquet stamped correctly.
+
+        AC #1, #5: served_from_stage=="Production", model_version=="3".
+        """
+        # Arrange
+        sim = self._make_simulator(tmp_path)
+        gold_df = _make_sim_gold_df()
+        stub_model = _make_stub_model()
+        mock_version = make_mock_version(version="3", stage="Production")
+
+        mock_client = MagicMock()
+        mock_client.get_latest_versions.return_value = [mock_version]
+
+        # Act
+        with patch("app.inference.simulator.MlflowClient", return_value=mock_client):
+            with patch(
+                "app.inference.simulator.mlflow.lightgbm.load_model",
+                return_value=stub_model,
+            ):
+                with patch.object(sim, "load_gold", return_value=gold_df):
+                    result = sim.run()
+
+        # Assert
+        predictions_df: pd.DataFrame = result["predictions_df"]
+        assert "served_from_stage" in predictions_df.columns
+        assert "model_version" in predictions_df.columns
+        assert (predictions_df["served_from_stage"] == "Production").all()
+        assert (predictions_df["model_version"] == "3").all()
+
+    def test_production_absent_archived_present_uses_archived_with_warning(
+        self, tmp_path: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """No Production version, one Archived → loads Archived; warning emitted.
+
+        AC #2, #5, #6: served_from_stage=="Archived", model_version=="2",
+        warning contains model_fallback_active=true.
+        """
+        # Arrange
+        sim = self._make_simulator(tmp_path)
+        gold_df = _make_sim_gold_df()
+        stub_model = _make_stub_model()
+        archived_version = make_mock_version(version="2", stage="Archived")
+
+        def get_latest_versions_side_effect(
+            name: str, stages: list[str]
+        ) -> list[MagicMock]:
+            if "Production" in stages:
+                return []
+            return [archived_version]
+
+        mock_client = MagicMock()
+        mock_client.get_latest_versions.side_effect = get_latest_versions_side_effect
+
+        # Act
+        with caplog.at_level(logging.WARNING, logger="app.inference.simulator"):
+            with patch(
+                "app.inference.simulator.MlflowClient", return_value=mock_client
+            ):
+                with patch(
+                    "app.inference.simulator.mlflow.lightgbm.load_model",
+                    return_value=stub_model,
+                ):
+                    with patch.object(sim, "load_gold", return_value=gold_df):
+                        result = sim.run()
+
+        # Assert parquet values
+        predictions_df: pd.DataFrame = result["predictions_df"]
+        assert (predictions_df["served_from_stage"] == "Archived").all()
+        assert (predictions_df["model_version"] == "2").all()
+        # Assert warning was emitted
+        assert any(
+            "model_fallback_active=true" in record.message for record in caplog.records
+        )
+
+    def test_both_absent_raises_no_approved_model_error(self, tmp_path: Any) -> None:
+        """Neither Production nor Archived → raises NoApprovedModelError; no parquet written.
+
+        AC #3, #11.
+        """
+        # Arrange
+        sim = self._make_simulator(tmp_path)
+        output_path = sim.output_path
+        gold_df = _make_sim_gold_df()
+
+        mock_client = MagicMock()
+        mock_client.get_latest_versions.return_value = []
+
+        # Act + Assert
+        with patch("app.inference.simulator.MlflowClient", return_value=mock_client):
+            with patch.object(sim, "load_gold", return_value=gold_df):
+                with pytest.raises(NoApprovedModelError):
+                    sim.run()
+
+        assert not os.path.exists(output_path)
+
+    def test_artifact_download_failure_falls_back_to_archived(
+        self, tmp_path: Any
+    ) -> None:
+        """Production artifact raises MlflowException → falls back to Archived model.
+
+        AC #4.
+        """
+        from mlflow.exceptions import MlflowException
+
+        # Arrange
+        sim = self._make_simulator(tmp_path)
+        gold_df = _make_sim_gold_df()
+        stub_model = _make_stub_model()
+        prod_version = make_mock_version(version="5", stage="Production")
+        arch_version = make_mock_version(version="4", stage="Archived")
+
+        def get_latest_versions_side_effect(
+            name: str, stages: list[str]
+        ) -> list[MagicMock]:
+            if "Production" in stages:
+                return [prod_version]
+            return [arch_version]
+
+        mock_client = MagicMock()
+        mock_client.get_latest_versions.side_effect = get_latest_versions_side_effect
+
+        call_count = {"n": 0}
+
+        def load_model_side_effect(uri: str) -> MagicMock:
+            call_count["n"] += 1
+            if "5" in uri:
+                raise MlflowException("artifact missing")
+            return stub_model
+
+        # Act
+        with patch("app.inference.simulator.MlflowClient", return_value=mock_client):
+            with patch(
+                "app.inference.simulator.mlflow.lightgbm.load_model",
+                side_effect=load_model_side_effect,
+            ):
+                with patch.object(sim, "load_gold", return_value=gold_df):
+                    result = sim.run()
+
+        # Assert Archived model was used
+        predictions_df: pd.DataFrame = result["predictions_df"]
+        assert (predictions_df["served_from_stage"] == "Archived").all()
+        assert (predictions_df["model_version"] == "4").all()
+
+    def test_mlflow_client_constructor_raises_falls_back_to_archived(
+        self, tmp_path: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """MlflowClient constructor raises MlflowException → fallback to Archived succeeds.
+
+        AC #4, edge case: missing mlflow.db on fresh checkout.
+        """
+        from mlflow.exceptions import MlflowException
+
+        # Arrange
+        sim = self._make_simulator(tmp_path)
+        gold_df = _make_sim_gold_df()
+        stub_model = _make_stub_model()
+        arch_version = make_mock_version(version="1", stage="Archived")
+
+        constructor_call = {"n": 0}
+
+        def client_constructor_side_effect(**kwargs: Any) -> MagicMock:
+            constructor_call["n"] += 1
+            if constructor_call["n"] == 1:
+                raise MlflowException("mlflow.db not found")
+            # Second call (for Archived) succeeds
+            mock_client = MagicMock()
+            mock_client.get_latest_versions.return_value = [arch_version]
+            return mock_client
+
+        # Act
+        with caplog.at_level(logging.WARNING, logger="app.inference.simulator"):
+            with patch(
+                "app.inference.simulator.MlflowClient",
+                side_effect=client_constructor_side_effect,
+            ):
+                with patch(
+                    "app.inference.simulator.mlflow.lightgbm.load_model",
+                    return_value=stub_model,
+                ):
+                    with patch.object(sim, "load_gold", return_value=gold_df):
+                        result = sim.run()
+
+        # Assert fallback warning emitted and model loaded from Archived
+        assert any(
+            "model_fallback_active=true" in record.message for record in caplog.records
+        )
+        predictions_df: pd.DataFrame = result["predictions_df"]
+        assert (predictions_df["served_from_stage"] == "Archived").all()
+
+    def test_archived_list_empty_on_fresh_checkout_raises(self, tmp_path: Any) -> None:
+        """Production [], Archived [] → NoApprovedModelError names both stages.
+
+        AC #3, edge case: fresh checkout with no registry versions.
+        """
+        # Arrange
+        sim = self._make_simulator(tmp_path)
+
+        mock_client = MagicMock()
+        mock_client.get_latest_versions.return_value = []
+
+        # Act + Assert
+        with patch("app.inference.simulator.MlflowClient", return_value=mock_client):
+            with pytest.raises(NoApprovedModelError) as exc_info:
+                sim._load_model_from_registry()
+
+        error_message = str(exc_info.value)
+        assert "Production" in error_message
+        assert "Archived" in error_message
+        assert "ny_taxi_demand_model" in error_message
+
+    def test_simulator_parquet_columns_exact_set(self, tmp_path: Any) -> None:
+        """Simulator parquet column set exactly matches the PBI-21 schema.
+
+        AC-7 (corrected): the simulator's output parquet — not Predictor — must
+        contain exactly the six expected columns.
+
+        Arrange: Production version available; stub model; synthetic gold data.
+        Act: HourlySimulator.run() (same mocking pattern as
+             test_production_present_uses_production).
+        Assert: set(parquet.columns) == {
+                  "pulocationid", "hour", "predicted_trip_count",
+                  "actual_trip_count", "model_version", "served_from_stage"
+                }.
+        """
+        # Arrange
+        sim = self._make_simulator(tmp_path)
+        gold_df = _make_sim_gold_df()
+        stub_model = _make_stub_model()
+        mock_version = make_mock_version(version="3", stage="Production")
+
+        mock_client = MagicMock()
+        mock_client.get_latest_versions.return_value = [mock_version]
+
+        # Act
+        with patch("app.inference.simulator.MlflowClient", return_value=mock_client):
+            with patch(
+                "app.inference.simulator.mlflow.lightgbm.load_model",
+                return_value=stub_model,
+            ):
+                with patch.object(sim, "load_gold", return_value=gold_df):
+                    result = sim.run()
+
+        # Assert — read back the written parquet to verify on-disk schema
+        parquet = pd.read_parquet(result["output_path"])
+        expected_columns = {
+            "pulocationid",
+            "hour",
+            "predicted_trip_count",
+            "actual_trip_count",
+            "model_version",
+            "served_from_stage",
+        }
+        assert set(parquet.columns) == expected_columns

@@ -7,7 +7,7 @@ setup:
 	$(pip) install -r requirements.txt
 
 run:
-	$(python) main.py
+	$(python) -m pipeline.run_all
 
 mlflow:
 	.venv/bin/mlflow ui

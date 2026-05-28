@@ -3,6 +3,7 @@ env: local  # local | cloud
 ingest:
   start_year_month: "2021-01"
   end_year_month: "2021-03"
+  max_workers: 8  # ThreadPoolExecutor size for parallel parquet reads
   bronze_schema:
     VendorID: float64
     tpep_pickup_datetime: datetime64[us]
@@ -33,7 +34,11 @@ data:
   gold_path: data/gold/yellow_tripdata
 
 feature:
-  lag_hours: [1, 3, 6, 12, 24, 168]  # t-lag pickup count features
+  bucket: "15min"  # aggregation bucket width (pandas offset alias). PBI B2: 15-min refresh. "30min" = B1 nowcast, "h" = legacy hourly.
+  lags: [1, 2, 4, 8, 12, 24, 96, 672]  # lag offsets in *buckets*. Under bucket="15min": 15min, 30min, 1h, 2h, 3h, 6h, 1d, 1w.
+  horizon_buckets: 0  # PBI A3: single-bucket forecast horizon. 0 = disabled. Generates ``target_t{N}`` when > 0. Mutually independent of horizon_sum_buckets.
+  horizon_sum_buckets: 2  # PBI B2: sum of next N future buckets as target. Under bucket="15min" with N=2 → 30-min lookahead = demand[t+15..t+30) + demand[t+30..t+45). Generates ``target_sum_t1_t{N}`` when > 0.
+  n_neighbors: 5  # PBI B1: k for spatial smoothing of trip_count_lag_1. 0 disables and reverts to legacy schema.
   zone_shapefile_path: data/reference/taxi_zones.shp
 
 clean:
@@ -48,6 +53,8 @@ clean:
     - DOLocationID
 
 train:
+  gate:
+    min_wape_lift_pct: 2.0  # Minimum WAPE lift % to promote challenger to Production
   split_ratios: [0.8, 0.1, 0.1]  # train / val / test
   features:
     - hour_of_day_sin
@@ -58,13 +65,16 @@ train:
     - month_cos
     - pickup_longitude
     - pickup_latitude
-    - trip_count_lag_1
-    - trip_count_lag_3
-    - trip_count_lag_6
-    - trip_count_lag_12
-    - trip_count_lag_24
-    - trip_count_lag_168
-  target: trip_count
+    - trip_count_lag_1     # 15 min ago
+    - trip_count_lag_2     # 30 min ago
+    - trip_count_lag_4     # 1 h ago
+    - trip_count_lag_8     # 2 h ago
+    - trip_count_lag_12    # 3 h ago
+    - trip_count_lag_24    # 6 h ago
+    - trip_count_lag_96    # 1 day ago
+    - trip_count_lag_672   # 1 week ago
+    - trip_count_lag_1_neighbor_mean  # PBI B1: spatial smoothing
+  target: target_sum_t1_t2   # PBI B2: 30-min lookahead = sum of next two 15-min bins
 
 model:
   name: LGBMRegressor
@@ -89,4 +99,5 @@ serving:
 
 mlflow:
   experiment_name: ny_taxi_demand_model
-  tracking_uri: mlruns
+  tracking_uri: sqlite:///mlflow.db
+  model_name: ny_taxi_demand_model

@@ -1,6 +1,15 @@
-import pytest
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+from unittest.mock import patch
+
 import pandas as pd
-from src.ingestion.clean import DataCleaner
+import pytest
+
+import app.ingestion.schema as schema_module
+from app.ingestion.clean import DataCleaner
+from app.ingestion.schema import DataValidationError, validate_bronze_schema
 
 
 @pytest.fixture
@@ -95,3 +104,229 @@ def test_clean_transform_mode(cleaner):
     # The 100.0 fare row should be filtered out with tight bounds
     assert (result["fare_amount"] <= 20.0 + 1.5 * 10.0).all()
     assert 100.0 not in result["fare_amount"].values
+
+
+# ---------------------------------------------------------------------------
+# Fixtures for schema-validation tests
+# ---------------------------------------------------------------------------
+
+
+def _valid_bronze_df() -> pd.DataFrame:
+    """Minimal valid Bronze frame with all required columns and types."""
+    return pd.DataFrame(
+        {
+            "tpep_pickup_datetime": pd.array(
+                ["2023-01-01 08:00:00", "2023-01-01 09:00:00"],
+                dtype="datetime64[us]",
+            ),
+            "tpep_dropoff_datetime": pd.array(
+                ["2023-01-01 08:15:00", "2023-01-01 09:20:00"],
+                dtype="datetime64[us]",
+            ),
+            "PULocationID": pd.array([1.0, 100.0], dtype="float64"),
+            "passenger_count": pd.array([2.0, 1.0], dtype="float64"),
+            "trip_distance": pd.array([1.5, 3.2], dtype="float64"),
+            "fare_amount": pd.array([7.5, 12.0], dtype="float64"),
+        }
+    )
+
+
+@pytest.fixture
+def tmp_validation_config(tmp_path: Path) -> dict[str, Any]:
+    """Config dict whose silver_path lives inside tmp_path."""
+    silver_dir = tmp_path / "silver"
+    silver_dir.mkdir()
+    return {
+        "env": "local",
+        "data": {
+            "bronze_path": str(tmp_path / "bronze.parquet"),
+            "silver_path": str(silver_dir / "cleaned.parquet"),
+        },
+        "clean": {"null_strategy": "drop"},
+        "inference": {"simulation": {"start_hour": "2023-06-01 00:00:00"}},
+        "model": {"store_path": str(tmp_path / "models")},
+    }
+
+
+# ---------------------------------------------------------------------------
+# TestSchemaValidation
+# ---------------------------------------------------------------------------
+
+
+class TestSchemaValidation:
+    """AC coverage for PBI 19 — Bronze schema validation checkpoint."""
+
+    # ------------------------------------------------------------------
+    # validate_bronze_schema — unit tests (pure: no filesystem I/O)
+    # ------------------------------------------------------------------
+
+    def test_validate_bronze_schema_valid_frame_no_exception(self) -> None:
+        """AC #1: valid frame passes silently."""
+        # Arrange
+        df = _valid_bronze_df()
+        # Act / Assert — no exception raised
+        validate_bronze_schema(df)
+
+    def test_validate_bronze_schema_missing_column_raises(self) -> None:
+        """AC #2 / #8b: missing required column raises DataValidationError."""
+        # Arrange
+        df = _valid_bronze_df().drop(columns=["PULocationID"])
+        # Act / Assert
+        with pytest.raises(DataValidationError):
+            validate_bronze_schema(df)
+
+    def test_validate_bronze_schema_pulocationid_out_of_range_raises(
+        self,
+    ) -> None:
+        """AC #3 / #8c: PULocationID = 264.0 raises DataValidationError."""
+        # Arrange
+        df = _valid_bronze_df().copy()
+        df.loc[0, "PULocationID"] = 264.0
+        # Act / Assert
+        with pytest.raises(DataValidationError):
+            validate_bronze_schema(df)
+
+    def test_validate_bronze_schema_extra_columns_no_exception(self) -> None:
+        """Edge: additional columns beyond the schema are allowed."""
+        # Arrange
+        df = _valid_bronze_df().copy()
+        df["extra_col"] = "hello"
+        # Act / Assert — no exception
+        validate_bronze_schema(df)
+
+    def test_validate_bronze_schema_pulocationid_float_one_passes(
+        self,
+    ) -> None:
+        """Edge: PULocationID = 1.0 is the inclusive lower bound — must pass."""
+        # Arrange
+        df = _valid_bronze_df().copy()
+        df["PULocationID"] = 1.0
+        # Act / Assert — no exception
+        validate_bronze_schema(df)
+
+    def test_validate_bronze_schema_datetime_ns_resolution_passes(
+        self,
+    ) -> None:
+        """Edge: datetime64[ns] column resolution is accepted."""
+        # Arrange
+        df = _valid_bronze_df().copy()
+        df["tpep_pickup_datetime"] = df["tpep_pickup_datetime"].astype("datetime64[ns]")
+        # Act / Assert — no exception
+        validate_bronze_schema(df)
+
+    # ------------------------------------------------------------------
+    # DataValidationError type check
+    # ------------------------------------------------------------------
+
+    def test_datavalidation_error_is_not_value_error(self) -> None:
+        """AC #6: DataValidationError must NOT be a subclass of ValueError."""
+        assert not issubclass(DataValidationError, ValueError)
+
+    # ------------------------------------------------------------------
+    # DataCleaner.run() integration tests (mocked I/O)
+    # ------------------------------------------------------------------
+
+    def test_run_valid_frame_log_written_with_required_fields(
+        self, tmp_validation_config: dict[str, Any]
+    ) -> None:
+        """AC #4 / #5 / #8d: clean pass writes log with all five required keys."""
+        # Arrange
+        cleaner = DataCleaner(tmp_validation_config)
+        df = _valid_bronze_df()
+
+        with (
+            patch.object(cleaner, "load_bronze", return_value=df),
+            patch.object(cleaner, "save_silver"),
+            patch(
+                "app.ingestion.clean.write_validation_log",
+                wraps=schema_module.write_validation_log,
+            ),
+        ):
+            # Act
+            cleaner.run()
+
+        # Assert — locate the log file
+        log_dir = (
+            Path(tmp_validation_config["data"]["silver_path"]).parent / "_validation"
+        )
+        log_files = list(log_dir.glob("validation_*.json"))
+        assert len(log_files) == 1
+        with open(log_files[0]) as fh:
+            payload = json.load(fh)
+        required_keys = {
+            "validated_at",
+            "rows_in",
+            "rows_passing",
+            "rows_failing",
+            "failure_reasons",
+        }
+        assert required_keys.issubset(payload.keys())
+
+    def test_run_log_written_even_on_validation_failure(
+        self, tmp_validation_config: dict[str, Any]
+    ) -> None:
+        """AC #4: log file is written even when validation fails."""
+        # Arrange — frame missing PULocationID
+        cleaner = DataCleaner(tmp_validation_config)
+        df = _valid_bronze_df().drop(columns=["PULocationID"])
+
+        with (
+            patch.object(cleaner, "load_bronze", return_value=df),
+            patch.object(cleaner, "save_silver"),
+        ):
+            # Act
+            with pytest.raises(DataValidationError):
+                cleaner.run()
+
+        # Assert — log still written
+        log_dir = (
+            Path(tmp_validation_config["data"]["silver_path"]).parent / "_validation"
+        )
+        log_files = list(log_dir.glob("validation_*.json"))
+        assert len(log_files) == 1
+
+    def test_run_repeat_calls_produce_separate_log_files(
+        self,
+        tmp_validation_config: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Edge: two successive calls write two distinct log files (no overwrite)."""
+        # Arrange — mock datetime.utcnow to return two distinct timestamps
+        t1 = datetime(2024, 1, 1, 0, 0, 1)
+        t2 = datetime(2024, 1, 1, 0, 0, 2)
+        call_count = {"n": 0}
+
+        class _FakeDatetime:
+            @classmethod
+            def now(cls, tz: object = None) -> datetime:
+                call_count["n"] += 1
+                return t1 if call_count["n"] <= 2 else t2
+
+        # Patch datetime inside schema module
+        monkeypatch.setattr(schema_module, "datetime", _FakeDatetime)
+
+        cleaner = DataCleaner(tmp_validation_config)
+        df = _valid_bronze_df()
+
+        with (
+            patch.object(cleaner, "load_bronze", return_value=df),
+            patch.object(cleaner, "save_silver"),
+        ):
+            # Act — first call
+            cleaner.run()
+
+        # Reset call count and patch new timestamp for second call
+        call_count["n"] = 2  # ensure next call returns t2
+
+        with (
+            patch.object(cleaner, "load_bronze", return_value=df),
+            patch.object(cleaner, "save_silver"),
+        ):
+            cleaner.run()
+
+        # Assert
+        log_dir = (
+            Path(tmp_validation_config["data"]["silver_path"]).parent / "_validation"
+        )
+        log_files = sorted(log_dir.glob("validation_*.json"))
+        assert len(log_files) == 2

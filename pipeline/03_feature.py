@@ -7,8 +7,8 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.ingestion.feature import FeatureEngineer
-from src.shared.config import load_config
+from app.core.config import load_config
+from app.ingestion.feature import FeatureEngineer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(levelname)s:%(message)s")
 

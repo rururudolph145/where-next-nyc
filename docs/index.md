@@ -22,13 +22,11 @@ make run
 ## Project Structure
 
 ```
-├── steps/          # Pipeline steps (ingest, clean, train, predict)
-├── data/           # Train / test datasets
+├── app/            # Library code (ingestion, training, inference, api, core)
+├── pipeline/       # Numbered pipeline runner scripts + run_all entrypoint
+├── data/           # Bronze / Silver / Gold datasets
 ├── models/         # Saved model artifacts
 ├── tests/          # Unit tests
 ├── docs/           # Project documentation
-├── main.py         # Pipeline orchestration
-├── app.py          # FastAPI serving endpoint
-├── dataset.py      # Data extraction script
 └── config.yml      # Hyperparameters and paths
 ```
