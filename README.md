@@ -116,11 +116,11 @@ Anomalous trip-attribute outliers (speed, distance, fare) are **out of scope** f
 
 ```
 app/                       Production source
-├── ingestion/             ingest.py · clean.py · feature.py
-├── training/              trainer.py (LightGBM + MLflow logging)
-├── inference/             predictor.py · simulator.py
-├── api/                   FastAPI app — GET /heatmap
-└── core/                  config loading, paths, logging
+├── ingestion/             ingest.py · clean.py · feature.py · schema.py
+├── training/              trainer.py (LightGBM + MLflow) · registry_gate.py
+├── inference/             predictor.py · simulator.py · exceptions.py
+├── api/                   FastAPI app — /heatmap, /health, /model-info
+└── core/                  config loading, paths, logging, metrics
 
 pipeline/                  CLI entry points (`uv run python -m pipeline.run_all`)
 ├── 01_ingest.py
@@ -131,7 +131,7 @@ pipeline/                  CLI entry points (`uv run python -m pipeline.run_all`
 ├── 06_simulate.py
 └── run_all.py
 
-tests/                     pytest suite (~85 tests, including E2E on synthetic data)
+tests/                     pytest suite (~255 tests including unit + acceptance E2E)
 docs/                      System design + smoke-test reports (HTML)
 implementation_checklist/  PBI tracker — single source of truth for design decisions
 config.yml                 All runtime configuration (paths, lags, model params, …)
@@ -169,10 +169,17 @@ uv run python pipeline/06_simulate.py     # hourly simulation replay
 ```bash
 # Start the FastAPI heatmap service
 uv run uvicorn app.api.main:app --reload
-# Then: GET http://localhost:8000/heatmap
 ```
 
-The `/heatmap` endpoint returns the latest per-zone predictions with `pulocationid`, `zone_name`, and `predicted_trip_count`. Sorted descending by demand.
+Available endpoints:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /heatmap` | Per-zone predictions, sorted descending by `predicted_trip_count`. Each prediction carries `pulocationid`, `zone_name`, `latitude`, `longitude`, `bucket_time`. Top-level envelope: `generated_at`, `simulated`, `model_version`, `served_from_stage`, `hour`, `zone_count`. |
+| `GET /health` | Service health + data freshness. Returns `status` (`"ok"` / `"degraded"`), `simulated`, `data_publication_lag_days`, `last_prediction_bucket`, `model_version`. 503 if predictions are not loaded. |
+| `GET /model-info` | Production model provenance. Returns `status`, `model_version`, `stage`, `training_date`, `model_test_wape`, `wape_lift_pct` from the MLflow registry. |
+
+The `model_version` and `served_from_stage` fields trace each prediction run back to the exact MLflow registry version that produced it. `served_from_stage` is `"Production"` on the happy path or `"Archived"` when the simulator fell back to a previous approved model (PBI 21).
 
 ## MLflow UI
 
@@ -181,7 +188,9 @@ uv run mlflow ui
 # Then: http://localhost:5000
 ```
 
-Training runs log model params, training/val/test metrics (MAE, RMSE, MAPE, WAPE), and the model artifact under experiment `ny_taxi_demand_model`.
+Training runs log model params, training/val/test metrics (MAE, RMSE, MAPE, WAPE, recall@K, `wape_lift_pct`), and the model artifact under experiment `ny_taxi_demand_model`.
+
+Promoted models live in the **MLflow Model Registry** under stages `Production` (current champion) and `Archived` (rejected challengers + previously-promoted versions). A champion-vs-challenger gate (PBI 20) in `app/training/registry_gate.py` decides at the end of each training run whether the new model beats the incumbent on test WAPE — if yes, it is moved to `Production` and the previous champion is archived; if no, the challenger is archived with `gate_rejection_reason`. Version tags `model_test_wape` and `wape_lift_pct` are written on every registered version. The inference simulator (PBI 21) loads the `Production` version, falls back to the most recent `Archived` version with a `model_fallback_active=true` warning when Production is unavailable, and raises `NoApprovedModelError` only when both stages are empty.
 
 ## Test
 
@@ -230,5 +239,7 @@ docker run -p 80:80 ny-taxi-demand
 
 - **MVP (shipped)** — single-horizon training, inference, heatmap API
 - **B-track (shipped)** — 15-min bucket + spatial smoothing + 30-min summed-horizon target
+- **Credibility lane (shipped)** — baseline + recall@K (PBI 18), Pandera schema gate (PBI 19), MLflow registry + champion-vs-challenger gate (PBI 20), inference fallback to previous approved model (PBI 21), `/health` + `/model-info` + simulated flag (PBI 27)
 - **Performance hardening (in progress)** — parallel Bronze ingestion, `/heatmap` pagination, streaming Bronze write
-- **Post-MVP** — personalised ranking (DiDi-style), simulated near-real-time inference, model drift monitoring
+- **CI/CD (planned)** — GitHub Actions lint + test pipelines (PBI 30)
+- **Post-MVP** — closed-loop monitoring (prediction log, drift detection, alerts — PBIs 22-24), `SimulatedClock` orchestrator (PBI 25), driver-agent simulation harness (PBI 28), personalised ranking (DiDi-style)
