@@ -35,6 +35,8 @@ _zone_lookup: dict[int, str] = {}
 _centroid_lookup: dict[int, tuple[float, float]] = {}
 _generated_at: str = ""
 _model_name: str = "ny_taxi_demand_model"
+_model_version: str | None = None
+_served_from_stage: str | None = None
 
 
 def _load_predictions(config: dict[str, Any]) -> pd.DataFrame:
@@ -83,7 +85,7 @@ def _load_zone_lookup(config: dict[str, Any]) -> dict[int, str]:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """Load predictions and zone lookup into memory at server start."""
-    global _predictions_df, _zone_lookup, _centroid_lookup, _generated_at, _model_name  # noqa: PLW0603
+    global _predictions_df, _zone_lookup, _centroid_lookup, _generated_at, _model_name, _model_version, _served_from_stage  # noqa: PLW0603
 
     config = load_config()
     _model_name = config.get("mlflow", {}).get("model_name", "ny_taxi_demand_model")
@@ -94,6 +96,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             config["serving"]["zone_shapefile_path"]
         )
         _generated_at = datetime.now(tz=timezone.utc).isoformat()
+        df = _predictions_df
+        if not df.empty and "model_version" in df.columns:
+            _model_version = str(df["model_version"].iloc[0])
+        if not df.empty and "served_from_stage" in df.columns:
+            stage_val = str(df["served_from_stage"].iloc[0])
+            _served_from_stage = (
+                stage_val if stage_val in ("Production", "Archived") else None
+            )
         logger.info(
             "Loaded %d predictions, %d zones",
             len(_predictions_df),
@@ -202,6 +212,8 @@ async def get_heatmap(
     return {
         "generated_at": _generated_at,
         "simulated": True,
+        "model_version": _model_version,
+        "served_from_stage": _served_from_stage,
         "hour": target_hour.isoformat(),
         "zone_count": len(predictions),
         "predictions": predictions,

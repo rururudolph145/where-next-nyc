@@ -50,6 +50,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.training.trainer import Trainer
+from tests.conftest import make_mock_version
 
 
 # ---------------------------------------------------------------------------
@@ -63,21 +64,6 @@ _FAKE_SERVING_CONFIG: dict[str, Any] = {
     },
     "mlflow": {"model_name": "ny_taxi_demand_model"},
 }
-
-
-def _make_mock_version(
-    version: str = "3",
-    stage: str = "Production",
-    creation_timestamp_ms: int = 1_710_058_921_000,
-    tags: dict[str, str] | None = None,
-) -> MagicMock:
-    """Return a ModelVersion-like MagicMock suitable for /health and /model-info tests."""
-    mock_v = MagicMock()
-    mock_v.version = version
-    mock_v.current_stage = stage
-    mock_v.creation_timestamp = creation_timestamp_ms
-    mock_v.tags = tags if tags is not None else {}
-    return mock_v
 
 
 def _make_predictions_df(hour_str: str = "2021-03-01 00:00:00") -> pd.DataFrame:
@@ -259,7 +245,7 @@ class TestHealthHappyPath:
         predictions = _make_predictions_df("2021-03-01 00:00:00")
         monkeypatch.setattr(serving_module, "_predictions_df", predictions)
 
-        mock_version = _make_mock_version(
+        mock_version = make_mock_version(
             version="3",
             stage="Production",
             creation_timestamp_ms=1_710_058_921_000,
@@ -489,7 +475,7 @@ class TestModelInfoHappyPath:
         import app.api.main as serving_module
 
         # Arrange: creation_timestamp_ms = 1_710_058_921_000 → ~2024-03-10 UTC
-        mock_version = _make_mock_version(
+        mock_version = make_mock_version(
             version="3",
             stage="Production",
             creation_timestamp_ms=1_710_058_921_000,
@@ -530,7 +516,7 @@ class TestModelInfoHappyPath:
         import app.api.main as serving_module
 
         # Arrange
-        mock_version = _make_mock_version(version="2", stage="Production", tags={})
+        mock_version = make_mock_version(version="2", stage="Production", tags={})
         mock_client_instance = MagicMock()
         mock_client_instance.get_latest_versions.return_value = [mock_version]
 
@@ -569,7 +555,7 @@ class TestModelInfoProductionOnly:
         import app.api.main as serving_module
 
         # Arrange
-        mock_version = _make_mock_version(
+        mock_version = make_mock_version(
             version="5",
             stage="Production",
             tags={"model_test_wape": "0.20"},

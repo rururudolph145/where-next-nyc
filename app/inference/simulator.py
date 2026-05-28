@@ -12,14 +12,19 @@ import logging
 import os
 from typing import Any
 
-import joblib  # type: ignore[import-untyped]
+import mlflow
+import mlflow.lightgbm
 import numpy as np
 import pandas as pd
+from mlflow.exceptions import MlflowException
+from mlflow.tracking import MlflowClient
 
 from app.core.config import load_config
 from app.core.metrics import evaluate as _evaluate
+from app.inference.exceptions import NoApprovedModelError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(levelname)s:%(message)s")
+logger = logging.getLogger(__name__)
 
 
 class HourlySimulator:
@@ -76,18 +81,83 @@ class HourlySimulator:
     # Data & model loading
     # ------------------------------------------------------------------
 
-    def load_model(self) -> Any:
-        """Load the trained model from disk.
+    def _load_model_from_registry(self) -> tuple[Any, str, str]:
+        """Load the model from the MLflow registry with Production→Archived fallback.
+
+        Attempts to load the Production version first. Falls back to the most
+        recent Archived version if Production is absent or raises an
+        ``MlflowException``. Emits a ``logging.warning`` when using the
+        Archived fallback.
 
         Returns:
-            The deserialized model object.
+            Tuple of ``(model, model_version, served_from_stage)``.
 
         Raises:
-            FileNotFoundError: If the model file does not exist.
+            NoApprovedModelError: If neither stage has an available version.
         """
-        if not os.path.exists(self.model_path):
-            raise FileNotFoundError(f"Model not found at {self.model_path}")
-        model: Any = joblib.load(self.model_path)
+        mlflow_cfg: dict[str, Any] = self.config.get("mlflow", {})
+        tracking_uri: str = mlflow_cfg.get("tracking_uri", "mlruns")
+        model_name: str = mlflow_cfg.get("model_name", "ny_taxi_demand_model")
+
+        mlflow.set_tracking_uri(tracking_uri)
+
+        # --- Try Production ---
+        try:
+            client = MlflowClient(tracking_uri=tracking_uri)
+            prod_versions = client.get_latest_versions(
+                model_name, stages=["Production"]
+            )
+            if prod_versions:
+                version = prod_versions[0].version
+                uri = f"models:/{model_name}/{version}"
+                try:
+                    model = mlflow.lightgbm.load_model(uri)
+                    logger.info(
+                        "Loaded Production model: %s version %s", model_name, version
+                    )
+                    return model, version, "Production"
+                except MlflowException as exc:
+                    logger.debug(
+                        "Production artifact load failed (%s); trying Archived.", exc
+                    )
+        except MlflowException as exc:
+            logger.debug("Production stage lookup failed (%s); trying Archived.", exc)
+
+        # --- Try Archived ---
+        try:
+            client = MlflowClient(tracking_uri=tracking_uri)
+            arch_versions = client.get_latest_versions(model_name, stages=["Archived"])
+            if arch_versions:
+                version = arch_versions[0].version
+                uri = f"models:/{model_name}/{version}"
+                model = mlflow.lightgbm.load_model(uri)
+                logger.warning(
+                    "model_fallback_active=true model=%s version=%s",
+                    model_name,
+                    version,
+                )
+                return model, version, "Archived"
+        except MlflowException as exc:
+            logger.debug("Archived stage lookup/load failed (%s).", exc)
+
+        raise NoApprovedModelError(
+            model_name, stages_checked=["Production", "Archived"]
+        )
+
+    def load_model(self) -> Any:
+        """Load the model from the MLflow registry.
+
+        Delegates to :meth:`_load_model_from_registry`. Kept for backward
+        compatibility; ``run()`` now uses the registry-aware path directly.
+
+        Returns:
+            The loaded model object (model provenance is not returned here;
+            use ``_load_model_from_registry`` when provenance is needed).
+
+        Raises:
+            NoApprovedModelError: If neither Production nor Archived version exists.
+        """
+        model, _version, _stage = self._load_model_from_registry()
         return model
 
     def load_gold(self) -> pd.DataFrame:
@@ -155,10 +225,10 @@ class HourlySimulator:
             - ``n_hours``: Number of simulation hours.
             - ``n_predictions``: Total number of prediction rows.
         """
-        model = self.load_model()
+        model, model_version, served_from_stage = self._load_model_from_registry()
         gold_df = self.load_gold()
 
-        logging.info(
+        logger.info(
             "Gold layer loaded: %s rows, hour range %s → %s",
             f"{len(gold_df):,}",
             gold_df["hour"].min(),
@@ -166,7 +236,7 @@ class HourlySimulator:
         )
 
         sim_df = self.get_inference_window(gold_df)
-        logging.info(
+        logger.info(
             "Simulation window: %s → %s (%s rows)",
             self.start_hour,
             self.end_hour,
@@ -201,13 +271,15 @@ class HourlySimulator:
                         "hour": hour_ts,
                         "predicted_trip_count": float(predicted),
                         "actual_trip_count": float(actual),
+                        "model_version": model_version,
+                        "served_from_stage": served_from_stage,
                     }
                 )
 
             if (i + 1) % 100 == 0:
-                logging.info("  Processed %d / %d hours", i + 1, len(unique_hours))
+                logger.info("  Processed %d / %d hours", i + 1, len(unique_hours))
 
-        logging.info(
+        logger.info(
             "Simulation complete: %d hours, %d predictions",
             len(unique_hours),
             len(records),
@@ -220,7 +292,7 @@ class HourlySimulator:
         preds_arr = predictions_df["predicted_trip_count"].to_numpy(dtype=np.float64)
         metrics = self.compute_metrics(actuals_arr, preds_arr)
 
-        logging.info(
+        logger.info(
             "Aggregate metrics: MAE=%.2f  RMSE=%.2f  MAPE=%.2f%%  WAPE=%.2f%%",
             metrics["mae"],
             metrics["rmse"],
@@ -244,7 +316,7 @@ class HourlySimulator:
         # --- Save predictions ---
         os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
         predictions_df.to_parquet(self.output_path, index=False)
-        logging.info(
+        logger.info(
             "Predictions saved → %s (%s rows)",
             self.output_path,
             f"{len(predictions_df):,}",
@@ -253,7 +325,7 @@ class HourlySimulator:
         # --- Save hourly heatmap (zone × hour predictions) ---
         os.makedirs(os.path.dirname(self.heatmap_path), exist_ok=True)
         predictions_df.to_parquet(self.heatmap_path, index=False)
-        logging.info("Heatmap saved → %s", self.heatmap_path)
+        logger.info("Heatmap saved → %s", self.heatmap_path)
 
         return {
             "predictions_df": predictions_df,

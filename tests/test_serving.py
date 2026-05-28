@@ -10,10 +10,15 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.conftest import make_mock_version
+
 
 @pytest.fixture()
 def sample_predictions() -> pd.DataFrame:
-    """Create a small predictions DataFrame for testing."""
+    """Create a small predictions DataFrame for testing.
+
+    Includes model_version and served_from_stage columns added by PBI 21.
+    """
     return pd.DataFrame(
         {
             "pulocationid": [1, 2, 3, 1, 2, 3],
@@ -29,6 +34,15 @@ def sample_predictions() -> pd.DataFrame:
             ),
             "predicted_trip_count": [10.5, 20.3, 5.1, 12.0, 18.7, 6.2],
             "actual_trip_count": [11.0, 19.0, 4.0, 13.0, 17.0, 7.0],
+            "model_version": ["3", "3", "3", "3", "3", "3"],
+            "served_from_stage": [
+                "Production",
+                "Production",
+                "Production",
+                "Production",
+                "Production",
+                "Production",
+            ],
         }
     )
 
@@ -65,11 +79,15 @@ def client(
     orig_zone_lookup = serving_module._zone_lookup
     orig_centroid_lookup = serving_module._centroid_lookup
     orig_generated_at = serving_module._generated_at
+    orig_model_version = serving_module._model_version
+    orig_served_from_stage = serving_module._served_from_stage
 
     serving_module._predictions_df = sample_predictions
     serving_module._zone_lookup = zone_lookup
     serving_module._centroid_lookup = centroid_lookup
     serving_module._generated_at = "2021-03-01T12:00:00+00:00"
+    serving_module._model_version = "3"
+    serving_module._served_from_stage = "Production"
 
     yield TestClient(serving_module.app)
 
@@ -77,6 +95,8 @@ def client(
     serving_module._zone_lookup = orig_zone_lookup
     serving_module._centroid_lookup = orig_centroid_lookup
     serving_module._generated_at = orig_generated_at
+    serving_module._model_version = orig_model_version
+    serving_module._served_from_stage = orig_served_from_stage
 
 
 class TestHealthCheck:
@@ -736,21 +756,6 @@ _FAKE_CONFIG = {
 }
 
 
-def _make_mock_version(
-    version: str = "3",
-    stage: str = "Production",
-    creation_timestamp_ms: int = 1_710_058_921_000,
-    tags: dict[str, str] | None = None,
-) -> MagicMock:
-    """Build a ModelVersion-like MagicMock for registry endpoint tests."""
-    mock_v = MagicMock()
-    mock_v.version = version
-    mock_v.current_stage = stage
-    mock_v.creation_timestamp = creation_timestamp_ms
-    mock_v.tags = tags if tags is not None else {}
-    return mock_v
-
-
 class TestHealthEndpoint:
     """Tests for GET /health (PBI 27)."""
 
@@ -776,7 +781,7 @@ class TestHealthEndpoint:
         )
         monkeypatch.setattr(serving_module, "_predictions_df", predictions)
 
-        mock_version = _make_mock_version(version="3")
+        mock_version = make_mock_version(version="3")
         mock_client_instance = MagicMock()
         mock_client_instance.get_latest_versions.return_value = [mock_version]
 
@@ -971,7 +976,7 @@ class TestModelInfoEndpoint:
         """
         import app.api.main as serving_module
 
-        mock_version = _make_mock_version(
+        mock_version = make_mock_version(
             version="3",
             stage="Production",
             creation_timestamp_ms=1_710_058_921_000,
@@ -1034,7 +1039,7 @@ class TestModelInfoEndpoint:
         """
         import app.api.main as serving_module
 
-        mock_version = _make_mock_version(
+        mock_version = make_mock_version(
             version="2",
             stage="Production",
             tags={},  # no tags
@@ -1076,3 +1081,77 @@ class TestHeatmapSimulatedFlag:
         assert resp.status_code == 200
         body: dict[str, Any] = resp.json()
         assert body["simulated"] is True
+
+
+# ---------------------------------------------------------------------------
+# PBI 21 — model provenance fields on /heatmap
+# ---------------------------------------------------------------------------
+
+
+class TestHeatmapModelProvenance:
+    """Tests for model_version and served_from_stage envelope fields (PBI 21 AC #8, #12)."""
+
+    def test_get_heatmap_envelope_contains_model_provenance_fields(
+        self, client: TestClient
+    ) -> None:
+        """GET /heatmap returns string model_version and served_from_stage in envelope.
+
+        AC #8, #12: predictions parquet with PBI-21 columns loaded; both fields
+        appear as non-null strings at the top level of the JSON envelope.
+
+        Arrange: client fixture sets _model_version="3", _served_from_stage="Production".
+        Act: GET /heatmap.
+        Assert: 200, body["model_version"] == "3", body["served_from_stage"] == "Production".
+        """
+        resp = client.get("/heatmap")
+
+        assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+        assert "model_version" in body, "model_version missing from /heatmap envelope"
+        assert "served_from_stage" in body, (
+            "served_from_stage missing from /heatmap envelope"
+        )
+        assert isinstance(body["model_version"], str)
+        assert isinstance(body["served_from_stage"], str)
+        assert body["model_version"] == "3"
+        assert body["served_from_stage"] == "Production"
+
+    def test_get_heatmap_provenance_null_when_legacy_parquet(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GET /heatmap returns null provenance fields for pre-PBI-21 parquets.
+
+        Legacy parquets lack model_version/served_from_stage columns; the API
+        must set both globals to None and surface null in the envelope.
+
+        Arrange: _model_version=None, _served_from_stage=None (legacy state).
+        Act: GET /heatmap.
+        Assert: 200, body["model_version"] is null, body["served_from_stage"] is null.
+        """
+        import app.api.main as serving_module
+
+        predictions = pd.DataFrame(
+            {
+                "pulocationid": [1],
+                "hour": pd.to_datetime(["2021-03-01 01:00:00"]),
+                "predicted_trip_count": [5.0],
+                "actual_trip_count": [4.0],
+                # No model_version or served_from_stage columns — legacy parquet
+            }
+        )
+        monkeypatch.setattr(serving_module, "_predictions_df", predictions)
+        monkeypatch.setattr(serving_module, "_zone_lookup", {1: "Test Zone"})
+        monkeypatch.setattr(serving_module, "_centroid_lookup", {})
+        monkeypatch.setattr(
+            serving_module, "_generated_at", "2021-03-01T12:00:00+00:00"
+        )
+        monkeypatch.setattr(serving_module, "_model_version", None)
+        monkeypatch.setattr(serving_module, "_served_from_stage", None)
+
+        local_client = TestClient(serving_module.app)
+        resp = local_client.get("/heatmap")
+
+        assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+        assert body["model_version"] is None
+        assert body["served_from_stage"] is None
