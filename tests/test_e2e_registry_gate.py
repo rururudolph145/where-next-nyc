@@ -93,12 +93,8 @@ def _make_4week_gold(tmp_path: Path) -> tuple[Path, pd.DataFrame]:
                         "trip_count": float(zone * 10 + hour),
                         "hour_of_day_sin": float(np.sin(2 * np.pi * hour / 24)),
                         "hour_of_day_cos": float(np.cos(2 * np.pi * hour / 24)),
-                        "day_of_week_sin": float(
-                            np.sin(2 * np.pi * ts.dayofweek / 7)
-                        ),
-                        "day_of_week_cos": float(
-                            np.cos(2 * np.pi * ts.dayofweek / 7)
-                        ),
+                        "day_of_week_sin": float(np.sin(2 * np.pi * ts.dayofweek / 7)),
+                        "day_of_week_cos": float(np.cos(2 * np.pi * ts.dayofweek / 7)),
                         "month_sin": float(np.sin(2 * np.pi * ts.month / 12)),
                         "month_cos": float(np.cos(2 * np.pi * ts.month / 12)),
                         "pickup_longitude": float(-74.00 - zone * 0.01),
@@ -206,9 +202,7 @@ def _build_mlflow_mock(
     # Context manager: ``with mlflow.start_run() as active_run:``
     active_run = MagicMock()
     active_run.info.run_id = run_id
-    mock_mlflow.start_run.return_value.__enter__ = MagicMock(
-        return_value=active_run
-    )
+    mock_mlflow.start_run.return_value.__enter__ = MagicMock(return_value=active_run)
     mock_mlflow.start_run.return_value.__exit__ = MagicMock(return_value=False)
 
     # register_model → ModelVersion-like object
@@ -301,9 +295,7 @@ class TestRegistryGateAcceptance:
     # Scenario A — First-ever model: auto-promoted (AC-8, AC-10, AC-16)
     # ------------------------------------------------------------------
 
-    def test_scenario_a_first_ever_model_is_auto_promoted(
-        self, tmp_path: Path
-    ) -> None:
+    def test_scenario_a_first_ever_model_is_auto_promoted(self, tmp_path: Path) -> None:
         """AC-8, AC-10, AC-16: When no Production version exists the challenger
         is auto-promoted, the disk pickle is written, and the run tag
         gate_result is 'promoted'.
@@ -348,9 +340,7 @@ class TestRegistryGateAcceptance:
     # Scenario B — Challenger beats champion: promoted (AC-6, AC-9, AC-10, AC-16)
     # ------------------------------------------------------------------
 
-    def test_scenario_b_better_challenger_is_promoted(
-        self, tmp_path: Path
-    ) -> None:
+    def test_scenario_b_better_challenger_is_promoted(self, tmp_path: Path) -> None:
         """AC-9, AC-10, AC-16: When the challenger's WAPE lift >= min_wape_lift_pct
         the challenger is promoted to Production, the disk pickle is written, and
         the run has gate_result == 'promoted'.
@@ -567,9 +557,7 @@ class TestRegistryGateAcceptance:
     # Edge: lift exactly equals threshold — still promoted (AC-9 boundary)
     # ------------------------------------------------------------------
 
-    def test_edge_lift_exactly_at_threshold_is_promoted(
-        self, tmp_path: Path
-    ) -> None:
+    def test_edge_lift_exactly_at_threshold_is_promoted(self, tmp_path: Path) -> None:
         """AC-9 boundary (>= not >): when compute_wape_lift returns exactly
         min_wape_lift_pct (2.0) the challenger is promoted, not rejected.
 

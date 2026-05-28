@@ -232,11 +232,12 @@ Supports the README's "How Value Is Measured" section. Cheapest gap to close, hi
   - Depends on: nothing
   - Difficulty: M
 
-- [ ] **PBI 27 — `/health` + `/model-info` + Simulated-Clock Flag**
+- [x] **PBI 27 — `/health` + `/model-info` + Simulated-Clock Flag** — *shipped on `refactor/app-package-layout`*
   - Add `GET /health` to `app/api/main.py` returning `{status, data_publication_lag_days, simulated, last_prediction_bucket, model_version}`
   - Add `GET /model-info` returning current model registry stage, version, training date, baseline lift
   - Add `simulated: true` to `/heatmap` response (since the 15-min cadence is replayed historical data, not live telemetry — README now states this explicitly)
-  - Acceptance: three new endpoint tests in `tests/test_serving.py`; existing `/heatmap` tests still green
+  - Trainer tags promoted version with `wape_lift_pct` for `/model-info` to read
+  - Acceptance: 19 acceptance tests in `tests/test_e2e_health_model_info.py` + 10 unit tests in `tests/test_serving.py`; existing `/heatmap` tests still green
   - Depends on: PBI 18 (for `baseline_lift`), PBI 20 (for `model_version` from registry)
   - Difficulty: S
 

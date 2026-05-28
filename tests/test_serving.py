@@ -721,3 +721,358 @@ class TestLifespanCentroidWiring:
                 # Inside the context manager the lifespan has completed.
                 mock_build_centroid.assert_called_once_with("fake/taxi_zones.shp")
                 assert serving_module._centroid_lookup == expected_centroids
+
+
+# ---------------------------------------------------------------------------
+# PBI 27 — GET /health endpoint tests
+# ---------------------------------------------------------------------------
+
+_FAKE_CONFIG = {
+    "serving": {
+        "predictions_path": "fake/predictions.parquet",
+        "zone_shapefile_path": "fake/taxi_zones.shp",
+    },
+    "mlflow": {"model_name": "ny_taxi_demand_model"},
+}
+
+
+def _make_mock_version(
+    version: str = "3",
+    stage: str = "Production",
+    creation_timestamp_ms: int = 1_710_058_921_000,
+    tags: dict[str, str] | None = None,
+) -> MagicMock:
+    """Build a ModelVersion-like MagicMock for registry endpoint tests."""
+    mock_v = MagicMock()
+    mock_v.version = version
+    mock_v.current_stage = stage
+    mock_v.creation_timestamp = creation_timestamp_ms
+    mock_v.tags = tags if tags is not None else {}
+    return mock_v
+
+
+class TestHealthEndpoint:
+    """Tests for GET /health (PBI 27)."""
+
+    def test_get_health_happy_path_returns_ok_with_version(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GET /health returns 200 ok with model_version when parquet loaded and Production version exists.
+
+        Arrange: non-empty _predictions_df; MlflowClient returns one Production version.
+        Act: GET /health.
+        Assert: 200, status=="ok", simulated==True, model_version is a non-empty string,
+                data_publication_lag_days >= 0.
+        """
+        import app.api.main as serving_module
+
+        predictions = pd.DataFrame(
+            {
+                "pulocationid": [1],
+                "hour": pd.to_datetime(["2021-03-01 00:00:00"]),
+                "predicted_trip_count": [10.0],
+                "actual_trip_count": [9.0],
+            }
+        )
+        monkeypatch.setattr(serving_module, "_predictions_df", predictions)
+
+        mock_version = _make_mock_version(version="3")
+        mock_client_instance = MagicMock()
+        mock_client_instance.get_latest_versions.return_value = [mock_version]
+
+        with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
+            with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
+                local_client = TestClient(serving_module.app)
+                resp = local_client.get("/health")
+
+        assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+        assert body["status"] == "ok"
+        assert body["simulated"] is True
+        assert isinstance(body["model_version"], str)
+        assert body["model_version"] != ""
+        assert isinstance(body["data_publication_lag_days"], int)
+        assert body["data_publication_lag_days"] >= 0
+
+    def test_get_health_degraded_when_no_production_version(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GET /health returns 200 degraded with model_version=null when no Production version exists.
+
+        Arrange: non-empty _predictions_df; MlflowClient returns empty version list.
+        Act: GET /health.
+        Assert: 200, status=="degraded", model_version is null.
+        """
+        import app.api.main as serving_module
+
+        predictions = pd.DataFrame(
+            {
+                "pulocationid": [1],
+                "hour": pd.to_datetime(["2021-03-01 00:00:00"]),
+                "predicted_trip_count": [10.0],
+                "actual_trip_count": [9.0],
+            }
+        )
+        monkeypatch.setattr(serving_module, "_predictions_df", predictions)
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.get_latest_versions.return_value = []
+
+        with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
+            with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
+                local_client = TestClient(serving_module.app)
+                resp = local_client.get("/health")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "degraded"
+        assert body["model_version"] is None
+        assert body["simulated"] is True
+
+    def test_get_health_returns_503_when_predictions_not_loaded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GET /health returns 503 when _predictions_df is None.
+
+        Arrange: _predictions_df = None.
+        Act: GET /health.
+        Assert: 503 with detail field.
+        """
+        import app.api.main as serving_module
+
+        monkeypatch.setattr(serving_module, "_predictions_df", None)
+
+        local_client = TestClient(serving_module.app)
+        resp = local_client.get("/health")
+
+        assert resp.status_code == 503
+        body = resp.json()
+        assert "detail" in body
+        assert body["detail"]
+
+    def test_get_health_degraded_when_mlflow_client_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GET /health returns 200 degraded when MlflowClient raises (e.g. missing mlflow.db).
+
+        Arrange: non-empty _predictions_df; MlflowClient constructor raises Exception.
+        Act: GET /health.
+        Assert: 200, status=="degraded", model_version is null.
+        """
+        import app.api.main as serving_module
+
+        predictions = pd.DataFrame(
+            {
+                "pulocationid": [1],
+                "hour": pd.to_datetime(["2021-03-01 00:00:00"]),
+                "predicted_trip_count": [10.0],
+                "actual_trip_count": [9.0],
+            }
+        )
+        monkeypatch.setattr(serving_module, "_predictions_df", predictions)
+
+        with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
+            with patch(
+                "app.api.main.MlflowClient", side_effect=Exception("db missing")
+            ):
+                local_client = TestClient(serving_module.app)
+                resp = local_client.get("/health")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "degraded"
+        assert body["model_version"] is None
+
+    def test_get_health_lag_is_null_when_predictions_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GET /health returns null lag and null bucket when predictions DataFrame is empty.
+
+        Arrange: _predictions_df is an empty DataFrame (0 rows).
+        Act: GET /health.
+        Assert: data_publication_lag_days is null, last_prediction_bucket is null.
+        """
+        import app.api.main as serving_module
+
+        empty_df = pd.DataFrame(
+            columns=[
+                "pulocationid",
+                "hour",
+                "predicted_trip_count",
+                "actual_trip_count",
+            ]
+        )
+        monkeypatch.setattr(serving_module, "_predictions_df", empty_df)
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.get_latest_versions.return_value = []
+
+        with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
+            with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
+                local_client = TestClient(serving_module.app)
+                resp = local_client.get("/health")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["data_publication_lag_days"] is None
+        assert body["last_prediction_bucket"] is None
+
+    def test_get_health_lag_is_zero_when_bucket_in_future(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GET /health returns data_publication_lag_days==0 when max(hour) is in the future.
+
+        Arrange: predictions with an hour far in the future (year 2099).
+        Act: GET /health.
+        Assert: data_publication_lag_days == 0, never negative.
+        """
+        import app.api.main as serving_module
+
+        predictions = pd.DataFrame(
+            {
+                "pulocationid": [1],
+                "hour": pd.to_datetime(["2099-12-31 23:00:00"]),
+                "predicted_trip_count": [5.0],
+                "actual_trip_count": [4.0],
+            }
+        )
+        monkeypatch.setattr(serving_module, "_predictions_df", predictions)
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.get_latest_versions.return_value = []
+
+        with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
+            with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
+                local_client = TestClient(serving_module.app)
+                resp = local_client.get("/health")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["data_publication_lag_days"] == 0
+
+
+# ---------------------------------------------------------------------------
+# PBI 27 — GET /model-info endpoint tests
+# ---------------------------------------------------------------------------
+
+
+class TestModelInfoEndpoint:
+    """Tests for GET /model-info (PBI 27)."""
+
+    def test_get_model_info_happy_path_returns_all_fields(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GET /model-info returns 200 with all fields populated when Production version exists.
+
+        Arrange: MlflowClient returns one Production version with both tags set.
+        Act: GET /model-info.
+        Assert: 200, status=="ok", model_test_wape and wape_lift_pct are floats,
+                training_date is ISO-8601 parseable, stage=="Production".
+        """
+        import app.api.main as serving_module
+
+        mock_version = _make_mock_version(
+            version="3",
+            stage="Production",
+            creation_timestamp_ms=1_710_058_921_000,
+            tags={"model_test_wape": "0.1823", "wape_lift_pct": "12.4"},
+        )
+        mock_client_instance = MagicMock()
+        mock_client_instance.get_latest_versions.return_value = [mock_version]
+
+        with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
+            with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
+                local_client = TestClient(serving_module.app)
+                resp = local_client.get("/model-info")
+
+        assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+        assert body["status"] == "ok"
+        assert body["model_version"] == "3"
+        assert body["stage"] == "Production"
+        assert isinstance(body["model_test_wape"], float)
+        assert isinstance(body["wape_lift_pct"], float)
+        # training_date must be ISO-8601 parseable
+        pd.Timestamp(body["training_date"])
+
+    def test_get_model_info_no_production_model_returns_null_fields(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GET /model-info returns 200 no_production_model with all null fields.
+
+        Arrange: MlflowClient returns empty version list.
+        Act: GET /model-info.
+        Assert: 200, status=="no_production_model", all other fields null.
+        """
+        import app.api.main as serving_module
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.get_latest_versions.return_value = []
+
+        with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
+            with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
+                local_client = TestClient(serving_module.app)
+                resp = local_client.get("/model-info")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "no_production_model"
+        assert body["model_version"] is None
+        assert body["stage"] is None
+        assert body["training_date"] is None
+        assert body["model_test_wape"] is None
+        assert body["wape_lift_pct"] is None
+
+    def test_get_model_info_returns_null_wape_when_tag_absent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GET /model-info returns null for model_test_wape when tag is absent.
+
+        Arrange: Production version exists but has no model_test_wape tag.
+        Act: GET /model-info.
+        Assert: 200, model_test_wape is null, no exception raised.
+        """
+        import app.api.main as serving_module
+
+        mock_version = _make_mock_version(
+            version="2",
+            stage="Production",
+            tags={},  # no tags
+        )
+        mock_client_instance = MagicMock()
+        mock_client_instance.get_latest_versions.return_value = [mock_version]
+
+        with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
+            with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
+                local_client = TestClient(serving_module.app)
+                resp = local_client.get("/model-info")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "ok"
+        assert body["model_test_wape"] is None
+        assert body["wape_lift_pct"] is None
+
+
+# ---------------------------------------------------------------------------
+# PBI 27 — /heatmap simulated flag test
+# ---------------------------------------------------------------------------
+
+
+class TestHeatmapSimulatedFlag:
+    """Tests for the simulated flag added to /heatmap (PBI 27 AC #9)."""
+
+    def test_get_heatmap_envelope_contains_simulated_flag(
+        self, client: TestClient
+    ) -> None:
+        """GET /heatmap envelope includes 'simulated': true at the top level.
+
+        Arrange: standard client fixture (non-empty predictions).
+        Act: GET /heatmap.
+        Assert: body["simulated"] is True.
+        """
+        resp = client.get("/heatmap")
+
+        assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+        assert body["simulated"] is True

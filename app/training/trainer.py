@@ -377,6 +377,15 @@ class Trainer:
                 mlflow.set_tag("gate_rejection_reason", rejection_reason)
 
             if gate_result == "promoted":
+                # Write wape_lift_pct tag only when the value is finite and
+                # computable — skip None (no baseline) and inf (zero-WAPE baseline).
+                if wape_lift_pct is not None and wape_lift_pct != float("inf"):
+                    client.set_model_version_tag(
+                        self.registry_model_name,
+                        new_version,
+                        "wape_lift_pct",
+                        str(wape_lift_pct),
+                    )
                 model_path = self.save_model()
                 print(f"Model saved → {model_path}")
             else:

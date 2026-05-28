@@ -507,11 +507,13 @@ class TestRegistryGate:
         with patch("app.training.trainer.mlflow", mock_mlflow):
             trainer.run(data=gold_df)
 
-        # Assert: tag written with key "model_test_wape" and a float-parseable string
-        mock_client.set_model_version_tag.assert_called_once()
-        tag_call_args = mock_client.set_model_version_tag.call_args
-        assert tag_call_args.args[2] == "model_test_wape"
-        float(tag_call_args.args[3])  # must be parseable as float
+        # Assert: model_test_wape tag was written (at minimum one call uses this key)
+        tag_keys = [c.args[2] for c in mock_client.set_model_version_tag.call_args_list]
+        assert "model_test_wape" in tag_keys
+        # The value stored under model_test_wape must be float-parseable.
+        for c in mock_client.set_model_version_tag.call_args_list:
+            if c.args[2] == "model_test_wape":
+                float(c.args[3])  # must be parseable as float
 
     def test_gate_result_tag_is_promoted_on_success(
         self, gold_df: pd.DataFrame, tmp_path: Any
@@ -759,12 +761,114 @@ class TestRegistryGate:
 
         # Lift below default threshold of 2.0 → rejected
         with patch("app.training.trainer.mlflow", mock_mlflow):
-            with patch("app.training.registry_gate.compute_wape_lift", return_value=1.0):
+            with patch(
+                "app.training.registry_gate.compute_wape_lift", return_value=1.0
+            ):
                 result = trainer.run(data=gold_df)
 
         tag_calls = {c.args[0]: c.args[1] for c in mock_mlflow.set_tag.call_args_list}
         assert tag_calls.get("gate_result") == "rejected"
         assert result["model_path"] is None
+
+    def test_gate_writes_wape_lift_pct_tag_on_promotion(
+        self, gold_df: pd.DataFrame, tmp_path: Any
+    ) -> None:
+        """set_model_version_tag called with 'wape_lift_pct' and float string on promotion (AC #11)."""
+        # Arrange: champion exists so apply_gate is called; patch lift to pass gate.
+        champion = _make_champion(version="0", wape_tag="10.0")
+        trainer = Trainer(config=REGISTRY_CONFIG)
+        trainer.store_path = str(tmp_path / "models")
+        mock_mlflow = _make_mock_mlflow(
+            registered_version="1", production_versions=[champion]
+        )
+        mock_client = mock_mlflow.tracking.MlflowClient.return_value
+
+        # Act: lift 5.0 >= threshold 2.0 → promoted
+        with patch("app.training.trainer.mlflow", mock_mlflow):
+            with patch(
+                "app.training.registry_gate.compute_wape_lift", return_value=5.0
+            ):
+                with patch.object(
+                    trainer, "save_model", return_value="models/model.pkl"
+                ):
+                    trainer.run(data=gold_df)
+
+        # Assert: wape_lift_pct tag written with a float-parseable string value.
+        tag_keys = [c.args[2] for c in mock_client.set_model_version_tag.call_args_list]
+        assert "wape_lift_pct" in tag_keys
+        for c in mock_client.set_model_version_tag.call_args_list:
+            if c.args[2] == "wape_lift_pct":
+                float(c.args[3])  # value must be float-parseable
+
+    def test_gate_does_not_write_wape_lift_pct_tag_when_none(
+        self, tmp_path: Any
+    ) -> None:
+        """wape_lift_pct=None (no baseline overlap) → wape_lift_pct tag not written (AC #12)."""
+        # Arrange: tiny dataset → no week-ago overlap → wape_lift_pct=None
+        # AND no Production incumbent → auto-promote path (gate_result="promoted")
+        rng = np.random.RandomState(0)
+        n = 100
+        hours = pd.date_range("2022-01-01", periods=n, freq="h")
+        data: dict[str, Any] = {"hour": hours, "pulocationid": rng.randint(1, 5, n)}
+        for feat in FEATURES:
+            data[feat] = rng.rand(n)
+        data["trip_count"] = rng.randint(1, 20, n)
+        tiny_df = pd.DataFrame(data)
+
+        trainer = Trainer(config=REGISTRY_CONFIG)
+        trainer.store_path = str(tmp_path / "models")
+        mock_mlflow = _make_mock_mlflow(registered_version="1", production_versions=[])
+        mock_client = mock_mlflow.tracking.MlflowClient.return_value
+
+        # Act: auto-promoted but wape_lift_pct is None
+        with patch("app.training.trainer.mlflow", mock_mlflow):
+            with patch.object(trainer, "save_model", return_value="models/model.pkl"):
+                result = trainer.run(data=tiny_df)
+
+        # Assert: wape_lift_pct was None and its tag was NOT written
+        assert result["wape_lift_pct"] is None
+        tag_keys = [c.args[2] for c in mock_client.set_model_version_tag.call_args_list]
+        assert "wape_lift_pct" not in tag_keys
+
+    def test_gate_does_not_write_wape_lift_pct_tag_when_inf(
+        self, gold_df: pd.DataFrame, tmp_path: Any
+    ) -> None:
+        """wape_lift_pct=inf → wape_lift_pct tag not written (edge case).
+
+        Both trainer and registry_gate copies of compute_wape_lift are patched
+        because trainer.py calls its own import to set wape_lift_pct while
+        registry_gate.py calls its own import inside apply_gate.
+        Patching app.training.trainer.compute_wape_lift ensures the local
+        wape_lift_pct variable is inf; patching registry_gate ensures the gate
+        still promotes (inf >= 2.0).
+        """
+        # Arrange: champion exists; both compute_wape_lift copies return inf.
+        champion = _make_champion(version="0", wape_tag="10.0")
+        trainer = Trainer(config=REGISTRY_CONFIG)
+        trainer.store_path = str(tmp_path / "models")
+        mock_mlflow = _make_mock_mlflow(
+            registered_version="1", production_versions=[champion]
+        )
+        mock_client = mock_mlflow.tracking.MlflowClient.return_value
+
+        with patch("app.training.trainer.mlflow", mock_mlflow):
+            with patch(
+                "app.training.trainer.compute_wape_lift",
+                return_value=float("inf"),
+            ):
+                with patch(
+                    "app.training.registry_gate.compute_wape_lift",
+                    return_value=float("inf"),
+                ):
+                    with patch.object(
+                        trainer, "save_model", return_value="models/model.pkl"
+                    ):
+                        result = trainer.run(data=gold_df)
+
+        # Assert: wape_lift_pct was inf and the tag was NOT written
+        assert result["wape_lift_pct"] == float("inf")
+        tag_keys = [c.args[2] for c in mock_client.set_model_version_tag.call_args_list]
+        assert "wape_lift_pct" not in tag_keys
 
     def test_register_model_does_not_raise_on_sqlite_uri(
         self, gold_df: pd.DataFrame, tmp_path: Any

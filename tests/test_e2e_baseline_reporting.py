@@ -92,12 +92,8 @@ def _make_4week_gold(
                         # Minimal feature columns required by FEATURES list below
                         "hour_of_day_sin": float(np.sin(2 * np.pi * hour / 24)),
                         "hour_of_day_cos": float(np.cos(2 * np.pi * hour / 24)),
-                        "day_of_week_sin": float(
-                            np.sin(2 * np.pi * ts.dayofweek / 7)
-                        ),
-                        "day_of_week_cos": float(
-                            np.cos(2 * np.pi * ts.dayofweek / 7)
-                        ),
+                        "day_of_week_sin": float(np.sin(2 * np.pi * ts.dayofweek / 7)),
+                        "day_of_week_cos": float(np.cos(2 * np.pi * ts.dayofweek / 7)),
                         "month_sin": float(np.sin(2 * np.pi * ts.month / 12)),
                         "month_cos": float(np.cos(2 * np.pi * ts.month / 12)),
                         "pickup_longitude": float(-74.00 - zone * 0.01),
@@ -228,6 +224,7 @@ class TestAC2WapeLiftFormula:
         baseline_wape == 0 (perfect baseline), compute_wape_lift returns +inf
         and the test falls back to the inf-equality check.
         """
+
         # Arrange — use a week-level variation so baseline WAPE > 0 (the purely
         # repeating 4-week fixture gives baseline_wape == 0, which makes the
         # formula check degenerate).
@@ -253,8 +250,7 @@ class TestAC2WapeLiftFormula:
         baseline_wape = result["baseline_metrics"]["wape"]
         model_aligned_wape = result["model_aligned_metrics"]["wape"]
         logged_lift = {
-            call[0][0]: call[0][1]
-            for call in mock_mlflow.log_metric.call_args_list
+            call[0][0]: call[0][1] for call in mock_mlflow.log_metric.call_args_list
         }
 
         if baseline_wape == 0.0:
@@ -283,6 +279,7 @@ class TestAC2WapeLiftFormula:
         the baseline were perfect and baseline_wape == 0).  The 1-estimator
         model cannot learn the subtle perturbation, so it underperforms.
         """
+
         # Arrange: nearly constant trip_count with small week-level noise so
         # baseline_wape > 0 but is very small; LGBM with 1 estimator cannot
         # match it and produces positive prediction error → negative lift.
@@ -290,7 +287,9 @@ class TestAC2WapeLiftFormula:
             # Vary slightly by week (0.5 unit) so baseline WAPE > 0
             return float(zone * 5) + week * 0.5
 
-        gold_dir, gold_df = _make_4week_gold(tmp_path, trip_count_fn=nearly_constant_trips)
+        gold_dir, gold_df = _make_4week_gold(
+            tmp_path, trip_count_fn=nearly_constant_trips
+        )
         config = _trainer_config(tmp_path)
         # Tiny model — cannot learn the weekly variation
         config["model"]["params"]["n_estimators"] = 1
@@ -308,8 +307,7 @@ class TestAC2WapeLiftFormula:
         # value was logged to MLflow.  Branch on inf to avoid pytest.approx
         # raising TypeError on infinite comparisons.
         logged_metrics = {
-            call[0][0]: call[0][1]
-            for call in mock_mlflow.log_metric.call_args_list
+            call[0][0]: call[0][1] for call in mock_mlflow.log_metric.call_args_list
         }
         assert "wape_lift_pct" in logged_metrics
         if math.isinf(result["wape_lift_pct"]):
@@ -394,8 +392,7 @@ class TestAC4RecallAt3IsFiniteFloat:
         assert 0.0 <= recall <= 1.0, f"recall_at_3 out of [0,1]: {recall}"
 
         logged_metrics = {
-            call[0][0]: call[0][1]
-            for call in mock_mlflow.log_metric.call_args_list
+            call[0][0]: call[0][1] for call in mock_mlflow.log_metric.call_args_list
         }
         assert logged_metrics["recall_at_3"] == pytest.approx(recall, rel=1e-9)
 
@@ -494,8 +491,7 @@ class TestAC5ApplesApplesAlignment:
             trainer.run(data=gold_df)
 
         logged = {
-            call[0][0]: call[0][1]
-            for call in mock_mlflow.log_metric.call_args_list
+            call[0][0]: call[0][1] for call in mock_mlflow.log_metric.call_args_list
         }
 
         # Both aligned metrics must be present
@@ -602,9 +598,7 @@ class TestAC7ReadmeResults:
         """README has a ## Results / ### Results heading inside the
         'How Value Is Measured' section and that heading is followed by
         a Markdown table row with at least one numeric cell."""
-        readme_path = (
-            Path(__file__).parent.parent / "README.md"
-        )
+        readme_path = Path(__file__).parent.parent / "README.md"
 
         # Arrange
         assert readme_path.exists(), f"README.md not found at {readme_path}"
@@ -622,7 +616,7 @@ class TestAC7ReadmeResults:
             )
 
         # If the heading exists, find the next Markdown table row after it
-        after_heading = content[results_heading.end():]
+        after_heading = content[results_heading.end() :]
         # A Markdown table row: | ... | ... |  with at least one numeric cell
         table_row_with_number = re.search(
             r"^\|[^|\n]*\d+\.?\d*[^|\n]*\|", after_heading, re.MULTILINE
@@ -652,7 +646,9 @@ class TestEdgeCasesTieBreakAndFewZones:
 
         # Arrange: 4 zones, all predicted equally; actual ranks by zone desc
         h = pd.Timestamp("2022-01-01 08:00")
-        pred_rows = [{"pulocationid": z, "hour": h, "value": 10.0} for z in [3, 1, 4, 2]]
+        pred_rows = [
+            {"pulocationid": z, "hour": h, "value": 10.0} for z in [3, 1, 4, 2]
+        ]
         act_rows = [
             {"pulocationid": z, "hour": h, "value": float(z)} for z in [1, 2, 3, 4]
         ]
@@ -770,37 +766,19 @@ class TestEdgeCaseNoWeekAgoOverlap:
                         "pulocationid": zone,
                         "hour": ts,
                         "trip_count": float(zone * 10 + hour_of_day),
-                        "hour_of_day_sin": float(
-                            np.sin(2 * np.pi * hour_of_day / 24)
-                        ),
-                        "hour_of_day_cos": float(
-                            np.cos(2 * np.pi * hour_of_day / 24)
-                        ),
-                        "day_of_week_sin": float(
-                            np.sin(2 * np.pi * ts.dayofweek / 7)
-                        ),
-                        "day_of_week_cos": float(
-                            np.cos(2 * np.pi * ts.dayofweek / 7)
-                        ),
+                        "hour_of_day_sin": float(np.sin(2 * np.pi * hour_of_day / 24)),
+                        "hour_of_day_cos": float(np.cos(2 * np.pi * hour_of_day / 24)),
+                        "day_of_week_sin": float(np.sin(2 * np.pi * ts.dayofweek / 7)),
+                        "day_of_week_cos": float(np.cos(2 * np.pi * ts.dayofweek / 7)),
                         "month_sin": float(np.sin(2 * np.pi * ts.month / 12)),
                         "month_cos": float(np.cos(2 * np.pi * ts.month / 12)),
                         "pickup_longitude": float(-74.00 - zone * 0.01),
                         "pickup_latitude": float(40.70 + zone * 0.01),
-                        "trip_count_lag_1": float(
-                            zone * 10 + (hour_of_day - 1) % 24
-                        ),
-                        "trip_count_lag_3": float(
-                            zone * 10 + (hour_of_day - 3) % 24
-                        ),
-                        "trip_count_lag_6": float(
-                            zone * 10 + (hour_of_day - 6) % 24
-                        ),
-                        "trip_count_lag_12": float(
-                            zone * 10 + (hour_of_day - 12) % 24
-                        ),
-                        "trip_count_lag_24": float(
-                            zone * 10 + (hour_of_day - 24) % 24
-                        ),
+                        "trip_count_lag_1": float(zone * 10 + (hour_of_day - 1) % 24),
+                        "trip_count_lag_3": float(zone * 10 + (hour_of_day - 3) % 24),
+                        "trip_count_lag_6": float(zone * 10 + (hour_of_day - 6) % 24),
+                        "trip_count_lag_12": float(zone * 10 + (hour_of_day - 12) % 24),
+                        "trip_count_lag_24": float(zone * 10 + (hour_of_day - 24) % 24),
                         "trip_count_lag_168": float(zone * 10 + hour_of_day),
                     }
                 )

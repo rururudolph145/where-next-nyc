@@ -2,6 +2,8 @@
 
 Provides:
 - ``GET /`` — health check
+- ``GET /health`` — service health + data freshness (PBI 27)
+- ``GET /model-info`` — Production model provenance (PBI 27)
 - ``GET /heatmap`` — zone-level demand predictions (PBI 3)
 """
 
@@ -17,6 +19,7 @@ from typing import Any
 import geopandas as gpd
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
+from mlflow.tracking import MlflowClient
 
 from app.core.config import load_config
 from app.ingestion.feature import build_centroid_lookup
@@ -196,7 +199,124 @@ async def get_heatmap(
 
     return {
         "generated_at": _generated_at,
+        "simulated": True,
         "hour": target_hour.isoformat(),
         "zone_count": len(predictions),
         "predictions": predictions,
+    }
+
+
+@app.get("/health")
+async def get_health() -> dict[str, Any]:
+    """Return service health, data freshness, and model version.
+
+    Returns HTTP 200 in all non-503 cases:
+    - ``status="ok"`` when both predictions and a Production model are available.
+    - ``status="degraded"`` when predictions are loaded but no Production version
+      exists in the registry, or the registry is unreachable.
+
+    Returns:
+        JSON with ``status``, ``simulated``, ``data_publication_lag_days``,
+        ``last_prediction_bucket``, and ``model_version``.
+
+    Raises:
+        HTTPException: 503 if predictions are not loaded.
+    """
+    if _predictions_df is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Predictions not available. Run the simulation pipeline first.",
+        )
+
+    # Compute freshness from loaded predictions.
+    last_prediction_bucket: str | None
+    data_publication_lag_days: int | None
+
+    if _predictions_df.empty:
+        last_prediction_bucket = None
+        data_publication_lag_days = None
+    else:
+        last_bucket = _predictions_df["hour"].max()
+        last_prediction_bucket = last_bucket.isoformat()
+        today = datetime.now(tz=timezone.utc).date()
+        # Treat naive timestamp as UTC per brief; clamp lag at 0.
+        lag = (today - last_bucket.date()).days
+        data_publication_lag_days = max(0, lag)
+
+    # Look up Production model version from registry; degrade gracefully on error.
+    model_version: str | None = None
+    status = "degraded"
+    config = load_config()
+    model_name: str = config.get("mlflow", {}).get("model_name", "ny_taxi_demand_model")
+    try:
+        client = MlflowClient()
+        versions = client.get_latest_versions(model_name, stages=["Production"])
+        if versions:
+            model_version = versions[0].version
+            status = "ok"
+    except Exception:  # noqa: BLE001
+        pass
+
+    return {
+        "status": status,
+        "simulated": True,
+        "data_publication_lag_days": data_publication_lag_days,
+        "last_prediction_bucket": last_prediction_bucket,
+        "model_version": model_version,
+    }
+
+
+@app.get("/model-info")
+async def get_model_info() -> dict[str, Any]:
+    """Return Production model provenance from the MLflow Model Registry.
+
+    Never raises 5xx. Returns ``status="no_production_model"`` with null fields
+    when no Production version exists or the registry is unreachable.
+
+    Returns:
+        JSON with ``status``, ``model_version``, ``stage``, ``training_date``,
+        ``model_test_wape``, and ``wape_lift_pct``.
+    """
+    _null_response: dict[str, Any] = {
+        "status": "no_production_model",
+        "model_version": None,
+        "stage": None,
+        "training_date": None,
+        "model_test_wape": None,
+        "wape_lift_pct": None,
+    }
+
+    config = load_config()
+    model_name: str = config.get("mlflow", {}).get("model_name", "ny_taxi_demand_model")
+    try:
+        client = MlflowClient()
+        versions = client.get_latest_versions(model_name, stages=["Production"])
+        if not versions:
+            return _null_response
+        v = versions[0]
+    except Exception:  # noqa: BLE001
+        return _null_response
+
+    training_date = datetime.fromtimestamp(
+        v.creation_timestamp / 1000, tz=timezone.utc
+    ).isoformat()
+
+    model_test_wape: float | None
+    wape_lift_pct: float | None
+    try:
+        model_test_wape = float(v.tags["model_test_wape"])
+    except (KeyError, ValueError, TypeError):
+        model_test_wape = None
+    try:
+        wape_lift_pct = float(v.tags["wape_lift_pct"])
+    except (KeyError, ValueError, TypeError):
+        wape_lift_pct = None
+
+    return {
+        "status": "ok",
+        "model_version": v.version,
+        "stage": v.current_stage,
+        "training_date": training_date,
+        "model_test_wape": model_test_wape,
+        "wape_lift_pct": wape_lift_pct,
     }
