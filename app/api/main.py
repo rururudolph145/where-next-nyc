@@ -24,6 +24,10 @@ from mlflow.tracking import MlflowClient
 from app.core.config import load_config
 from app.ingestion.feature import build_centroid_lookup
 
+# Module-level import: a broken monitoring module should fail at startup,
+# not be silently swallowed on the first request.
+from app.monitoring import prediction_log
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -37,6 +41,7 @@ _generated_at: str = ""
 _model_name: str = "ny_taxi_demand_model"
 _model_version: str | None = None
 _served_from_stage: str | None = None
+_config: dict[str, Any] = {}
 
 
 def _load_predictions(config: dict[str, Any]) -> pd.DataFrame:
@@ -85,9 +90,10 @@ def _load_zone_lookup(config: dict[str, Any]) -> dict[int, str]:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """Load predictions and zone lookup into memory at server start."""
-    global _predictions_df, _zone_lookup, _centroid_lookup, _generated_at, _model_name, _model_version, _served_from_stage  # noqa: PLW0603
+    global _predictions_df, _zone_lookup, _centroid_lookup, _generated_at, _model_name, _model_version, _served_from_stage, _config  # noqa: PLW0603
 
     config = load_config()
+    _config = config
     _model_name = config.get("mlflow", {}).get("model_name", "ny_taxi_demand_model")
     try:
         _predictions_df = _load_predictions(config)
@@ -208,6 +214,20 @@ async def get_heatmap(
         key=lambda x: float(x["predicted_trip_count"]),  # type: ignore[arg-type]
         reverse=True,
     )
+
+    try:
+        prediction_log.log_predictions(
+            {
+                "predictions": predictions,
+                "model_version": _model_version,
+                "served_from_stage": _served_from_stage,
+            },
+            _config.get("monitoring", {}).get(
+                "predictions_path", "data/monitoring/predictions"
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to write prediction log: %s", exc)
 
     return {
         "generated_at": _generated_at,
