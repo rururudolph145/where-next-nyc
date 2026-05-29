@@ -286,13 +286,14 @@ Closes the **Validation & Deployment** gating step and the **Fallback pipeline**
 
 Closes the entire C05 Monitoring & Feedback lane in the updated diagram. Without these, the validation gate has no incumbent to compare against and the retrain trigger has no signal source.
 
-- [ ] **PBI 22 — Prediction Log + Actuals-Join Job**
+- [x] **PBI 22 — Prediction Log + Actuals-Join Job** — *shipped in `6d6854f`*
   - Add `app/monitoring/prediction_log.py` — appends every served `/heatmap` response to a partitioned parquet under `data/monitoring/predictions/dt=YYYY-MM-DD/`
   - Add `app/monitoring/actuals_join.py` — Airflow-friendly script that, given a date window, joins predictions with the eventual ground-truth `trip_count` from Gold and writes `data/monitoring/joined/`
   - Schema: `(bucket_time, pulocationid, predicted, actual, model_version, served_at)`
   - Acceptance: `tests/test_monitoring.py` — synthetic predictions + actuals → joined frame has expected row count and non-null `actual` where Gold data exists
   - Depends on: nothing
   - Difficulty: M
+  - Shipped with 41 new tests (13 unit + 26 acceptance + 2 hook); AC 7 parametrized across `OSError`/`RuntimeError`/`ValueError`; `served_from_stage` added to the log schema alongside `model_version` so PBI 21 fallback metadata is preserved through the join.
 
 - [ ] **PBI 23 — Drift & Performance Detector (Evidently)**
   - Add `app/monitoring/drift.py` — wraps Evidently `DataDriftPreset` (feature drift) and `RegressionPreset` (model performance) over a rolling 7-day window from PBI 22's joined frame
@@ -585,7 +586,7 @@ PBI 22 (prediction log + actuals) ──> PBI 23 (drift detector) ──> PBI 24
 
 | Done | Order | PBI | Rationale |
 |------|-------|-----|-----------|
-| [ ] | 15 | PBI 22 | Prediction log + actuals join — foundation for monitoring lane (C05) |
+| [x] | 15 | ~~PBI 22~~ | ~~Prediction log + actuals join — foundation for monitoring lane (C05)~~ — *shipped in `6d6854f`* |
 | [ ] | 16 | PBI 23 | Drift detector (Evidently) — depends on PBI 22 |
 | [ ] | 17 | PBI 24 | Alerts + retrain trigger — closes the monitoring → orchestrator feedback arrow; depends on PBI 23 |
 
