@@ -97,6 +97,10 @@ serving:
   predictions_path: data/predictions/demand_predictions.parquet
   zone_shapefile_path: data/reference/taxi_zones.shp
 
+monitoring:
+  predictions_path: data/monitoring/predictions
+  joined_path: data/monitoring/joined
+
 mlflow:
   experiment_name: ny_taxi_demand_model
   tracking_uri: sqlite:///mlflow.db

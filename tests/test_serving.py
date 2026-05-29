@@ -68,10 +68,13 @@ def client(
     sample_predictions: pd.DataFrame,
     zone_lookup: dict[int, str],
     centroid_lookup: dict[int, tuple[float, float]],
+    tmp_path: pytest.TempPathFactory,
 ) -> Generator[TestClient, None, None]:
     """Create a test client with mocked predictions, zone lookup, and centroid lookup.
 
     Restores all mutated module globals on teardown so tests are isolated.
+    _config is redirected to tmp_path so any prediction-log writes land in a
+    safe temp directory rather than the repo's data/ tree.
     """
     import app.api.main as serving_module
 
@@ -81,6 +84,7 @@ def client(
     orig_generated_at = serving_module._generated_at
     orig_model_version = serving_module._model_version
     orig_served_from_stage = serving_module._served_from_stage
+    orig_config = serving_module._config
 
     serving_module._predictions_df = sample_predictions
     serving_module._zone_lookup = zone_lookup
@@ -88,6 +92,10 @@ def client(
     serving_module._generated_at = "2021-03-01T12:00:00+00:00"
     serving_module._model_version = "3"
     serving_module._served_from_stage = "Production"
+    # Redirect log writes to tmp_path so no real disk I/O hits data/ tree.
+    serving_module._config = {
+        "monitoring": {"predictions_path": str(tmp_path / "monitoring_predictions")}
+    }
 
     yield TestClient(serving_module.app)
 
@@ -97,6 +105,7 @@ def client(
     serving_module._generated_at = orig_generated_at
     serving_module._model_version = orig_model_version
     serving_module._served_from_stage = orig_served_from_stage
+    serving_module._config = orig_config
 
 
 class TestHealthCheck:
@@ -1155,3 +1164,56 @@ class TestHeatmapModelProvenance:
         body: dict[str, Any] = resp.json()
         assert body["model_version"] is None
         assert body["served_from_stage"] is None
+
+
+# ---------------------------------------------------------------------------
+# PBI 22 — prediction log hook tests
+# ---------------------------------------------------------------------------
+
+
+class TestPredictionLogHook:
+    """Tests for the log_predictions hook wired into GET /heatmap (PBI 22)."""
+
+    def test_heatmap_hook_called_on_valid_response(self, client: TestClient) -> None:
+        """log_predictions is called once per successful /heatmap request.
+
+        Arrange: patch app.api.main.prediction_log.log_predictions as MagicMock.
+        Act: GET /heatmap.
+        Assert: mock called once; first positional arg contains "predictions" key.
+
+        Covers AC 6.
+        """
+        import app.api.main as serving_module
+
+        mock_log = MagicMock(return_value=None)
+        with patch.object(serving_module.prediction_log, "log_predictions", mock_log):
+            resp = client.get("/heatmap")
+
+        assert resp.status_code == 200
+        mock_log.assert_called_once()
+        call_args = mock_log.call_args
+        response_arg: dict[str, Any] = call_args[0][0]
+        assert "predictions" in response_arg
+
+    @pytest.mark.parametrize("exc_cls", [OSError, RuntimeError, ValueError])
+    def test_heatmap_returns_200_when_log_raises(
+        self, client: TestClient, exc_cls: type[Exception]
+    ) -> None:
+        """A log_predictions failure must not degrade the serving path.
+
+        Arrange: patch log_predictions to raise exc_cls ("boom").
+        Act: GET /heatmap.
+        Assert: HTTP 200 and response body still contains "predictions".
+
+        Covers AC 7 + resolved decision 2.  Parametrized over OSError,
+        RuntimeError, and ValueError to match the production except Exception.
+        """
+        import app.api.main as serving_module
+
+        mock_log = MagicMock(side_effect=exc_cls("boom"))
+        with patch.object(serving_module.prediction_log, "log_predictions", mock_log):
+            resp = client.get("/heatmap")
+
+        assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+        assert "predictions" in body
