@@ -61,5 +61,9 @@ reference/
 # Implementation checklists
 implementation_checklist/
 
+# Orchestration
+orchestration/logs/
+orchestration/.env
+
 # DVC
 .dvc/tmp/

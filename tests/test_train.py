@@ -6,7 +6,7 @@ import os
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-import joblib
+import joblib  # type: ignore[import-untyped]
 import numpy as np
 import pandas as pd
 import pytest

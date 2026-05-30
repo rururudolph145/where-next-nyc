@@ -1,7 +1,5 @@
 {
-  "model": "claude-opus-4-7",
   "permissions": {
-    "defaultMode": "acceptEdits",
     "allow": [
       "Bash(python3:*)",
       "Bash(python:*)",
@@ -84,8 +82,10 @@
       "Bash(git reset:*)",
       "Bash(docker rm:*)",
       "Bash(docker rmi:*)"
-    ]
+    ],
+    "defaultMode": "acceptEdits"
   },
+  "model": "claude-opus-4-7",
   "hooks": {
     "SessionStart": [
       {
@@ -131,5 +131,10 @@
         ]
       }
     ]
+  },
+  "enabledPlugins": {
+    "code-review@claude-code-plugins": true,
+    "explanatory-output-style@claude-code-plugins": true,
+    "feature-dev@claude-code-plugins": false
   }
 }

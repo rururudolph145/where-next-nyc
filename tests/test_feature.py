@@ -879,7 +879,7 @@ def _make_fake_geodataframe(
         EPSG:4326.
     """
     null_indices = null_indices or []
-    geometries = []
+    geometries: list[Polygon | None] = []
     for i, (lon, lat) in enumerate(zip(lons, lats)):
         if i in null_indices:
             geometries.append(None)
