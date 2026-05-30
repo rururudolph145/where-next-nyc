@@ -286,7 +286,7 @@ Closes the **Validation & Deployment** gating step and the **Fallback pipeline**
 
 Closes the entire C05 Monitoring & Feedback lane in the updated diagram. Without these, the validation gate has no incumbent to compare against and the retrain trigger has no signal source.
 
-> **Sequencing note (2026-05-29).** PBI 22 (prediction log) is shipped and underpins the lane, but PBIs 23 + 24 are intentionally deferred until after PBI 30 (CI/CD) and PBI 25a (orchestrator + `Clock` abstraction). Rationale: the `Clock` abstraction in 25a unlocks the demo story and is architecturally higher-leverage than the Evidently wrapper. Monitoring will reattach via PBI 25b once 23 + 24 exist.
+> **Sequencing note (2026-05-29, revised 2026-05-30).** PBI 22 (prediction log) is shipped and underpins the lane, but PBIs 23 + 24 are intentionally deferred until after PBI 30 (CI/CD) and PBI 25a (orchestrator foundation — `Clock` + `orchestration/` skeleton). Rationale: the `Clock` abstraction in 25a unlocks the demo story and is architecturally higher-leverage than the Evidently wrapper. Monitoring will reattach via PBI 25d once 23 + 24 exist.
 
 - [x] **PBI 22 — Prediction Log + Actuals-Join Job** — *shipped in `6d6854f`*
   - Add `app/monitoring/prediction_log.py` — appends every served `/heatmap` response to a partitioned parquet under `data/monitoring/predictions/dt=YYYY-MM-DD/`
@@ -306,48 +306,86 @@ Closes the entire C05 Monitoring & Feedback lane in the updated diagram. Without
 
 - [ ] **PBI 24 — Alerts + Retrain Trigger**
   - Add `app/monitoring/alert.py` — reads PBI 23's report; if drift OR WAPE degraded ≥ `monitoring.degradation_threshold_pct` vs the model's training-time WAPE, write a `retrain_required` marker file under `data/monitoring/triggers/`
-  - The Airflow training DAG (PBI 25) watches this directory via a `FileSensor` and fires retraining on demand
+  - The Airflow monitor DAG (PBI 25d) watches this directory via a `FileSensor` and fires the training DAG (PBI 25c) on demand
   - For local development, also print a clear log line and (optionally) emit a webhook if `monitoring.webhook_url` is set
   - Acceptance: `tests/test_monitoring.py::TestAlerts` — drift report with `drift=True` → trigger file written; clean report → no file
   - Depends on: PBI 23
   - Difficulty: M
 
-### Activity 12: Production Orchestrator (PBI 25)
+### Activity 12: Production Orchestrator (PBIs 25a–25d)
 
 Promotes the orchestrator out of `experiment/` and into a first-class lane (C00 in the updated diagram).
 
-> **Sequencing note (2026-05-29).** Original PBI 25 has been split into **25a** (Clock + 2 DAGs) and **25b** (`monitor_hourly_dag` wiring). This lets the architecturally interesting `Clock` abstraction and the orchestrator promotion ship *before* monitoring (PBIs 23/24), per the revised plan. PBI 25b reattaches the monitoring DAG once PBI 24 exists.
+> **Sequencing note (2026-05-29, revised 2026-05-30).** Original PBI 25 has been split into four PBIs along the platform-vs-workflow fault line: **25a** (orchestrator foundation — `Clock` + `orchestration/` skeleton, no DAGs), **25b** (`refresh_15min_dag`), **25c** (`train_monthly_dag`), and **25d** (`monitor_hourly_dag` wiring). 25a delivers the platform every DAG depends on; 25b/25c are independently shippable in parallel once 25a lands; 25d reattaches the monitoring DAG once PBIs 23/24 exist.
 
-- [ ] **PBI 25a — Promote Airflow DAGs to Top-Level `orchestration/` + `Clock` Abstraction (refresh + train DAGs only)**
-  - **Prerequisite refactor — `Clock` abstraction (do this first, in the same PR):**
-    - Add `app/core/clock.py` defining a `Clock` protocol with `now() -> datetime` and `sleep(seconds: float) -> None`
-    - Two implementations: `WallClock` (production — wraps `datetime.utcnow()` and `time.sleep`) and `SimulatedClock(start: datetime, speedup: float = 450.0)` (demo — advances 15 simulated minutes every 2s of wall-clock by default)
-    - Every component that currently calls `datetime.utcnow()` / `datetime.now()` / `time.sleep` — ingestion watermark, Airflow sensor marker logic, predictor's "current bucket" lookup, API's "latest hour" fallback — is refactored to receive a `Clock` and read time through it
-    - One repo-wide grep regression test in `tests/test_clock_discipline.py` asserts that no production module under `app/` imports `datetime.utcnow`, `datetime.now`, or `time.sleep` directly (allowlist: `app/core/clock.py` only)
-    - Selection: `clock = SimulatedClock(...)` when env var `DEMO_MODE=1`, else `WallClock()` — picked up at app startup
-  - Move `experiment/orchestration/` → `orchestration/` at repo root
-  - Add **two** production DAGs (both driven by the `Clock`, not `datetime.utcnow()`):
-    1. `refresh_15min_dag.py` — ingest → validate (PBI 19) → feature → predict → log (PBI 22); idempotent on `(date, bucket)` watermark
-    2. `train_monthly_dag.py` — cron `@monthly` + manual; train → gate (PBI 20) → register
-  - **Deferred to PBI 25b:** `monitor_hourly_dag.py` (depends on PBIs 23 + 24 existing)
-  - Add `orchestration/README.md` with DAG topology, triggering semantics, SLAs, and a "Demo vs Production" section explaining the clock selection. Document the deferred monitoring DAG with a TODO referencing PBI 25b so reviewers see the lane is planned, not abandoned.
+- [x] **PBI 25a — Orchestrator Foundation (`Clock` Abstraction + `orchestration/` Skeleton)** — *shipped in `ff466e9`* (29 tests added: 13 unit + 16 acceptance; one-way dependency invariant `app/` ↛ `orchestration/` locked at the AST level; existing `makefile` targets preserved alongside three new `airflow-*` targets)
+  - **Folder split (Option C): Clock in `app/core/`, infrastructure in `orchestration/`. Airflow 3.2.2 is container-only — NOT added to `pyproject.toml`.**
+  - **`Clock` abstraction (narrowed scope — no `sleep`, no callsite refactor, no DEMO_MODE factory):**
+    - Add `app/core/clock.py` defining a `@runtime_checkable` `typing.Protocol` named `Clock` with exactly one method: `now() -> datetime`
+    - `WallClock` — production implementation; `WallClock().now()` returns `datetime.now(tz=timezone.utc)`
+    - `SimulatedClock(start: datetime)` — deterministic implementation for tests and DAG task unit tests:
+      - Raises `TypeError` if `start.tzinfo is None` (prevents naive-vs-aware bugs)
+      - `.now()` returns the current simulated time (frozen at `start` until advanced)
+      - `.advance(delta: timedelta)` moves the clock forward; raises `ValueError` if `delta < timedelta(0)`
+      - No `speedup` parameter; no auto-advance; no `sleep()` method — explicit `advance()` only
+    - Both implementations satisfy `isinstance(obj, Clock)` via `@runtime_checkable`
+    - Module uses only stdlib (`datetime`, `typing`); no third-party imports
+  - **`orchestration/` skeleton (no DAGs yet — DAGs ship in 25b / 25c / 25d):**
+    - Fetch `orchestration/docker-compose.yaml` verbatim from `https://airflow.apache.org/docs/apache-airflow/3.2.2/docker-compose.yaml` — do NOT author a custom compose file
+    - Add `orchestration/README.md` with bootstrap instructions (`cp .env.example .env` → `make airflow-init`), named DAG registry (all three planned DAGs with PBI pointers), source URL, and known tuning items
+    - Add `orchestration/.env.example` with `AIRFLOW_UID` default and credential override warning
+    - Create `.gitkeep` stubs in `orchestration/dags/`, `orchestration/plugins/`, `orchestration/config/`
+    - Add `orchestration/logs/` and `orchestration/.env` to `.gitignore`; do NOT ignore `.env.example`
+    - Add `makefile` at repo root with three targets (`airflow-init`, `airflow-up`, `airflow-down`) delegating to `docker compose -f orchestration/docker-compose.yaml`; TAB-indented recipe lines
+    - Add `tests/test_dag_integrity.py` vacuous harness (no .py DAG files yet; comment for 25b/25c/25d extension)
+    - Add `tests/test_pbi25a_orchestrator_skeleton.py` with 8 filesystem invariant tests
+  - **Out of scope (deferred):**
+    - `Clock.sleep()` method → YAGNI; deferred indefinitely
+    - `SimulatedClock` `speedup` parameter or auto-advance → never; explicit `advance()` is the entire API
+    - Callsite refactors (`app/api/main.py`, `app/ingestion/schema.py`, `app/monitoring/prediction_log.py`) → happen organically as each downstream PBI first touches those modules
+    - `DEMO_MODE=1` factory selecting `WallClock` vs `SimulatedClock` → PBI 25b, co-located with the refresh DAG
+    - `tests/test_clock_discipline.py` repo-wide grep → deferred until callsite refactor makes the discipline contract worth defending in CI
   - Acceptance:
-    - `airflow dags list` shows the two DAGs after `make airflow-init`
-    - DAGs parse cleanly under `pytest tests/test_dag_integrity.py` (existing pattern)
-    - Idempotency: rerunning the same bucket-date pair is a no-op
-    - Clock-discipline test green: no stray `utcnow()` / `time.sleep` outside `app/core/clock.py`
-    - `DEMO_MODE=1 make demo` brings up the full stack on `SimulatedClock` and the `/heatmap` payload's `bucket_time` advances by 15 simulated minutes per ~2s of wall-clock
-  - Depends on: PBI 20 (registry stage label for `train_monthly_dag`'s gate step), PBI 30 (CI gates protect the refactor)
-  - Difficulty: L
+    - 15 ACs from the approved story all covered by `tests/test_clock.py` (13 tests) + `tests/test_dag_integrity.py` (1 test) + `tests/test_pbi25a_orchestrator_skeleton.py` (8 tests)
+    - `make airflow-init` (dry-run at minimum) exits 0; idempotent — no `--force-recreate`
+    - `uv sync --dev` completes without attempting to install Airflow
+    - All existing ruff + mypy + pytest gates still pass (AC #15)
+  - Depends on: PBI 30 (CI gates)
+  - Difficulty: S (narrowed from M after scope split)
 
-- [ ] **PBI 25b — Wire `monitor_hourly_dag` Into Orchestrator**
-  - Add `orchestration/dags/monitor_hourly_dag.py` — runs PBI 23 drift detector; PBI 24 alert step; `FileSensor` on `data/monitoring/triggers/` fires `train_monthly_dag` on retrain demand
-  - Update `orchestration/README.md` to remove the TODO from PBI 25a and document the monitor lane as live
+- [ ] **PBI 25b — `refresh_15min_dag` (Ingestion → Inference Cadence)**
+  - Add `orchestration/dags/refresh_15min_dag.py` — ingest → validate (PBI 19) → feature → predict → log (PBI 22)
+  - Driven by the injected `Clock` from PBI 25a, not `datetime.utcnow()`
+  - Idempotent on `(date, bucket)` watermark — rerunning the same bucket-date pair is a no-op
+  - Update `orchestration/README.md` to remove the TODO for this DAG and document its schedule, watermark contract, and SLA
   - Acceptance:
-    - `airflow dags list` now shows three DAGs
+    - `airflow dags list` shows `refresh_15min_dag`
+    - DAG parses cleanly under `pytest tests/test_dag_integrity.py`
+    - Idempotency test: running the DAG twice for the same `(date, bucket)` produces the same predictions parquet content and only one prediction-log row per `(bucket_time, pulocationid)`
+    - `DEMO_MODE=1 make demo` brings up the full stack on `SimulatedClock`; the `/heatmap` payload's `bucket_time` advances by 15 simulated minutes per ~2s of wall-clock
+  - Depends on: PBI 25a (foundation)
+  - Difficulty: S
+
+- [ ] **PBI 25c — `train_monthly_dag` (Training + Registry Gate)**
+  - Add `orchestration/dags/train_monthly_dag.py` — cron `@monthly` + manual trigger; train → gate (PBI 20) → register
+  - Driven by the injected `Clock` from PBI 25a
+  - Update `orchestration/README.md` to remove the TODO for this DAG and document its schedule + gate semantics
+  - Acceptance:
+    - `airflow dags list` shows `train_monthly_dag`
+    - DAG parses cleanly under `pytest tests/test_dag_integrity.py`
+    - End-to-end manual trigger: trains a model, runs the PBI 20 gate against the incumbent, registers iff the gate passes; gate-fail path leaves the incumbent in `Production`
+    - Re-triggering the same month is either a no-op or produces a clearly-versioned re-run (decision documented in the README)
+  - Depends on: PBI 25a (foundation), PBI 20 (registry stage label for the gate step)
+  - Difficulty: S
+
+- [ ] **PBI 25d — `monitor_hourly_dag` (Closes the C05 Feedback Loop)**
+  - Add `orchestration/dags/monitor_hourly_dag.py` — runs PBI 23 drift detector; PBI 24 alert step; `FileSensor` on `data/monitoring/triggers/` fires `train_monthly_dag` (from PBI 25c) on retrain demand
+  - Update `orchestration/README.md` to remove the final TODO and document the monitor lane as live
+  - Acceptance:
+    - `airflow dags list` now shows all three DAGs (`refresh_15min_dag`, `train_monthly_dag`, `monitor_hourly_dag`)
     - `tests/test_dag_integrity.py` covers the new DAG
-    - End-to-end: hand-craft a drift report with `drift=True` under `data/monitoring/drift/`; trigger `monitor_hourly_dag`; assert the `train_monthly_dag` is queued via the `FileSensor` hand-off
-  - Depends on: PBI 24, PBI 25a
+    - End-to-end: hand-craft a drift report with `drift=True` under `data/monitoring/drift/`; trigger `monitor_hourly_dag`; assert `train_monthly_dag` is queued via the `FileSensor` hand-off
+  - Depends on: PBI 24 (alert + trigger marker), PBI 25a (foundation), PBI 25c (the `FileSensor` target DAG must exist)
   - Difficulty: S
 
 ### Activity 13: Feature Store (PBI 26) — *stretch*
@@ -356,10 +394,10 @@ Closes the **Feature Store** node added to the inference lane. Only needed if tr
 
 - [ ] **PBI 26 — In-Memory Online Feature Store**
   - Add `app/inference/feature_store.py` — a simple in-memory cache keyed by `(pulocationid, bucket_time)` returning the lag features needed for prediction
-  - The refresh DAG (PBI 25) writes the latest features to this store after each ingestion run
+  - The refresh DAG (PBI 25b) writes the latest features to this store after each ingestion run
   - Inference Service (`/heatmap`) reads from the store instead of (or in addition to) the precomputed predictions parquet, enabling arbitrary `?bucket_time=` queries
   - Acceptance: integration test that adds a feature, queries it, asserts round-trip; latency stays sub-200ms
-  - Depends on: PBI 25
+  - Depends on: PBI 25b
   - Difficulty: L
   - Note: defer until product asks for on-demand inference; otherwise YAGNI
 
@@ -367,7 +405,7 @@ Closes the **Feature Store** node added to the inference lane. Only needed if tr
 
 > **Why this exists.** The README claims the system "guides drivers to higher-demand zones" and that following the heatmap beats following a last-week-same-hour intuition. Today that claim is unverified — it follows from model-quality metrics (MAE/WAPE) but never from a *driver-outcome* measurement. PBI 28 closes that gap: a closed-loop synthetic-driver simulation that replays a held-out week of historical TLC data, gives N synthetic drivers different policies, and reports per-policy trips served, idle time, and miles-to-pickup. This is what turns "the model is accurate" into "drivers following the model are better off."
 >
-> **Why it's separate from PBI 25.** PBI 25 is *system-level* simulation (the pipeline runs on a simulated clock). PBI 28 is *business-level* simulation (synthetic drivers act on the system's output and we measure outcomes). They are independent and complementary.
+> **Why it's separate from PBIs 25a–25d.** The 25-series is *system-level* simulation (the pipeline runs on a simulated clock). PBI 28 is *business-level* simulation (synthetic drivers act on the system's output and we measure outcomes). They are independent and complementary.
 
 - [ ] **PBI 28 — Driver-Agent Simulation Harness**
   - Add `app/simulation/driver_agents.py` with:
@@ -379,7 +417,7 @@ Closes the **Feature Store** node added to the inference lane. Only needed if tr
       3. `Stationary` — control; never moves
   - Add `app/simulation/harness.py`:
     - Spawns N drivers (default 50), distributes them across NYC zones with realistic starting positions (sampled from historical pickup density)
-    - At each simulated 15-min tick (driven by the same `SimulatedClock` from PBI 25):
+    - At each simulated 15-min tick (driven by the same `SimulatedClock` from PBI 25a):
       1. For each `idle` driver: invoke its policy, set destination, transition → `en_route`, compute ETA from haversine distance / average NYC taxi speed (use 12 mph default)
       2. For each `en_route` driver whose ETA has passed: transition → `idle` at the destination zone
       3. For each `idle` driver: check the historical TLC trip table for trips that *actually started* in that driver's zone during this 15-min window; if any are unclaimed by other drivers in that zone, assign one (FIFO by `driver_id`); transition → `on_trip` with `trip_ends_at = pickup_time + historical_trip_duration`
@@ -388,7 +426,7 @@ Closes the **Feature Store** node added to the inference lane. Only needed if tr
   - Add `app/simulation/report.py`:
     - Aggregates per-policy: total trips completed, % idle time, average miles-to-pickup, total earnings (use `fare_amount + tip_amount` from historical data on the assigned trip)
     - Emits a Markdown results table to `data/simulation/runs/<run_id>/report.md` and a CSV under the same dir
-    - The CI workflow (PBI 25 era) runs this harness on a tiny synthetic week as a regression test; the full week-long run is documented in the README
+    - The CI workflow runs this harness on a tiny synthetic week as a regression test; the full week-long run is documented in the README
   - Acceptance:
     - `tests/test_driver_simulation.py`:
       1. `test_heatmap_follower_visits_top_k` — synthetic 5-zone heatmap with zone 3 at top → idle driver's `destination_zone` is in {top-K}
@@ -549,13 +587,19 @@ PBI 19 (Pandera schema gate)  ────────────────�
 PBI 22 (prediction log + actuals) ──> PBI 23 (drift detector) ──> PBI 24 (alerts) ──┐│ │
                                                                                       ││ │
                                                                                       ▼▼ ▼
-                                                              PBI 25 (production orchestrator
-                                                                       + SimulatedClock)
+                                                              PBI 25a (foundation: Clock
+                                                                       + orchestration/ skeleton)
                                                                                         │
-                                                                ┌───────────────────────┼──> PBI 26 (feature store, stretch)
-                                                                │                       │
-                                                                └──> PBI 28 (driver-agent harness — needs PBI 18 baseline policy
-                                                                              + PBI 25 SimulatedClock)
+                                                ┌───────────────────────────────────────┼──> PBI 25b (refresh_15min_dag)
+                                                │                                       │
+                                                ├──> PBI 25c (train_monthly_dag) ───────┤
+                                                │                                       │
+                                                ├──> PBI 25d (monitor_hourly_dag — needs PBI 24 + PBI 25c)
+                                                │                                       │
+                                                ├──> PBI 26 (feature store, stretch — needs PBI 25b)
+                                                │                                       │
+                                                └──> PBI 28 (driver-agent harness — needs PBI 18 baseline policy
+                                                              + PBI 25a SimulatedClock)
 ```
 
 ## Priority Order
@@ -602,58 +646,60 @@ PBI 22 (prediction log + actuals) ──> PBI 23 (drift detector) ──> PBI 24
 |------|-------|-----|-----------|
 | [x] | 15 | ~~PBI 30~~ | ~~GitHub Actions CI/CD (lint + test) — independent, S-sized; every PBI from now on lands through enforced gates. **Resequenced 2026-05-29 to land before PBI 25a so the orchestrator refactor ships under CI.**~~ — *shipped in `98761fd`* |
 
-### Open — Phase D · Production orchestrator + `Clock` (~16h)
+### Open — Phase D · Orchestrator foundation + refresh / train DAGs (~16h)
 
 | Done | Order | PBI | Rationale |
 |------|-------|-----|-----------|
-| [ ] | 16 | PBI 25a | Promote Airflow DAGs to `orchestration/` + `Clock` abstraction (refresh + train DAGs only). **Resequenced 2026-05-29 ahead of PBIs 23/24** — the `Clock` abstraction is architecturally higher-leverage than the Evidently wrapper; monitoring DAG reattaches in PBI 25b. Depends on PBI 20, PBI 30. |
+| [x] | 16 | ~~PBI 25a~~ | ~~Orchestrator foundation: `Clock` abstraction + `orchestration/` skeleton (no DAGs). Unblocks 25b / 25c / 25d. **Split 2026-05-30** from the monolithic 25a so the `Clock` refactor lands isolated from any specific DAG. Depends on PBI 30.~~ — *shipped in `ff466e9`* |
+| [ ] | 17 | PBI 25b | `refresh_15min_dag` — ingestion → inference cadence; delivers the `DEMO_MODE=1 make demo` story. Independently shippable in parallel with 25c. Depends on PBI 25a. |
+| [ ] | 18 | PBI 25c | `train_monthly_dag` — training + PBI 20 registry gate. Independently shippable in parallel with 25b. Depends on PBI 25a, PBI 20. |
 
 ### Open — Phase E · Closed-loop monitoring (~24h)
 
 | Done | Order | PBI | Rationale |
 |------|-------|-----|-----------|
-| [x] | 17 | ~~PBI 22~~ | ~~Prediction log + actuals join — foundation for monitoring lane (C05)~~ — *shipped in `6d6854f`* |
-| [ ] | 18 | PBI 23 | Drift detector (Evidently) — depends on PBI 22 |
-| [ ] | 19 | PBI 24 | Alerts + retrain trigger — closes the monitoring → orchestrator feedback arrow; depends on PBI 23 |
-| [ ] | 20 | PBI 25b | Wire `monitor_hourly_dag` into the orchestrator now that PBI 24 exists; depends on PBI 24 + PBI 25a |
+| [x] | 19 | ~~PBI 22~~ | ~~Prediction log + actuals join — foundation for monitoring lane (C05)~~ — *shipped in `6d6854f`* |
+| [ ] | 20 | PBI 23 | Drift detector (Evidently) — depends on PBI 22 |
+| [ ] | 21 | PBI 24 | Alerts + retrain trigger — closes the monitoring → orchestrator feedback arrow; depends on PBI 23 |
+| [ ] | 22 | PBI 25d | Wire `monitor_hourly_dag` into the orchestrator now that PBI 24 exists; `FileSensor` hand-off targets PBI 25c's `train_monthly_dag`. Depends on PBI 24 + PBI 25a + PBI 25c. |
 
 ### Open — Phase F · Closed-loop simulation
 
 | Done | Order | PBI | Rationale |
 |------|-------|-----|-----------|
-| [ ] | 21 | PBI 28 | Driver-agent simulation harness — proves the "drivers following the heatmap are better off" claim; depends on PBI 18 + PBI 25a |
+| [ ] | 23 | PBI 28 | Driver-agent simulation harness — proves the "drivers following the heatmap are better off" claim; depends on PBI 18 + PBI 25a |
 
 ### Open — API & ingestion hardening
 
 | Done | Order | PBI | Rationale |
 |------|-------|-----|-----------|
-| [ ] | 22 | PBI 16 | Paginate `/heatmap` — closes the "pagination for large responses" gap |
-| [ ] | 23 | PBI 29 | Latency SLO baseline + CI guard — closes the latency arm of the SLA; depends on PBI 30 for the CI workflow to run the benchmark |
-| [ ] | 24 | PBI 15 | Streaming bronze write — defer until ingestion OOMs in practice |
-| [ ] | 25 | PBI 17 | Socrata HTTP compliance — blocked until downloader migrates into `app/` |
+| [ ] | 24 | PBI 16 | Paginate `/heatmap` — closes the "pagination for large responses" gap |
+| [ ] | 25 | PBI 29 | Latency SLO baseline + CI guard — closes the latency arm of the SLA; depends on PBI 30 for the CI workflow to run the benchmark |
+| [ ] | 26 | PBI 15 | Streaming bronze write — defer until ingestion OOMs in practice |
+| [ ] | 27 | PBI 17 | Socrata HTTP compliance — blocked until downloader migrates into `app/` |
 
 ### Open — Post-MVP (personalized ranking + reliability)
 
 | Done | Order | PBI | Rationale |
 |------|-------|-----|-----------|
-| [ ] | 26 | PBI 5 | Zone lookup — needed by personalized ranking |
-| [ ] | 27 | PBI 6 | Location capture — simple, enables testing |
-| [ ] | 28 | PBI 7 | Scoring function — pure math, unit testable |
-| [ ] | 29 | PBI 8 | Recommendation API — personalized ranking endpoint |
-| [ ] | 30 | PBI 11 | Simulated streaming — shows production awareness (now largely subsumed by PBI 25a's `SimulatedClock`) |
-| [ ] | 31 | PBI 9 | Stale-data handler — historical-averages fallback; complementary to PBI 21's model-level fallback |
-| [ ] | 32 | PBI 10 | Monitoring (L5 signal) — superseded by PBIs 22–24 which decompose this into prediction log + drift + alerts |
-| [ ] | 33 | PBI 4 | Multi-horizon — deferred; A3 knob (`horizon_buckets`) already shipped, just needs a training config flip |
+| [ ] | 28 | PBI 5 | Zone lookup — needed by personalized ranking |
+| [ ] | 29 | PBI 6 | Location capture — simple, enables testing |
+| [ ] | 30 | PBI 7 | Scoring function — pure math, unit testable |
+| [ ] | 31 | PBI 8 | Recommendation API — personalized ranking endpoint |
+| [ ] | 32 | PBI 11 | Simulated streaming — shows production awareness (now largely subsumed by PBI 25a's `SimulatedClock`) |
+| [ ] | 33 | PBI 9 | Stale-data handler — historical-averages fallback; complementary to PBI 21's model-level fallback |
+| [ ] | 34 | PBI 10 | Monitoring (L5 signal) — superseded by PBIs 22–24 which decompose this into prediction log + drift + alerts |
+| [ ] | 35 | PBI 4 | Multi-horizon — deferred; A3 knob (`horizon_buckets`) already shipped, just needs a training config flip |
 
 ### Stretch
 
 | Done | Order | PBI | Rationale |
 |------|-------|-----|-----------|
-| [ ] | 34 | PBI 26 | Online feature store — defer until on-demand inference is actually needed |
+| [ ] | 36 | PBI 26 | Online feature store — defer until on-demand inference is actually needed; depends on PBI 25b |
 
 ## Recommended Sequencing for PBIs 18–30
 
-> **Revised 2026-05-29.** The original plan ran monitoring (23/24) before orchestration (25). After landing PBI 22 it became clear that the `Clock` abstraction inside PBI 25 is architecturally higher-leverage than the Evidently wrapper, and that landing CI (PBI 30) first protects every subsequent refactor. PBI 25 was therefore split into 25a (Clock + 2 DAGs) and 25b (`monitor_hourly_dag` wiring after 24 exists).
+> **Revised 2026-05-29, re-revised 2026-05-30.** The original plan ran monitoring (23/24) before orchestration (25). After landing PBI 22 it became clear that the `Clock` abstraction inside PBI 25 is architecturally higher-leverage than the Evidently wrapper, and that landing CI (PBI 30) first protects every subsequent refactor. PBI 25 has since been split along the platform-vs-workflow fault line into four PBIs: **25a** (foundation: `Clock` + `orchestration/` skeleton, no DAGs), **25b** (`refresh_15min_dag`), **25c** (`train_monthly_dag`), and **25d** (`monitor_hourly_dag` wiring after 24 exists). One PBI per DAG keeps each PR small enough to review in a single sitting and lets 25b / 25c ship in parallel.
 
 **Phase A — Credibility (highest leverage, ~10h total):**
 1. **PBI 18** (baseline + recall@K) — proves the model actually adds value over a naive baseline. Without this, every other PBI is built on an unproven foundation. *Shipped.*
@@ -670,19 +716,21 @@ PBI 22 (prediction log + actuals) ──> PBI 23 (drift detector) ──> PBI 24
 **Phase D — CI hardening (do this NEXT, ~6h):**
 7. **PBI 30** (GitHub Actions lint + test) — independent, S-sized. Every PBI from here on lands under enforced gates. Doing this *before* PBI 25a means the orchestrator refactor ships with CI protection.
 
-**Phase E — Production orchestrator + `Clock` (~16h):**
-8. **PBI 25a** (orchestrator promotion + `Clock` abstraction; refresh + train DAGs only) — *system-level* simulation layer that lets a reviewer watch the heatmap update on a compressed clock. `monitor_hourly_dag` deliberately deferred to 25b.
+**Phase E — Orchestrator foundation + refresh / train DAGs (~16h):**
+8. **PBI 25a** (orchestrator foundation — `Clock` abstraction + `orchestration/` skeleton, no DAGs). Pure infrastructure; unblocks every DAG PBI.
+9. **PBI 25b** (`refresh_15min_dag`) — *system-level* simulation layer that lets a reviewer watch the heatmap update on a compressed clock; delivers `DEMO_MODE=1 make demo`. Ships in parallel with 25c.
+10. **PBI 25c** (`train_monthly_dag`) — monthly + manual training with the PBI 20 registry gate. Ships in parallel with 25b.
 
 **Phase F — Closed-loop monitoring (~24h):**
-9. **PBI 23** (drift detector — Evidently `DataDriftPreset` + `RegressionPreset` over PBI 22's joined frame)
-10. **PBI 24** (alerts + retrain trigger — emits the `retrain_required` marker file)
-11. **PBI 25b** (wire `monitor_hourly_dag` into the orchestrator — closes the C05 lane)
+11. **PBI 23** (drift detector — Evidently `DataDriftPreset` + `RegressionPreset` over PBI 22's joined frame)
+12. **PBI 24** (alerts + retrain trigger — emits the `retrain_required` marker file)
+13. **PBI 25d** (wire `monitor_hourly_dag` into the orchestrator — closes the C05 lane; `FileSensor` hand-off targets PBI 25c's `train_monthly_dag`)
 
 **Phase G — Closed-loop simulation:**
-12. **PBI 28** (driver-agent harness — *business-level* simulation that produces the per-policy trips-served table the README references)
+14. **PBI 28** (driver-agent harness — *business-level* simulation that produces the per-policy trips-served table the README references)
 
 **Phase H — Stretch:**
-13. **PBI 26** (online feature store — only if on-demand inference becomes a requirement)
+15. **PBI 26** (online feature store — only if on-demand inference becomes a requirement)
 
 ## Known Limitations & Future Considerations
 
