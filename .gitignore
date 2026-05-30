@@ -15,6 +15,10 @@ env/
 .venv/
 .env
 
+# direnv (per-developer shell activation; do not commit)
+.envrc
+.direnv/
+
 # Testing
 .pytest_cache/
 htmlcov/
@@ -50,6 +54,9 @@ data/*.csv
 # Reference / lookup files (shapefiles, etc.)
 data/reference/*
 !data/reference/.gitkeep
+
+# Reference materials (JDs, PDFs, external docs — not part of the codebase)
+reference/
 
 # Implementation checklists
 implementation_checklist/

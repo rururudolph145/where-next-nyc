@@ -1,0 +1,25 @@
+name: test
+
+on:
+  pull_request:
+    branches:
+      - dev_MVP
+      - main
+  push:
+    branches:
+      - dev_MVP
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: uv sync --dev --no-install-package torch --no-install-package torchvision
+      - name: "Test: pytest"
+        run: uv run pytest tests/ -v --tb=short
