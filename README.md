@@ -1,5 +1,7 @@
 # New York Taxi Demand Forecasting
 
+[![Lint](https://github.com/rururudolph145/NewYorkTaxiDemandForecasting/actions/workflows/lint.yml/badge.svg)](https://github.com/rururudolph145/NewYorkTaxiDemandForecasting/actions/workflows/lint.yml) [![Tests](https://github.com/rururudolph145/NewYorkTaxiDemandForecasting/actions/workflows/test.yml/badge.svg)](https://github.com/rururudolph145/NewYorkTaxiDemandForecasting/actions/workflows/test.yml)
+
 ## The Problem
 
 NYC yellow-taxi drivers spend roughly **a third of their shift empty** — circling, idling, or returning from outer-borough drop-offs to areas they *guess* will be busy. Guessing well is a learned skill that takes years; guessing poorly compounds into lower revenue, longer shifts, and worse service for riders who can't find a cab.
