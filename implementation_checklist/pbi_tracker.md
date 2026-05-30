@@ -407,7 +407,7 @@ Closes the **Feature Store** node added to the inference lane. Only needed if tr
 >
 > **Why now.** Phase A is shipped (PBIs 18, 19, 20, 27 all live on branches awaiting merge). Future PBIs (21, 22–24, 25, 28) all add code paths that need the same gates. Adding CI before those land prevents the maintenance debt of fixing regressions after the fact. Also gates PBI 29's latency-SLO test (`bench_heatmap_p95` cannot be a useful guardrail without a workflow to run it on every PR).
 
-- [ ] **PBI 30 — GitHub Actions CI/CD: Lint + Test (+ Docker, deferred)**
+- [x] **PBI 30 — GitHub Actions CI/CD: Lint + Test (+ Docker, deferred)** — *shipped in `98761fd`* (PR #13 → dev_MVP; 5 files, 20 acceptance tests; pre-existing `test.ipynb` ruff-format failure and 7 tests/ mypy errors deferred to follow-up PBIs)
   - Add `.github/workflows/lint.yml`:
     - Triggers: `pull_request` against any branch; `push` to `main`
     - Steps: checkout → `astral-sh/setup-uv@v3` (with cache) → `uv python install 3.13` → `uv sync --dev` → `uv run ruff check .` → `uv run ruff format --check .` → `uv run mypy app tests`
@@ -600,7 +600,7 @@ PBI 22 (prediction log + actuals) ──> PBI 23 (drift detector) ──> PBI 24
 
 | Done | Order | PBI | Rationale |
 |------|-------|-----|-----------|
-| [ ] | 15 | PBI 30 | GitHub Actions CI/CD (lint + test) — independent, S-sized; every PBI from now on lands through enforced gates. **Resequenced 2026-05-29 to land before PBI 25a so the orchestrator refactor ships under CI.** |
+| [x] | 15 | ~~PBI 30~~ | ~~GitHub Actions CI/CD (lint + test) — independent, S-sized; every PBI from now on lands through enforced gates. **Resequenced 2026-05-29 to land before PBI 25a so the orchestrator refactor ships under CI.**~~ — *shipped in `98761fd`* |
 
 ### Open — Phase D · Production orchestrator + `Clock` (~16h)
 
