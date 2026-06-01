@@ -19,6 +19,7 @@ import importlib
 import re
 import subprocess
 import sys
+from collections.abc import Generator
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -140,7 +141,7 @@ _CENTROID_LOOKUP: dict[int, tuple[float, float]] = {
 
 
 @pytest.fixture()
-def api_client() -> TestClient:
+def api_client() -> Generator[TestClient, None, None]:
     """Return a TestClient with realistic module globals and log_predictions mocked.
 
     Mocking log_predictions avoids touching the real filesystem from API tests

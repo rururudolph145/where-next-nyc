@@ -138,7 +138,7 @@ async def read_root() -> dict[str, object]:
     Returns:
         Status information.
     """
-    return {"health_check": "OK"}
+    return {"status": "alive"}
 
 
 @app.get("/heatmap")

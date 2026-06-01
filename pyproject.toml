@@ -36,7 +36,7 @@ dependencies = [
 ]
 
 [tool.ruff]
-extend-exclude = ["experiment"]
+extend-exclude = ["experiment", "*.ipynb"]
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu126" }

@@ -150,8 +150,7 @@ def test_lint_workflow_step_commands_present(expected_fragment: str):
 
     # Act — collect named steps whose run field contains the fragment
     matching_steps = [
-        step for step in named
-        if expected_fragment in (step.get("run") or "")
+        step for step in named if expected_fragment in (step.get("run") or "")
     ]
 
     # Assert — exactly one named step must own this command

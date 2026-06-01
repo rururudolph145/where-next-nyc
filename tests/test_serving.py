@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -68,7 +69,7 @@ def client(
     sample_predictions: pd.DataFrame,
     zone_lookup: dict[int, str],
     centroid_lookup: dict[int, tuple[float, float]],
-    tmp_path: pytest.TempPathFactory,
+    tmp_path: Path,
 ) -> Generator[TestClient, None, None]:
     """Create a test client with mocked predictions, zone lookup, and centroid lookup.
 
@@ -112,11 +113,11 @@ class TestHealthCheck:
     """Tests for the root health check endpoint."""
 
     def test_health_check_returns_ok(self, client: TestClient) -> None:
-        """GET / returns 200 with health_check OK."""
+        """GET / returns 200 with status alive."""
         resp = client.get("/")
         assert resp.status_code == 200
         body: dict[str, object] = resp.json()
-        assert body["health_check"] == "OK"
+        assert body["status"] == "alive"
 
 
 class TestHeatmapEndpoint:

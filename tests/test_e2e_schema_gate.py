@@ -473,7 +473,7 @@ def test_edge_repeat_runs_produce_distinct_log_files(tmp_path: Path) -> None:
             return ts
 
     original_datetime = schema_module.datetime
-    schema_module.datetime = _FakeDatetime  # type: ignore[assignment]
+    schema_module.datetime = _FakeDatetime  # type: ignore[misc,assignment]
 
     try:
         bronze_df = _valid_bronze_df()
@@ -506,7 +506,7 @@ def test_edge_repeat_runs_produce_distinct_log_files(tmp_path: Path) -> None:
         c2.run()
 
     finally:
-        schema_module.datetime = original_datetime  # type: ignore[assignment]
+        schema_module.datetime = original_datetime  # type: ignore[misc,assignment]
 
     # Assert — two distinct log files
     log_dir = shared_silver / "_validation"
