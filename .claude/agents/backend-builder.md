@@ -2,7 +2,7 @@
 name: backend-builder
 description: "Use this agent when you have an approved technical brief (from spec-writer) and exploration findings (from codebase-researcher) and need the backend half built: API routes, services, data access, background jobs, feature engineering, training/inference glue, and the unit tests that cover them. This agent does not touch React components, pages, or client-side hooks — pair it with a frontend builder for full-stack work.\\n\\n<example>\\nContext: The technical brief for paginating /heatmap (?top_n=) has been approved.\\nuser: \"Brief is signed off. Build the backend.\"\\nassistant: \"I'll use the Agent tool to launch the backend-builder agent to implement the /heatmap top_n parameter in app/api/main.py and add the corresponding tests in tests/test_serving.py.\"\\n<commentary>\\nA technical brief is approved and the work is server-side only — exactly the backend-builder's input contract.\\n</commentary>\\n</example>\\n\\n<example>\\nContext: A new background job for refreshing predictions is specified in a brief.\\nuser: \"Implement the simulator changes from the brief — backend only.\"\\nassistant: \"I'm going to use the Agent tool to launch the backend-builder agent to implement the simulator changes and unit tests, then run typecheck and the test suite.\"\\n<commentary>\\nServer-side feature work with tests is the backend-builder's wheelhouse.\\n</commentary>\\n</example>"
 tools: Read, Edit, Write, Bash, Grep, Glob
-model: sonnet
+model: opus
 color: green
 memory: project
 ---

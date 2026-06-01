@@ -1,11 +1,15 @@
 ---
 name: feature-factory
 description: |
-  Orchestrate a full backend feature build using the six-agent chain:
+  Orchestrate a full backend feature build using the seven-agent chain:
   codebase-researcher → story-writer → (human approval) → spec-writer
-  → (human approval) → backend-builder → test-verifier →
-  implementation-validator → (loop on critical findings) →
-  (human PR review) → PBI tracker update.
+  → (human approval) → builder dispatch (backend-builder and/or
+  data-pipeline-orchestrator) → test-verifier → implementation-validator
+  → (loop on critical findings) → (human PR review) → PBI tracker update.
+
+  Step 6 routes to backend-builder for API/service work, to
+  data-pipeline-orchestrator for ETL/ingestion/DAG work, or to both
+  sequentially for full-stack features (pipeline first, then API).
 
   TRIGGER when the user asks to "build a feature", "ship a feature",
   "implement a feature", "run the feature factory", "run the full chain",
@@ -17,8 +21,12 @@ description: |
 
 # Feature Factory
 
-End-to-end orchestration of six subagents to take a feature from rough
+End-to-end orchestration of subagents to take a feature from rough
 idea to merge-ready implementation, with two human approval gates.
+The chain has two builder lanes at Step 6: `backend-builder` for
+API/service work and `data-pipeline-orchestrator` for ETL/ingestion/
+DAG work. Full-stack features run both sequentially.
+
 Frontend work is out of scope today (the frontend-builder agent does
 not yet exist) — this skill builds backend-only features. If the brief
 contains frontend changes, surface them to the user as deferred work.
@@ -73,21 +81,31 @@ If either is missing, ask before invoking any agent.
        │ GATE  │  (loop on "changes")
        └───┬───┘
            ▼
-┌─────────────────────┐
-│  backend-builder    │  ─► backend code + unit tests
-└──────────┬──────────┘
-           ▼
-┌─────────────────────┐
-│   test-verifier     │  ─► acceptance tests
-└──────────┬──────────┘
-           ▼
-┌─────────────────────┐
-│implementation-      │  ─► gap report (critical / important / minor)
-│ validator           │
-└──────────┬──────────┘
-           ▼
+       ┌─────────────────┐
+       │ Step 6 dispatch │  classify brief into Lane A/B/C
+       └────────┬────────┘
+                │
+   ┌────────────┼─────────────────────────┐
+   ▼            ▼                         ▼
+┌────────┐  ┌────────────────────┐  ┌─────────────────────────┐
+│ Lane A │  │      Lane B        │  │        Lane C           │
+│ back-  │  │ data-pipeline-     │  │ data-pipeline-orch ──►  │
+│ end-   │  │ orchestrator       │  │ backend-builder         │
+│ builder│  │                    │  │ (sequential)            │
+└───┬────┘  └─────────┬──────────┘  └────────────┬────────────┘
+    └─────────────────┴────────────┬─────────────┘
+                                   ▼
+                       ┌─────────────────────┐
+                       │   test-verifier     │  ─► acceptance tests
+                       └──────────┬──────────┘
+                                  ▼
+                       ┌─────────────────────┐
+                       │implementation-      │  ─► gap report
+                       │ validator           │    (critical / important / minor)
+                       └──────────┬──────────┘
+                                  ▼
     ┌──────────────┐
-    │ Critical     │  yes ─► route to backend-builder ─► test-verifier
+    │ Critical     │  yes ─► route to lane's builder ─► test-verifier
     │ findings?    │         ─► validator (max 3 loops)
     └──────┬───────┘
            ▼ no
@@ -162,7 +180,7 @@ as out-of-scope at PR review time."
 Show the user the full brief. Use `AskUserQuestion` with exactly
 these three options:
 
-- **Approve** — continue to backend-builder.
+- **Approve** — continue to Step 6 (builder dispatch).
 - **Request changes** — collect specific feedback as free text via
   the question's "Other" path, then re-invoke `spec-writer` with:
   - The approved story.
@@ -179,29 +197,72 @@ these three options:
 Keep looping the "Request changes" branch until the user picks
 Approve or Reject.
 
-### Step 6 — backend-builder
-Invoke the `backend-builder` agent. Pass:
+### Step 6 — Builder dispatch
+
+Classify the approved brief into one of three lanes by scanning the
+brief's "Files That Will Change" and "Summary" / "Process Flow"
+sections.
+
+**Lane A — API/service**
+- Triggers: files confined to `app/api/`, `app/services/`,
+  `app/core/`; brief mentions endpoints, FastAPI, HTTP, request/
+  response shapes; no new pipeline or DAG code.
+- Dispatch to: `backend-builder`.
+
+**Lane B — ETL/pipeline**
+- Triggers: files under `pipeline/`, `orchestration/dags/`,
+  `app/ingestion/`, `app/features/`, `app/pipelines/`; brief
+  mentions ingest, transform, DAG, schedule, batch, feature
+  engineering, training pipeline, drift detection; no new HTTP
+  endpoints.
+- Dispatch to: `data-pipeline-orchestrator`. This agent is built
+  for ETL planning, edge-case enumeration, and orchestration
+  design — work that the backend-builder is not specialised for.
+
+**Lane C — Full-stack (pipeline + API)**
+- Triggers: signals from both lane A and lane B (e.g., a new
+  ingestion job AND a new endpoint that reads its output).
+- Dispatch sequentially: `data-pipeline-orchestrator` first, wait
+  for it to finish, then `backend-builder` with the pipeline
+  agent's full report appended to its input.
+
+**Ambiguous classification** (signals split, or neither lane clearly
+matches): surface the ambiguity to the user via `AskUserQuestion`
+with options "Lane A", "Lane B", "Lane C" before dispatching. Do not
+guess.
+
+Pass to whichever builder is invoked:
 - The approved technical brief.
 - The codebase-researcher's findings.
 - A pointer to CLAUDE.md and `.claude/rules/`.
+- For Lane C's second leg: the first leg's complete agent report
+  (Files Changed, Patterns Reused, etc.) verbatim.
 
-The agent implements backend code + unit tests, runs ruff/mypy/pytest,
-and returns: Files Changed, Patterns Reused, Tests Added, Gate Results,
-Suggested CLAUDE.md Additions, Dependency Needs.
+Each builder returns: Files Changed, Patterns Reused, Tests Added,
+Gate Results, Suggested CLAUDE.md Additions, Dependency Needs. Record
+which lane (A/B/C) ran so Steps 7–9 can route correctly.
 
 **On gate failure** (anything red): report the failure to the user
 verbatim and ask whether to retry, route to a fixer agent, or stop.
 Do not silently proceed.
 
-**On dependency block**: if the agent reports a Dependency Needs
+**On dependency block**: if a builder reports a Dependency Needs
 entry, surface it to the user and pause. The skill does not add
 dependencies — the user decides.
+
+**Lane C mid-chain failure**: if `data-pipeline-orchestrator` fails
+its gates, do NOT proceed to `backend-builder` — the pipeline is the
+substrate the API will read from, and a broken pipeline breaks the
+API by construction. Surface the failure and pause.
 
 ### Step 7 — test-verifier
 Invoke the `test-verifier` agent. Pass:
 - The approved user story.
 - The approved technical brief.
-- The backend-builder's summary.
+- The builder summary (or summaries, in Lane C) from Step 6.
+- The lane (A/B/C) that ran, so the agent knows whether to write
+  HTTP-level tests, pipeline/DAG-invocation tests (e.g., via
+  `docker compose exec` or a thin Python harness), or both.
 
 The agent writes acceptance tests, runs them, and returns: Files
 Changed, Acceptance Criteria Coverage table, Test Results, Criteria
@@ -209,7 +270,7 @@ That Could Not Be Covered (if any), Suggested Test Conventions.
 
 **If "Criteria That Could Not Be Covered" is non-empty**: do NOT
 proceed to the validator. Report the uncoverable criteria to the
-user and ask whether to route back to backend-builder.
+user and ask whether to route back to the lane's builder.
 
 ### Step 8 — implementation-validator
 Invoke the `implementation-validator` agent. Pass:
@@ -217,6 +278,8 @@ Invoke the `implementation-validator` agent. Pass:
 - The approved technical brief.
 - The test-verifier's report.
 - The list of files changed across Steps 6–7.
+- The lane (A/B/C) that ran at Step 6, so the agent's "Recommended
+  Next Agent" routing correctly targets the right builder.
 
 The agent returns: Scope of This Review, Critical findings, Important
 findings, Minor findings, Recommended Next Agent.
@@ -225,12 +288,19 @@ findings, Minor findings, Recommended Next Agent.
 Examine the validator's "Critical" section.
 
 - **No critical findings**: continue to Step 10.
-- **Critical findings exist**: route based on which files they touch:
-  - Backend findings → re-invoke `backend-builder` with the findings
-    as new input.
-  - Test-only findings → re-invoke `test-verifier`.
+- **Critical findings exist**: route by file path of the finding:
+  - Findings in `app/api/`, `app/services/`, `app/core/` →
+    re-invoke `backend-builder`.
+  - Findings in `pipeline/`, `orchestration/dags/`, `app/ingestion/`,
+    `app/features/`, `app/pipelines/` → re-invoke
+    `data-pipeline-orchestrator`.
+  - Test-only findings (files under `tests/`) → re-invoke
+    `test-verifier`.
+  - Findings spanning both builder lanes → route each subset to its
+    respective builder sequentially (pipeline first, then API), then
+    proceed to re-test.
 
-  After the fixer agent reports done, re-run `test-verifier`
+  After the fixer agent(s) report done, re-run `test-verifier`
   (Step 7) and `implementation-validator` (Step 8). Loop until
   critical findings is empty, OR a hard limit of **three loop
   iterations** is hit — at which point stop and escalate to the
@@ -325,7 +395,7 @@ Throughout the chain:
 - **Validator finds a Critical gap the builder cannot fix.** After
   three loop iterations, stop and escalate. Do not loop forever.
 - **Test-verifier reports uncoverable criteria.** Treat as a Critical
-  gap and route back to backend-builder (Step 9 logic).
+  gap and route back to the lane's builder using Step 9 logic.
 - **User goes idle at an approval gate.** Do not assume — wait. The
   chain is paused.
 
@@ -341,9 +411,17 @@ Throughout the chain:
 - **Running agents in parallel that should be sequential.** The chain
   is strictly sequential. Parallel branches break the
   story→brief→build dependency.
-- **Calling agents the user did not ask for.** This chain is exactly
-  six agents. Do not introduce others (including frontend-builder —
-  which does not exist yet).
+- **Running both Step 6 builders in parallel for Lane C.** Lane C is
+  strictly sequential — `data-pipeline-orchestrator` first, then
+  `backend-builder`. Parallel builds create merge conflicts, double-
+  write the same files, and rob the API leg of the pipeline leg's
+  context.
+- **Guessing the lane when classification is ambiguous.** If the
+  brief sends mixed signals, ask the user via `AskUserQuestion`
+  rather than picking one.
+- **Calling agents the user did not ask for.** This chain uses
+  exactly the seven agents listed in References. Do not introduce
+  others (including frontend-builder — which does not exist yet).
 - **Implementing frontend changes inline.** Frontend work is deferred;
   surface it as out-of-scope at Step 4 and at PR review.
 
@@ -351,7 +429,8 @@ Throughout the chain:
 - `.claude/agents/codebase-researcher.md`
 - `.claude/agents/story-writer.md`
 - `.claude/agents/spec-writer.md`
-- `.claude/agents/backend-builder.md`
+- `.claude/agents/backend-builder.md` — Lane A / Lane C second leg
+- `.claude/agents/data-pipeline-orchestrator.md` — Lane B / Lane C first leg
 - `.claude/agents/test-verifier.md`
 - `.claude/agents/implementation-validator.md`
 - `CLAUDE.md` and `.claude/rules/*.md`
