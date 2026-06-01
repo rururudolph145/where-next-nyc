@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -291,19 +291,19 @@ class TestSchemaValidation:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Edge: two successive calls write two distinct log files (no overwrite)."""
-        # Arrange — mock datetime.utcnow to return two distinct timestamps
-        t1 = datetime(2024, 1, 1, 0, 0, 1)
-        t2 = datetime(2024, 1, 1, 0, 0, 2)
+        # Arrange — use a fake WallClock that returns two distinct timestamps
+        t1 = datetime(2024, 1, 1, 0, 0, 1, tzinfo=timezone.utc)
+        t2 = datetime(2024, 1, 1, 0, 0, 2, tzinfo=timezone.utc)
         call_count = {"n": 0}
 
-        class _FakeDatetime:
-            @classmethod
-            def now(cls, tz: object = None) -> datetime:
+        class _FakeWallClock:
+            def now(self) -> datetime:
                 call_count["n"] += 1
                 return t1 if call_count["n"] <= 2 else t2
 
-        # Patch datetime inside schema module
-        monkeypatch.setattr(schema_module, "datetime", _FakeDatetime)
+        # Patch WallClock inside schema module so the default clock
+        # created by write_validation_log() returns controlled timestamps.
+        monkeypatch.setattr(schema_module, "WallClock", _FakeWallClock)
 
         cleaner = DataCleaner(tmp_validation_config)
         df = _valid_bronze_df()

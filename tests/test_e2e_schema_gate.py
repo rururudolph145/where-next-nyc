@@ -456,7 +456,6 @@ def test_edge_repeat_runs_produce_distinct_log_files(tmp_path: Path) -> None:
     """
     import app.ingestion.schema as schema_module
     from datetime import datetime as _real_datetime
-
     from datetime import timezone as _tz
 
     timestamps = [
@@ -465,15 +464,16 @@ def test_edge_repeat_runs_produce_distinct_log_files(tmp_path: Path) -> None:
     ]
     call_index: list[int] = [0]
 
-    class _FakeDatetime:
-        @classmethod
-        def now(cls, tz: Any = None) -> _real_datetime:
+    class _FakeWallClock:
+        """Fake WallClock that cycles through predetermined timestamps."""
+
+        def now(self) -> _real_datetime:
             ts = timestamps[min(call_index[0], len(timestamps) - 1)]
             call_index[0] += 1
             return ts
 
-    original_datetime = schema_module.datetime
-    schema_module.datetime = _FakeDatetime  # type: ignore[misc,assignment]
+    original_wallclock = schema_module.WallClock
+    schema_module.WallClock = _FakeWallClock  # type: ignore[misc,assignment]
 
     try:
         bronze_df = _valid_bronze_df()
@@ -506,7 +506,7 @@ def test_edge_repeat_runs_produce_distinct_log_files(tmp_path: Path) -> None:
         c2.run()
 
     finally:
-        schema_module.datetime = original_datetime  # type: ignore[misc,assignment]
+        schema_module.WallClock = original_wallclock  # type: ignore[misc,assignment]
 
     # Assert — two distinct log files
     log_dir = shared_silver / "_validation"

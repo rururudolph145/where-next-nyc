@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import pandera.pandas as pa  # type: ignore[import-untyped]
 from pandera.errors import SchemaErrors  # type: ignore[import-untyped]
+
+from app.core.clock import Clock, WallClock
 
 # ---------------------------------------------------------------------------
 # Schema definition
@@ -78,6 +79,8 @@ def write_validation_log(
     log_dir: Path,
     df: pd.DataFrame,
     failure_reasons: list[str],
+    *,
+    clock: Clock | None = None,
 ) -> Path:
     """Write a timestamped validation log JSON to *log_dir*.
 
@@ -87,13 +90,16 @@ def write_validation_log(
         df: The DataFrame that was validated (used for row counts).
         failure_reasons: Empty list on a clean pass; list of failure messages
             on error.
+        clock: Optional ``Clock`` instance for deterministic time in tests.
+            Defaults to ``WallClock()`` when ``None``.
 
     Returns:
         Path to the log file that was written.
     """
     os.makedirs(log_dir, exist_ok=True)
 
-    now = datetime.now(timezone.utc)
+    _clock = clock or WallClock()
+    now = _clock.now()
     validated_at = now.isoformat().replace("+00:00", "Z")
     timestamp = now.strftime("%Y%m%dT%H%M%S")
 

@@ -21,6 +21,7 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 from mlflow.tracking import MlflowClient
 
+from app.core.clock import Clock, WallClock
 from app.core.config import load_config
 from app.ingestion.feature import build_centroid_lookup
 
@@ -42,6 +43,7 @@ _model_name: str = "ny_taxi_demand_model"
 _model_version: str | None = None
 _served_from_stage: str | None = None
 _config: dict[str, Any] = {}
+_clock: Clock = WallClock()
 
 
 def _load_predictions(config: dict[str, Any]) -> pd.DataFrame:
@@ -101,7 +103,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         _centroid_lookup = build_centroid_lookup(
             config["serving"]["zone_shapefile_path"]
         )
-        _generated_at = datetime.now(tz=timezone.utc).isoformat()
+        _generated_at = _clock.now().isoformat()
         df = _predictions_df
         if not df.empty and "model_version" in df.columns:
             _model_version = str(df["model_version"].iloc[0])
@@ -272,7 +274,7 @@ async def get_health() -> dict[str, Any]:
     else:
         last_bucket = _predictions_df["hour"].max()
         last_prediction_bucket = last_bucket.isoformat()
-        today = datetime.now(tz=timezone.utc).date()
+        today = _clock.now().date()
         # Treat naive timestamp as UTC per brief; clamp lag at 0.
         lag = (today - last_bucket.date()).days
         data_publication_lag_days = max(0, lag)
