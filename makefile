@@ -54,8 +54,12 @@ ifdef DEMO_MODE
 	DEMO_MODE=$(DEMO_MODE) docker compose -f $(COMPOSE_FILE) up -d
 	@echo "[demo] Waiting for Airflow scheduler..."
 	@sleep 5
-	@echo "[demo] Starting external trigger loop (Ctrl-C to stop)..."
-	@trap 'echo " [demo] Stopped."; exit 0' INT; \
+	@echo "[demo] Starting FastAPI server in background..."
+	@DEMO_MODE=$(DEMO_MODE) uv run uvicorn app.api.main:app --host 0.0.0.0 --port 8000 > /tmp/refresh_15min_demo_uvicorn.log 2>&1 & \
+	UVICORN_PID=$$!; \
+	echo "[demo] uvicorn PID=$$UVICORN_PID (log: /tmp/refresh_15min_demo_uvicorn.log)"; \
+	echo "[demo] Starting external trigger loop (Ctrl-C to stop)..."; \
+	trap "echo ' [demo] Stopped.'; kill $$UVICORN_PID 2>/dev/null; exit 0" INT; \
 	while true; do \
 		docker compose -f $(COMPOSE_FILE) exec -T airflow-scheduler airflow dags trigger refresh_15min_dag || true; \
 		sleep 2; \
@@ -67,5 +71,6 @@ endif
 
 demo-stop:
 	docker compose -f $(COMPOSE_FILE) down
+	@pkill -f "uvicorn app.api.main:app" || true
 
 .PHONY: setup run mlflow test clean remove airflow-init airflow-up airflow-down demo demo-stop
