@@ -353,7 +353,7 @@ Promotes the orchestrator out of `experiment/` and into a first-class lane (C00 
   - Depends on: PBI 30 (CI gates)
   - Difficulty: S (narrowed from M after scope split)
 
-- [ ] **PBI 25b — `refresh_15min_dag` (Ingestion → Inference Cadence)**
+- [x] **PBI 25b — `refresh_15min_dag` (Ingestion → Inference Cadence)** — *shipped in `00b36f8`* — 16 commits across 3 legs; 8-task DAG with watermark idempotency, `_SpeedupClock` for 450× demo cadence, `/health` clock transparency, `make demo DEMO_MODE=1` UX; 418 tests passed / 6 skipped / +57 net.
   - Add `orchestration/dags/refresh_15min_dag.py` — ingest → validate (PBI 19) → feature → predict → log (PBI 22)
   - Driven by the injected `Clock` from PBI 25a, not `datetime.utcnow()`
   - Idempotent on `(date, bucket)` watermark — rerunning the same bucket-date pair is a no-op
@@ -651,7 +651,7 @@ PBI 22 (prediction log + actuals) ──> PBI 23 (drift detector) ──> PBI 24
 | Done | Order | PBI | Rationale |
 |------|-------|-----|-----------|
 | [x] | 16 | ~~PBI 25a~~ | ~~Orchestrator foundation: `Clock` abstraction + `orchestration/` skeleton (no DAGs). Unblocks 25b / 25c / 25d. **Split 2026-05-30** from the monolithic 25a so the `Clock` refactor lands isolated from any specific DAG. Depends on PBI 30.~~ — *shipped in `ff466e9`* |
-| [ ] | 17 | PBI 25b | `refresh_15min_dag` — ingestion → inference cadence; delivers the `DEMO_MODE=1 make demo` story. Independently shippable in parallel with 25c. Depends on PBI 25a. |
+| [x] | 17 | ~~PBI 25b~~ | ~~`refresh_15min_dag` — ingestion → inference cadence; delivers the `DEMO_MODE=1 make demo` story. Independently shippable in parallel with 25c. Depends on PBI 25a.~~ — *shipped in `00b36f8`* |
 | [ ] | 18 | PBI 25c | `train_monthly_dag` — training + PBI 20 registry gate. Independently shippable in parallel with 25b. Depends on PBI 25a, PBI 20. |
 
 ### Open — Phase E · Closed-loop monitoring (~24h)
