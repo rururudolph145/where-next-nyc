@@ -19,6 +19,7 @@ forbidden in this file.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -32,7 +33,14 @@ from app.core.watermark import is_complete, mark_complete
 # Side-effect: register the active clock for this process.
 from orchestration.dags._clock_factory import make_clock  # noqa: F401
 
-make_clock()
+# Run the clock factory once per process.  Airflow re-parses DAG files
+# periodically; without this guard, DEMO_MODE=1 would start a new
+# _SpeedupClock background thread on each parse (the prior threads would
+# leak, since their .stop() is never called).
+_CLOCK_INITIALIZED_KEY = "_REFRESH_15MIN_CLOCK_INITIALIZED"
+if not os.environ.get(_CLOCK_INITIALIZED_KEY):
+    make_clock()
+    os.environ[_CLOCK_INITIALIZED_KEY] = "1"
 
 logger = logging.getLogger(__name__)
 
