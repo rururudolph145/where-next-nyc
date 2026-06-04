@@ -274,7 +274,9 @@ async def get_health() -> dict[str, Any]:
     else:
         last_bucket = _predictions_df["hour"].max()
         last_prediction_bucket = last_bucket.isoformat()
-        today = _clock.now().date()
+        # Use active clock so DEMO_MODE=1 produces self-consistent timestamps:
+        # the lag is computed against simulated time, matching simulated_now.
+        today = get_active_clock().now().date()
         # Treat naive timestamp as UTC per brief; clamp lag at 0.
         lag = (today - last_bucket.date()).days
         data_publication_lag_days = max(0, lag)

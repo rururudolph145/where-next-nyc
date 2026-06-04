@@ -9,6 +9,7 @@ Verifies that:
 from __future__ import annotations
 
 import time
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -51,7 +52,7 @@ _FAKE_CONFIG: dict[str, Any] = {
 
 
 @pytest.fixture(autouse=True)
-def _reset_active_clock() -> Any:
+def _reset_active_clock() -> Iterator[None]:
     """Reset the process-global active clock after each test.
 
     Prevents leakage between tests that call set_active_clock().
