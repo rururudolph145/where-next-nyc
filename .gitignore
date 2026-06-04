@@ -61,6 +61,10 @@ reference/
 # Implementation checklists
 implementation_checklist/
 
+# Watermarks (DAG idempotency markers — keep .gitkeep only)
+data/watermarks/
+!data/watermarks/refresh_15min/.gitkeep
+
 # Orchestration
 orchestration/logs/
 orchestration/.env

@@ -23,7 +23,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).parent.parent
 
 # Files expected in orchestration/dags/ as of PBI 25b Leg 1.
-_ALLOWED_PY_FILES = {"__init__.py", "_clock_factory.py"}
+_ALLOWED_PY_FILES = {"__init__.py", "_clock_factory.py", "refresh_15min_dag.py"}
 
 
 class TestDagsDirectoryBaseline:
