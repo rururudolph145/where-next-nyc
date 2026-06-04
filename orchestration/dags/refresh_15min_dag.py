@@ -23,9 +23,9 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from airflow import DAG
-from airflow.exceptions import AirflowSkipException
-from airflow.operators.python import PythonOperator
+from airflow import DAG  # type: ignore[import-not-found]
+from airflow.exceptions import AirflowSkipException  # type: ignore[import-not-found]
+from airflow.operators.python import PythonOperator  # type: ignore[import-not-found]
 
 from app.core.clock import get_active_clock
 from app.core.watermark import is_complete, mark_complete
