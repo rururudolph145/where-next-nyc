@@ -38,4 +38,34 @@ airflow-up:
 airflow-down:
 	docker compose -f orchestration/docker-compose.yaml down
 
-.PHONY: setup run mlflow test clean remove airflow-init airflow-up airflow-down
+# --- Demo (PBI 25b) -----------------------------------------------------------
+# Static demo:  make demo
+# Live demo:    make demo DEMO_MODE=1
+#   Live mode brings up the Airflow stack and triggers refresh_15min_dag every
+#   2 seconds (simulating 15 min at 450x speedup). Press Ctrl-C to stop.
+# Teardown:     make demo-stop
+
+COMPOSE_FILE = orchestration/docker-compose.yaml
+
+demo:
+ifdef DEMO_MODE
+	@echo "[demo] DEMO_MODE=$(DEMO_MODE) -- live cadence demo"
+	@test -f orchestration/.env || { echo "ERROR: orchestration/.env not found. Run: cp orchestration/.env.example orchestration/.env"; exit 1; }
+	DEMO_MODE=$(DEMO_MODE) docker compose -f $(COMPOSE_FILE) up -d
+	@echo "[demo] Waiting for Airflow scheduler..."
+	@sleep 5
+	@echo "[demo] Starting external trigger loop (Ctrl-C to stop)..."
+	@trap 'echo " [demo] Stopped."; exit 0' INT; \
+	while true; do \
+		docker compose -f $(COMPOSE_FILE) exec -T airflow-scheduler airflow dags trigger refresh_15min_dag || true; \
+		sleep 2; \
+	done
+else
+	@echo "[demo] Static demo -- serving cached predictions"
+	uv run uvicorn app.api.main:app --host 0.0.0.0 --port 8000
+endif
+
+demo-stop:
+	docker compose -f $(COMPOSE_FILE) down
+
+.PHONY: setup run mlflow test clean remove airflow-init airflow-up airflow-down demo demo-stop
