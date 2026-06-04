@@ -232,16 +232,17 @@ class TestHealthHappyPath:
     def test_ac1_health_happy_path_returns_ok_shape(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """AC-1: 200 response has status=ok, simulated=true, non-negative lag, model_version string.
+        """AC-1: 200 response has status=ok, simulated is a bool, non-negative lag, model_version string.
 
         Arrange: non-empty predictions df; MlflowClient returns Production version "3".
-        Act: GET /health.
-        Assert: 200, status=="ok", simulated==True, model_version=="3",
+        Act: GET /health (DEMO_MODE unset → simulated=False per PBI 25b AC #4).
+        Assert: 200, status=="ok", simulated==False, model_version=="3",
                 data_publication_lag_days >= 0 (int), last_prediction_bucket parseable.
         """
         import app.api.main as serving_module
 
         # Arrange
+        monkeypatch.delenv("DEMO_MODE", raising=False)
         predictions = _make_predictions_df("2021-03-01 00:00:00")
         monkeypatch.setattr(serving_module, "_predictions_df", predictions)
 
@@ -263,7 +264,9 @@ class TestHealthHappyPath:
         assert resp.status_code == 200
         body: dict[str, Any] = resp.json()
         assert body["status"] == "ok"
-        assert body["simulated"] is True
+        assert (
+            body["simulated"] is False
+        )  # PBI 25b: dynamic, False when DEMO_MODE unset
         assert body["model_version"] == "3"
         assert isinstance(body["data_publication_lag_days"], int)
         assert body["data_publication_lag_days"] >= 0
@@ -364,11 +367,12 @@ class TestHealthDegraded:
         Arrange: non-empty predictions df; MlflowClient returns empty version list.
         Act: GET /health.
         Assert: 200, status=="degraded", model_version is null,
-                simulated==True, freshness fields are non-null.
+                simulated==False (DEMO_MODE unset per PBI 25b AC #4), freshness fields are non-null.
         """
         import app.api.main as serving_module
 
         # Arrange
+        monkeypatch.delenv("DEMO_MODE", raising=False)
         predictions = _make_predictions_df("2021-03-01 00:00:00")
         monkeypatch.setattr(serving_module, "_predictions_df", predictions)
 
@@ -385,7 +389,9 @@ class TestHealthDegraded:
         assert resp.status_code == 200
         body: dict[str, Any] = resp.json()
         assert body["status"] == "degraded"
-        assert body["simulated"] is True
+        assert (
+            body["simulated"] is False
+        )  # PBI 25b: dynamic, False when DEMO_MODE unset
         assert body["model_version"] is None
         # Freshness fields must still be populated even without a model
         assert body["last_prediction_bucket"] is not None
@@ -665,20 +671,25 @@ class TestModelInfoNoProduction:
 
 
 class TestHeatmapSimulatedFlag:
-    """AC-9: /heatmap top-level envelope includes simulated=true."""
+    """AC-9: /heatmap top-level envelope includes simulated flag (PBI 25b: dynamic)."""
 
-    def test_ac9_heatmap_envelope_contains_simulated_true(
+    def test_ac9_heatmap_envelope_contains_simulated_flag(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """AC-9: 'simulated' key is present and equals True in the /heatmap response envelope.
+        """AC-9: 'simulated' key is present in the /heatmap response envelope.
 
-        Arrange: non-empty predictions df with centroid and zone lookups.
+        PBI 25b update: simulated is now dynamic (True only when DEMO_MODE=1).
+        Without DEMO_MODE, the flag is False. The key invariant is that 'simulated'
+        is always present and is a bool.
+
+        Arrange: non-empty predictions df with centroid and zone lookups; DEMO_MODE unset.
         Act: GET /heatmap (no hour param → latest hour).
-        Assert: body["simulated"] is True.
+        Assert: body["simulated"] is a bool (False when DEMO_MODE unset).
         """
         import app.api.main as serving_module
 
         # Arrange
+        monkeypatch.delenv("DEMO_MODE", raising=False)
         predictions = pd.DataFrame(
             {
                 "pulocationid": [1, 2, 3],
@@ -714,7 +725,8 @@ class TestHeatmapSimulatedFlag:
         assert resp.status_code == 200
         body: dict[str, Any] = resp.json()
         assert "simulated" in body
-        assert body["simulated"] is True
+        assert isinstance(body["simulated"], bool)
+        assert body["simulated"] is False  # PBI 25b: False when DEMO_MODE unset
 
 
 # ---------------------------------------------------------------------------

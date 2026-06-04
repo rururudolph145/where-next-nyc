@@ -774,13 +774,14 @@ class TestHealthEndpoint:
     ) -> None:
         """GET /health returns 200 ok with model_version when parquet loaded and Production version exists.
 
-        Arrange: non-empty _predictions_df; MlflowClient returns one Production version.
+        Arrange: non-empty _predictions_df; MlflowClient returns one Production version; DEMO_MODE unset.
         Act: GET /health.
-        Assert: 200, status=="ok", simulated==True, model_version is a non-empty string,
+        Assert: 200, status=="ok", simulated==False (PBI 25b: dynamic), model_version is a non-empty string,
                 data_publication_lag_days >= 0.
         """
         import app.api.main as serving_module
 
+        monkeypatch.delenv("DEMO_MODE", raising=False)
         predictions = pd.DataFrame(
             {
                 "pulocationid": [1],
@@ -803,7 +804,9 @@ class TestHealthEndpoint:
         assert resp.status_code == 200
         body: dict[str, Any] = resp.json()
         assert body["status"] == "ok"
-        assert body["simulated"] is True
+        assert (
+            body["simulated"] is False
+        )  # PBI 25b: dynamic, False when DEMO_MODE unset
         assert isinstance(body["model_version"], str)
         assert body["model_version"] != ""
         assert isinstance(body["data_publication_lag_days"], int)
@@ -820,6 +823,7 @@ class TestHealthEndpoint:
         """
         import app.api.main as serving_module
 
+        monkeypatch.delenv("DEMO_MODE", raising=False)
         predictions = pd.DataFrame(
             {
                 "pulocationid": [1],
@@ -842,7 +846,9 @@ class TestHealthEndpoint:
         body = resp.json()
         assert body["status"] == "degraded"
         assert body["model_version"] is None
-        assert body["simulated"] is True
+        assert (
+            body["simulated"] is False
+        )  # PBI 25b: dynamic, False when DEMO_MODE unset
 
     def test_get_health_returns_503_when_predictions_not_loaded(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1075,22 +1081,29 @@ class TestModelInfoEndpoint:
 
 
 class TestHeatmapSimulatedFlag:
-    """Tests for the simulated flag added to /heatmap (PBI 27 AC #9)."""
+    """Tests for the simulated flag added to /heatmap (PBI 27 AC #9, PBI 25b update)."""
 
     def test_get_heatmap_envelope_contains_simulated_flag(
-        self, client: TestClient
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """GET /heatmap envelope includes 'simulated': true at the top level.
+        """GET /heatmap envelope includes 'simulated' bool at the top level.
 
-        Arrange: standard client fixture (non-empty predictions).
+        PBI 25b update: simulated is dynamic (DEMO_MODE env var).
+        DEMO_MODE unset → simulated=False.
+
+        Arrange: standard client fixture (non-empty predictions); DEMO_MODE unset.
         Act: GET /heatmap.
-        Assert: body["simulated"] is True.
+        Assert: body["simulated"] is False.
         """
+        monkeypatch.delenv("DEMO_MODE", raising=False)
         resp = client.get("/heatmap")
 
         assert resp.status_code == 200
         body: dict[str, Any] = resp.json()
-        assert body["simulated"] is True
+        assert isinstance(body["simulated"], bool)
+        assert (
+            body["simulated"] is False
+        )  # PBI 25b: dynamic, False when DEMO_MODE unset
 
 
 # ---------------------------------------------------------------------------

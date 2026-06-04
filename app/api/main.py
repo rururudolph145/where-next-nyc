@@ -21,7 +21,7 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 from mlflow.tracking import MlflowClient
 
-from app.core.clock import Clock, WallClock
+from app.core.clock import Clock, WallClock, get_active_clock
 from app.core.config import load_config
 from app.ingestion.feature import build_centroid_lookup
 
@@ -233,7 +233,7 @@ async def get_heatmap(
 
     return {
         "generated_at": _generated_at,
-        "simulated": True,
+        "simulated": os.environ.get("DEMO_MODE") == "1",
         "model_version": _model_version,
         "served_from_stage": _served_from_stage,
         "hour": target_hour.isoformat(),
@@ -291,13 +291,18 @@ async def get_health() -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
 
-    return {
+    demo_mode = os.environ.get("DEMO_MODE") == "1"
+    payload: dict[str, Any] = {
         "status": status,
-        "simulated": True,
+        "simulated": demo_mode,
         "data_publication_lag_days": data_publication_lag_days,
         "last_prediction_bucket": last_prediction_bucket,
         "model_version": model_version,
     }
+    if demo_mode:
+        payload["simulated_now"] = get_active_clock().now().isoformat()
+        payload["wall_clock_now"] = datetime.now(tz=timezone.utc).isoformat()
+    return payload
 
 
 @app.get("/model-info")
