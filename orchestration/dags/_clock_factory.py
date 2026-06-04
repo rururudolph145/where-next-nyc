@@ -17,7 +17,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from app.core.clock import Clock, SimulatedClock, WallClock
+from app.core.clock import Clock, SimulatedClock, WallClock, set_active_clock
 
 
 class _SpeedupClock:
@@ -83,10 +83,18 @@ _DEMO_SPEEDUP = 450
 def make_clock() -> Clock:
     """Return a ``Clock`` appropriate for the current execution mode.
 
+    As a side effect, registers the returned clock as the process-global
+    active clock via ``set_active_clock``.  This allows ``app/api/main.py``
+    to read the active clock via ``get_active_clock()`` without importing
+    from ``orchestration/``.
+
     Returns:
         ``WallClock`` when ``DEMO_MODE`` env var is absent or not ``"1"``.
         ``_SpeedupClock(start=2024-06-03T00:00Z, speedup=450)`` otherwise.
     """
     if os.environ.get("DEMO_MODE") == "1":
-        return _SpeedupClock(start=_DEMO_START, speedup=_DEMO_SPEEDUP)
-    return WallClock()
+        clock: Clock = _SpeedupClock(start=_DEMO_START, speedup=_DEMO_SPEEDUP)
+    else:
+        clock = WallClock()
+    set_active_clock(clock)
+    return clock

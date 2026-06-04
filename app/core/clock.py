@@ -10,6 +10,12 @@ Provides a ``Clock`` protocol and two concrete implementations:
 Thread-safety note: ``SimulatedClock`` is NOT thread-safe. Callers requiring
 concurrent advance from multiple threads must add their own locking around
 ``.advance()`` and ``.now()`` calls.
+
+Single-writer registry: ``set_active_clock`` and ``get_active_clock`` expose a
+process-global active clock.  Orchestration sets this once at startup via the
+``make_clock()`` factory; FastAPI handlers only read via ``get_active_clock()``.
+The registry is NOT thread-safe for concurrent writes — single-writer assumption
+applies.
 """
 
 from __future__ import annotations
@@ -80,3 +86,33 @@ class SimulatedClock:
                 f"got {delta!r}. Time does not go backward."
             )
         self._current += delta
+
+
+# ---------------------------------------------------------------------------
+# Process-global active clock registry
+# ---------------------------------------------------------------------------
+
+_active_clock: Clock = WallClock()
+
+
+def set_active_clock(clock: Clock) -> None:
+    """Register the active clock; orchestration sets this once at startup.
+
+    Not thread-safe (single-writer assumption: the DAG / make_clock factory
+    writes once at process start; FastAPI handlers only read).
+
+    Args:
+        clock: The ``Clock`` implementation to register as the active clock.
+    """
+    global _active_clock  # noqa: PLW0603
+    _active_clock = clock
+
+
+def get_active_clock() -> Clock:
+    """Return the currently active clock (defaults to ``WallClock``).
+
+    Returns:
+        The ``Clock`` instance registered via ``set_active_clock``, or a
+        ``WallClock`` if none has been registered.
+    """
+    return _active_clock
