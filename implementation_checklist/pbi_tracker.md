@@ -353,7 +353,7 @@ Promotes the orchestrator out of `experiment/` and into a first-class lane (C00 
   - Depends on: PBI 30 (CI gates)
   - Difficulty: S (narrowed from M after scope split)
 
-- [x] **PBI 25b — `refresh_15min_dag` (Ingestion → Inference Cadence)** — *shipped in `00b36f8`* — 16 commits across 3 legs; 8-task DAG with watermark idempotency, `_SpeedupClock` for 450× demo cadence, `/health` clock transparency, `make demo DEMO_MODE=1` UX; 418 tests passed / 6 skipped / +57 net.
+- [x] **PBI 25b — `refresh_15min_dag` (Ingestion → Inference Cadence)** — *shipped in `00b36f8`, redesigned in `8a17bda…fc52a8f` (PBI 25b FIX, 2026-06-11)* — Original 16 commits shipped an 8-task DAG with `_SpeedupClock` for 450× demo cadence; the clock was set process-global in the dag-processor but task callables run in the worker, so DEMO_MODE=1 silently fell back to WallClock. **FIX** replaces the clock-illusion with a watermark-advancing pipeline: data watermark IS the simulation position (JSON control file at `data/watermarks/refresh_15min/.current_watermark`); DAG grows to 11 tasks; bronze is cumulative (lower bound frozen at `ingest.seed_start = 2021-01-18`); boundary stop at `2021-03-31T23:59:57`. `WallClock`/`SimulatedClock` classes retained for `/health`. 439 tests passed / 8 skipped (was 418/6); validator loop closed in one pass.
   - Add `orchestration/dags/refresh_15min_dag.py` — ingest → validate (PBI 19) → feature → predict → log (PBI 22)
   - Driven by the injected `Clock` from PBI 25a, not `datetime.utcnow()`
   - Idempotent on `(date, bucket)` watermark — rerunning the same bucket-date pair is a no-op
