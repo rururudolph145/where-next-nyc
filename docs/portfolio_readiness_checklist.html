@@ -294,7 +294,7 @@
       <div class="check-box"></div>
       <div class="item-body">
         <div class="item-title">Remove or populate empty package placeholders</div>
-        <div class="item-detail"><code>app/domain/</code> and <code>app/monitoring/</code> contain only empty <code>__init__.py</code>. Either delete or fill them.</div>
+        <div class="item-detail"><code>app/domain/</code> contains only an empty <code>__init__.py</code> — either delete or fill it. (<code>app/monitoring/</code> is now populated by PBI 22's <code>prediction_log.py</code> + <code>actuals_join.py</code>; PBIs 23/24 will add <code>drift.py</code> + <code>alert.py</code>.)</div>
       </div>
       <span class="pill weak">Weak</span>
     </li>
@@ -413,8 +413,8 @@
     <li>
       <div class="check-box"></div>
       <div class="item-body">
-        <div class="item-title">Add drift monitoring (Evidently)</div>
-        <div class="item-detail"><code>app/monitoring/</code> is an empty placeholder. Add a drift report comparing recent feature/label distributions to training.</div>
+        <div class="item-title">Add drift monitoring (Evidently) — PBIs 23 + 24</div>
+        <div class="item-detail">PBI 22 has shipped the prediction log + actuals join (the data foundation). PBI 23 adds <code>app/monitoring/drift.py</code> (Evidently <code>DataDriftPreset</code> + <code>RegressionPreset</code> over the joined frame); PBI 24 adds <code>alert.py</code> that emits a <code>retrain_required</code> marker. PBI 25d then wires those into the <code>monitor_hourly_dag</code> with a <code>FileSensor</code> hand-off to the training DAG.</div>
       </div>
       <span class="pill missing">Missing</span>
     </li>
@@ -453,16 +453,16 @@
     <li>
       <div class="check-box"></div>
       <div class="item-body">
-        <div class="item-title">Promote Airflow DAG out of <code>experiment/</code></div>
-        <div class="item-detail">The 15-min orchestration is currently under <code>experiment/orchestration/</code>, signaling "not production". Move to <code>orchestration/</code> at repo root and document.</div>
+        <div class="item-title">Promote Airflow DAGs out of <code>experiment/</code> (PBIs 25a–25d)</div>
+        <div class="item-detail">The 15-min orchestration is currently under <code>experiment/orchestration/</code>, signaling "not production". The work is sequenced as four PBIs: <strong>25a</strong> moves the directory to <code>orchestration/</code> and adds the <code>Clock</code> abstraction (foundation, no DAGs); <strong>25b</strong> ships <code>refresh_15min_dag</code> (ingestion → inference cadence); <strong>25c</strong> ships <code>train_monthly_dag</code> (training + PBI 20 registry gate); <strong>25d</strong> ships <code>monitor_hourly_dag</code> (drift → retrain feedback loop, after PBIs 23 + 24). 25b and 25c are independently shippable in parallel once 25a lands.</div>
       </div>
       <span class="pill partial">Partial</span>
     </li>
     <li>
       <div class="check-box"></div>
       <div class="item-body">
-        <div class="item-title">Add idempotency + backfill support to ingestion</div>
-        <div class="item-detail">Pipeline is a sequential Python script. Make each stage idempotent (write-once with watermark) and add a <code>--backfill</code> mode.</div>
+        <div class="item-title">Add idempotency + backfill support to ingestion (PBI 25b)</div>
+        <div class="item-detail">Pipeline is a sequential Python script. <code>refresh_15min_dag</code> in PBI 25b owns the <code>(date, bucket)</code> watermark contract — rerunning the same bucket is a no-op, and <code>airflow dags backfill</code> covers historical reruns. Each ingestion stage becomes write-once under that watermark.</div>
       </div>
       <span class="pill weak">Weak</span>
     </li>
