@@ -154,20 +154,26 @@ class TestDagShape:
         "task_id",
         [
             "decide_bucket",
+            "read_watermark",
+            "check_no_new_data",
             "check_watermark",
             "ingest",
             "validate",
             "feature",
             "predict",
             "log_predict",
+            "advance_watermark",
             "write_done",
         ],
     )
     def test_ac2_task_id_string_present_in_source(self, task_id: str) -> None:
-        """AC #2 — each of the 8 task IDs appears in the DAG source.
+        """AC #2 — each of the 11 task IDs appears in the DAG source.
 
-        One parametrised case per task — a missing task_id string means the
-        task was not defined or was renamed.
+        PBI 25b FIX grows the chain 8 -> 11: read_watermark,
+        check_no_new_data, and advance_watermark are added for the
+        watermark-advancing incremental pipeline. One parametrised case per
+        task — a missing task_id string means the task was not defined or was
+        renamed.
         """
         # Arrange
         source = _dag_source()
@@ -258,7 +264,7 @@ class TestDagShape:
         assert dag.schedule_interval == "*/15 * * * *"
         assert dag.catchup is False
         assert dag.max_active_runs == 1
-        assert len(dag.tasks) == 8
+        assert len(dag.tasks) == 11
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +506,207 @@ class TestDagIdempotency:
         assert not is_complete(root=root, day=day_b, bucket=bucket), (
             f"Marking {day_a}/bucket-{bucket} complete must not affect {day_b}/bucket-{bucket}. "
             "Watermark key is (day, bucket); each day is independent."
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestNoNewData — AC #4 (re-run no-op when no new data / dataset boundary)
+# ---------------------------------------------------------------------------
+
+
+class TestNoNewData:
+    """``_check_no_new_data`` callable raises AirflowSkipException at boundary.
+
+    AC #4: when ``window_start`` is at or past the dataset's last timestamp
+    (``2021-03-31 23:59:57``), the ``check_no_new_data`` task must raise
+    ``AirflowSkipException`` so the whole run is skipped without ingesting
+    empty data.
+
+    Both tests are guarded with ``pytest.skip`` when Airflow is absent — the
+    DAG module imports AirflowSkipException at module level so the callable
+    is only importable when Airflow is installed.
+    """
+
+    def test_ac4_check_no_new_data_raises_skip_at_boundary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC #4 — _check_no_new_data raises AirflowSkipException when
+        window_start == dataset max (boundary reached).
+
+        Arrange: fake ti XCom returns window_start == dataset boundary;
+            monkeypatch load_config so _dataset_max returns a known value.
+        Act: call _check_no_new_data.
+        Assert: AirflowSkipException is raised.
+        """
+        try:
+            from airflow.exceptions import AirflowSkipException  # type: ignore[import]
+        except ModuleNotFoundError:
+            pytest.skip("airflow not installed — AirflowSkipException not importable")
+
+        import importlib
+        import sys
+
+        dag_module_name = "orchestration.dags.refresh_15min_dag"
+        if dag_module_name not in sys.modules:
+            dag_module = importlib.import_module(dag_module_name)
+        else:
+            dag_module = sys.modules[dag_module_name]
+
+        # The dataset boundary is 2021-03-31 23:59:57 (end_year_month=2021-03).
+        # Patch load_config inside the dag module so _dataset_max resolves cleanly.
+        _FAKE_CFG = {
+            "ingest": {
+                "end_year_month": "2021-03",
+                "slice_duration": "15min",
+                "seed_start": "2021-01-18T00:00:00",
+            }
+        }
+
+        # Arrange: window_start is at the dataset max — no data left
+        ti = MagicMock()
+        ti.xcom_pull.return_value = {
+            "window_start": "2021-03-31T23:59:57",
+            "window_end": "2021-04-01T00:14:57",
+        }
+        context = {"ti": ti}
+
+        with patch(
+            "app.core.config.load_config",
+            return_value=_FAKE_CFG,
+        ):
+            with pytest.raises(AirflowSkipException):
+                dag_module._check_no_new_data(**context)
+
+    def test_ac4_check_no_new_data_does_not_skip_before_boundary(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC #4 (negative path) — no skip when window_start is before the boundary.
+
+        Arrange: window_start well before dataset end (2021-01-18T00:00:00).
+        Act: call _check_no_new_data.
+        Assert: no exception raised (the run proceeds normally).
+        """
+        try:
+            from airflow.exceptions import AirflowSkipException as _  # noqa: F401
+        except ModuleNotFoundError:
+            pytest.skip("airflow not installed — AirflowSkipException not importable")
+
+        import importlib
+        import sys
+
+        dag_module_name = "orchestration.dags.refresh_15min_dag"
+        if dag_module_name not in sys.modules:
+            dag_module = importlib.import_module(dag_module_name)
+        else:
+            dag_module = sys.modules[dag_module_name]
+
+        _FAKE_CFG = {
+            "ingest": {
+                "end_year_month": "2021-03",
+                "slice_duration": "15min",
+                "seed_start": "2021-01-18T00:00:00",
+            }
+        }
+
+        # Arrange: window_start well before dataset boundary
+        ti = MagicMock()
+        ti.xcom_pull.return_value = {
+            "window_start": "2021-01-18T00:00:00",
+            "window_end": "2021-01-18T00:15:00",
+        }
+        context = {"ti": ti}
+
+        # Act + Assert — must not raise
+        with patch(
+            "app.core.config.load_config",
+            return_value=_FAKE_CFG,
+        ):
+            dag_module._check_no_new_data(**context)  # no exception expected
+
+
+# ---------------------------------------------------------------------------
+# TestCumulativeBronze — regression guard for the sliding-window bug (PBI 25b FIX)
+# ---------------------------------------------------------------------------
+
+
+class TestCumulativeBronze:
+    """``_ingest`` must use ``seed_start`` as the lower bound, not the watermark.
+
+    Regression guard for the C1 bug fixed in PBI 25b FIX: previously
+    ``_ingest`` read ``window_start`` from the XCom (the advancing watermark),
+    producing a SLIDING 15-min slice and overwriting bronze each run with
+    only the most recent slice. The brief mandates a CUMULATIVE window:
+    lower bound frozen at ``ingest.seed_start``, upper bound advances.
+
+    If a future refactor reintroduces the sliding behaviour, this test fails.
+    """
+
+    def test_ingest_uses_seed_start_not_advancing_watermark(
+        self, tmp_path: Path
+    ) -> None:
+        """``Ingestion().run`` is called with ``window_start == seed_start``
+        even when the XCom watermark has already advanced well past it.
+
+        Arrange:
+        - XCom returns an ADVANCED watermark (2021-02-15) as ``window_start``.
+        - ``ingest.seed_start`` in config is the FROZEN lower bound
+          (2021-01-18T00:00:00).
+        - Patch ``Ingestion`` so we can capture the kwargs without running.
+        Act: invoke ``_ingest``.
+        Assert: ``Ingestion().run`` was called with
+        ``window_start == datetime(2021, 1, 18, 0, 0, 0)`` (seed), and
+        ``window_end`` taken from the XCom (advanced).
+        """
+        try:
+            from airflow.exceptions import AirflowSkipException as _  # noqa: F401
+        except ModuleNotFoundError:
+            pytest.skip("airflow not installed — DAG callable cannot be imported")
+
+        import importlib
+        import sys
+        from datetime import datetime as _dt
+
+        dag_module_name = "orchestration.dags.refresh_15min_dag"
+        if dag_module_name not in sys.modules:
+            dag_module = importlib.import_module(dag_module_name)
+        else:
+            dag_module = sys.modules[dag_module_name]
+
+        # Arrange: XCom carries an ADVANCED watermark (well past seed_start)
+        ti = MagicMock()
+        ti.xcom_pull.return_value = {
+            "window_start": "2021-02-15T00:00:00",  # advanced, must be IGNORED by _ingest
+            "window_end": "2021-02-15T00:15:00",
+        }
+        context = {"ti": ti}
+
+        fake_config = {
+            "ingest": {
+                "seed_start": "2021-01-18T00:00:00",  # the FROZEN lower bound
+                "slice_duration": "15min",
+            }
+        }
+
+        mock_ingestion_cls = MagicMock()
+        mock_instance = MagicMock()
+        mock_ingestion_cls.return_value = mock_instance
+
+        with patch("app.core.config.load_config", return_value=fake_config):
+            with patch("app.ingestion.ingest.Ingestion", mock_ingestion_cls):
+                # Act
+                dag_module._ingest(**context)
+
+        # Assert: Ingestion().run called once with seed_start as window_start
+        mock_instance.run.assert_called_once()
+        call_kwargs = mock_instance.run.call_args.kwargs
+        assert call_kwargs["window_start"] == _dt(2021, 1, 18, 0, 0, 0), (
+            f"_ingest must use seed_start ({_dt(2021, 1, 18, 0, 0, 0)}) as the "
+            f"lower bound, NOT the advancing watermark. Got {call_kwargs['window_start']}. "
+            "If this fails, the sliding-window bug has been reintroduced and "
+            "bronze will no longer be cumulative."
+        )
+        assert call_kwargs["window_end"] == _dt(2021, 2, 15, 0, 15, 0), (
+            "_ingest must read window_end from the XCom (advancing watermark)."
         )
 
 
@@ -968,67 +1175,52 @@ class TestReadmeDocumentation:
 
 
 # ---------------------------------------------------------------------------
-# TestClockGuard — I3: make_clock() called at most once per process on re-parse
+# TestNoClockInDag — PBI 25b FIX: the DAG no longer wires a clock
 # ---------------------------------------------------------------------------
 
 
-class TestClockGuard:
-    """Verify that the module-level guard prevents duplicate make_clock() calls.
+class TestNoClockInDag:
+    """The watermark-advancing DAG holds no clock state.
 
-    Airflow re-parses DAG files periodically.  Without the env-var sentinel,
-    each re-import under DEMO_MODE=1 would start a new _SpeedupClock background
-    thread without stopping the previous one.  The guard ensures make_clock()
-    runs exactly once per process, regardless of how many times the module is
-    reloaded.
+    PBI 25b FIX replaced the simulated clock with a DATA watermark: the
+    simulation position lives in ``data/watermarks/refresh_15min/
+    .current_watermark``, not in a ``_SpeedupClock`` background thread.  The
+    DAG therefore no longer imports ``make_clock`` nor carries the
+    ``_REFRESH_15MIN_CLOCK_INITIALIZED`` sentinel, so the I3 thread-leak
+    concern (a new daemon thread on every Airflow re-parse) is moot by
+    construction.  These source-level assertions run without Airflow.
     """
 
-    def test_make_clock_guard_prevents_double_init(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Re-importing refresh_15min_dag should not call make_clock() twice.
+    def test_dag_does_not_import_make_clock(self) -> None:
+        """The DAG source no longer imports make_clock from _clock_factory."""
+        # Arrange
+        source = _dag_source()
 
-        Arrange: clear the init sentinel from the environment; patch make_clock
-            to count invocations.
-        Act: importlib.reload() the DAG module twice.
-        Assert: make_clock call count == 1 (second reload is a no-op).
-        """
-        import importlib
-        import sys
-        from unittest.mock import patch as _patch
+        # Act / Assert
+        assert "make_clock" not in source, (
+            "refresh_15min_dag.py must not import or call make_clock(): the "
+            "simulation position is now a DATA watermark, not a clock thread."
+        )
 
-        # Skip if airflow is not installed — the DAG module cannot be imported.
-        try:
-            import airflow  # noqa: F401
-        except ModuleNotFoundError:
-            pytest.skip("airflow not installed — DAG module cannot be imported")
+    def test_dag_has_no_clock_sentinel(self) -> None:
+        """The DAG source no longer carries the clock-init env-var sentinel."""
+        # Arrange
+        source = _dag_source()
 
-        # Arrange: clear the sentinel so the first reload triggers make_clock.
-        monkeypatch.delenv("_REFRESH_15MIN_CLOCK_INITIALIZED", raising=False)
+        # Act / Assert
+        assert "_REFRESH_15MIN_CLOCK_INITIALIZED" not in source, (
+            "The clock-init sentinel was removed with the clock; the DAG "
+            "starts no background thread on re-parse."
+        )
 
-        dag_module_name = "orchestration.dags.refresh_15min_dag"
+    def test_dag_does_not_use_get_active_clock(self) -> None:
+        """The DAG reads no simulated clock; time access is the watermark."""
+        # Arrange
+        source = _dag_source()
 
-        # Ensure the module is loaded so we can reload it.
-        if dag_module_name not in sys.modules:
-            importlib.import_module(dag_module_name)
-
-        dag_module = sys.modules[dag_module_name]
-
-        with _patch(
-            "orchestration.dags._clock_factory.make_clock", autospec=True
-        ) as mock_make_clock:
-            # First reload — sentinel absent, make_clock must be called once.
-            monkeypatch.delenv("_REFRESH_15MIN_CLOCK_INITIALIZED", raising=False)
-            importlib.reload(dag_module)
-
-            # Second reload — sentinel now set, make_clock must NOT be called again.
-            importlib.reload(dag_module)
-
-            assert mock_make_clock.call_count == 1, (
-                f"make_clock() was called {mock_make_clock.call_count} times across "
-                "two reloads of refresh_15min_dag; expected exactly 1. "
-                "The _REFRESH_15MIN_CLOCK_INITIALIZED env-var guard must prevent "
-                "duplicate _SpeedupClock thread creation on Airflow re-parse."
-            )
-
-        # Cleanup: restore the module to a pristine state for other tests.
-        monkeypatch.delenv("_REFRESH_15MIN_CLOCK_INITIALIZED", raising=False)
+        # Act / Assert
+        assert "get_active_clock" not in source, (
+            "refresh_15min_dag.py must not read get_active_clock(): the "
+            "incremental position comes from read_watermark(), and the "
+            "validation-log timestamp uses a real wall clock."
+        )

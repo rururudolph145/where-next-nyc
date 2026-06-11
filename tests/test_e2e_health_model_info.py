@@ -58,6 +58,9 @@ from tests.conftest import make_mock_version
 # ---------------------------------------------------------------------------
 
 _FAKE_SERVING_CONFIG: dict[str, Any] = {
+    # PBI 25b FIX: /health derives the simulation position from the watermark,
+    # falling back to ingest.seed_start when no watermark file exists.
+    "ingest": {"seed_start": "2021-01-18T00:00:00"},
     "serving": {
         "predictions_path": "fake/predictions.parquet",
         "zone_shapefile_path": "fake/taxi_zones.shp",
@@ -76,6 +79,20 @@ def _make_predictions_df(hour_str: str = "2021-03-01 00:00:00") -> pd.DataFrame:
             "actual_trip_count": [9.0],
         }
     )
+
+
+@pytest.fixture()
+def _health_sim_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Set _config (ingest.seed_start) and an isolated watermark root for /health.
+
+    PBI 25b FIX: /health derives the simulation position from the watermark,
+    falling back to ingest.seed_start. These tests build a TestClient without
+    entering its lifespan, so the module globals are set directly.
+    """
+    import app.api.main as serving_module
+
+    monkeypatch.setattr(serving_module, "_config", _FAKE_SERVING_CONFIG)
+    monkeypatch.setattr(serving_module, "_watermark_root", tmp_path / "watermarks")
 
 
 def _make_empty_predictions_df() -> pd.DataFrame:
@@ -230,7 +247,7 @@ class TestHealthHappyPath:
     """AC-1: /health returns ok shape when predictions loaded + Production model present."""
 
     def test_ac1_health_happy_path_returns_ok_shape(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, _health_sim_state: None
     ) -> None:
         """AC-1: 200 response has status=ok, simulated is a bool, non-negative lag, model_version string.
 
@@ -283,7 +300,7 @@ class TestHealthLagClamping:
     """AC-2: data_publication_lag_days is 0 when predictions are from the future."""
 
     def test_ac2_health_lag_is_zero_when_bucket_in_future(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, _health_sim_state: None
     ) -> None:
         """AC-2: lag must never be negative — clamped to 0 for future bucket timestamps.
 
@@ -360,7 +377,7 @@ class TestHealthDegraded:
     """AC-4: /health returns degraded shape when predictions loaded but no Production model."""
 
     def test_ac4_health_degraded_when_no_production_version(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, _health_sim_state: None
     ) -> None:
         """AC-4: status=degraded, model_version=null, freshness fields still populated.
 

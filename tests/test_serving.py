@@ -86,6 +86,7 @@ def client(
     orig_model_version = serving_module._model_version
     orig_served_from_stage = serving_module._served_from_stage
     orig_config = serving_module._config
+    orig_watermark_root = serving_module._watermark_root
 
     serving_module._predictions_df = sample_predictions
     serving_module._zone_lookup = zone_lookup
@@ -107,6 +108,7 @@ def client(
     serving_module._model_version = orig_model_version
     serving_module._served_from_stage = orig_served_from_stage
     serving_module._config = orig_config
+    serving_module._watermark_root = orig_watermark_root
 
 
 class TestHealthCheck:
@@ -758,6 +760,9 @@ class TestLifespanCentroidWiring:
 # ---------------------------------------------------------------------------
 
 _FAKE_CONFIG = {
+    # PBI 25b FIX: /health derives the simulation position from the watermark,
+    # falling back to ingest.seed_start when no watermark file exists.
+    "ingest": {"seed_start": "2021-01-18T00:00:00"},
     "serving": {
         "predictions_path": "fake/predictions.parquet",
         "zone_shapefile_path": "fake/taxi_zones.shp",
@@ -768,6 +773,19 @@ _FAKE_CONFIG = {
 
 class TestHealthEndpoint:
     """Tests for GET /health (PBI 27)."""
+
+    @pytest.fixture(autouse=True)
+    def _health_state(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Provide _config (with ingest.seed_start) and an isolated watermark root.
+
+        PBI 25b FIX: /health derives the simulation position from the watermark,
+        falling back to ingest.seed_start. These tests build a TestClient without
+        entering its lifespan, so they set the module globals directly.
+        """
+        import app.api.main as serving_module
+
+        monkeypatch.setattr(serving_module, "_config", _FAKE_CONFIG)
+        monkeypatch.setattr(serving_module, "_watermark_root", tmp_path / "watermarks")
 
     def test_get_health_happy_path_returns_ok_with_version(
         self, monkeypatch: pytest.MonkeyPatch
