@@ -28,15 +28,22 @@ remove:
 # --- Orchestration (PBI 25a) -------------------------------------------------
 # Container-only Airflow. Bootstrap with `cp orchestration/.env.example orchestration/.env`
 # before running `make airflow-init`. See orchestration/README.md.
+#
+# COMPOSE_FILES bundles the upstream-verbatim base file with the local
+# docker-compose.override.yaml (mounts app/ and orchestration/ into the
+# containers, sets PYTHONPATH). Both must be passed explicitly because
+# Compose only auto-discovers the override file in the cwd, not next to
+# the file given via -f.
+COMPOSE_FILES = -f orchestration/docker-compose.yaml -f orchestration/docker-compose.override.yaml
 
 airflow-init:
-	docker compose -f orchestration/docker-compose.yaml up airflow-init
+	docker compose $(COMPOSE_FILES) up airflow-init
 
 airflow-up:
-	docker compose -f orchestration/docker-compose.yaml up -d
+	docker compose $(COMPOSE_FILES) up -d
 
 airflow-down:
-	docker compose -f orchestration/docker-compose.yaml down
+	docker compose $(COMPOSE_FILES) down
 
 # --- Demo (PBI 25b) -----------------------------------------------------------
 # Static demo:  make demo
@@ -45,13 +52,11 @@ airflow-down:
 #   2 seconds (simulating 15 min at 450x speedup). Press Ctrl-C to stop.
 # Teardown:     make demo-stop
 
-COMPOSE_FILE = orchestration/docker-compose.yaml
-
 demo:
 ifdef DEMO_MODE
 	@echo "[demo] DEMO_MODE=$(DEMO_MODE) -- live cadence demo"
 	@test -f orchestration/.env || { echo "ERROR: orchestration/.env not found. Run: cp orchestration/.env.example orchestration/.env"; exit 1; }
-	DEMO_MODE=$(DEMO_MODE) docker compose -f $(COMPOSE_FILE) up -d
+	DEMO_MODE=$(DEMO_MODE) docker compose $(COMPOSE_FILES) up -d
 	@echo "[demo] Waiting for Airflow scheduler..."
 	@sleep 5
 	@echo "[demo] Starting FastAPI server in background..."
@@ -61,7 +66,7 @@ ifdef DEMO_MODE
 	echo "[demo] Starting external trigger loop (Ctrl-C to stop)..."; \
 	trap "echo ' [demo] Stopped.'; kill $$UVICORN_PID 2>/dev/null; exit 0" INT; \
 	while true; do \
-		docker compose -f $(COMPOSE_FILE) exec -T airflow-scheduler airflow dags trigger refresh_15min_dag || true; \
+		docker compose $(COMPOSE_FILES) exec -T airflow-scheduler airflow dags trigger refresh_15min_dag || true; \
 		sleep 2; \
 	done
 else
@@ -70,7 +75,7 @@ else
 endif
 
 demo-stop:
-	docker compose -f $(COMPOSE_FILE) down
+	docker compose $(COMPOSE_FILES) down
 	@pkill -f "uvicorn app.api.main:app" || true
 
 .PHONY: setup run mlflow test clean remove airflow-init airflow-up airflow-down demo demo-stop

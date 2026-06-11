@@ -123,7 +123,12 @@ services:
     <<: *airflow-common
     command: api-server
     ports:
-      - "8080:8080"
+      # PBI 25a: host port remapped from 8080 to 8090 to avoid a common
+      # collision with Windows-side IIS / Spring Boot / Tomcat defaults on
+      # developer machines. Container's internal port (and healthcheck
+      # below) remains 8080. This is the only deliberate divergence from
+      # the upstream verbatim file at airflow.apache.org/docs/.../3.2.2.
+      - "8090:8080"
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
       interval: 30s
