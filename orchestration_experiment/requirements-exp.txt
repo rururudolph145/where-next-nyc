@@ -1,0 +1,17 @@
+# Deps baked into the custom Airflow image (see Dockerfile).
+#
+# Pins MATCH pyproject.toml so the container's app/ imports behave identically
+# to the host env — no dtype / parquet-format drift between `uv run pytest` on
+# the host and `dags test` inside the container.
+#
+# EXP-02: ingest path — pandas, numpy, pyarrow, pyyaml.
+# EXP-03a: validation path — pandera (app.ingestion.schema imports it).
+# EXP-03b: spatial-feature path — geopandas (zone centroid lookup via
+#   taxi_zones.shp) and scikit-learn (neighbour smoothing in FeatureEngineer).
+numpy>=2.0
+pandas>=2.2
+pyarrow>=18.0
+pyyaml>=6.0
+pandera>=0.20
+geopandas>=1.1.3
+scikit-learn>=1.6

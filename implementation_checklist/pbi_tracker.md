@@ -732,6 +732,63 @@ PBI 22 (prediction log + actuals) ──> PBI 23 (drift detector) ──> PBI 24
 **Phase H — Stretch:**
 15. **PBI 26** (online feature store — only if on-demand inference becomes a requirement)
 
+---
+
+## Orchestrator Redesign — EXP Series (Experimental, `orchestration_experiment/`)
+
+> **Why this track exists.**
+> The production orchestrator (`orchestration/dags/refresh_15min_dag.py`) accumulated complexity through its design iterations (PBI 25a → 25b FIX) and is now considered over-engineered for the portfolio goal. Rather than refactoring it in-place, this track rebuilds the minimum viable orchestration DAG from scratch, one task at a time, in an isolated `orchestration_experiment/` sandbox using Airflow **2.10.3** + LocalExecutor. The goal is a lean, well-understood DAG that can **replace** the production orchestrator once the full chain (ingest → validate → feature → predict → advance watermark) is proven end-to-end.
+>
+> **Stack:** Airflow 2.10.3 LocalExecutor, custom Dockerfile, `orchestration_experiment/docker-compose-LocalExecutor.yml`. Lives entirely under `orchestration_experiment/` — no changes to `app/`, `orchestration/`, or `config.yml`.
+>
+> **Pattern:** Each EXP PBI inserts exactly ONE task into a linear watermark chain, keeping `read_watermark`/`advance_watermark`/`write_watermark` at the ends. Insertion never restructures the chain — it only extends it. Every new task gets a pure, Airflow-free helper module (`dags/exp0N_*.py`) unit-tested on the host, plus a thin DAG wrapper (`dags/exp0N_*_dag.py`) that is structural-tested in-container. Tests use a dual-context import pattern (`try: package-path / except ModuleNotFoundError: flat-path`) so the same helper imports correctly from both host pytest and the Airflow container.
+>
+> **Crash safety invariant:** `advance_watermark` and `write_watermark` both use `trigger_rule="all_success"` — any upstream failure holds the watermark, preventing partial-state advancement.
+
+### EXP-01 — Watermark Now-Signal (3 tasks)
+
+- [x] **EXP-01 — `exp01_watermark_now_signal_dag`** — *GREEN*
+  - 3-task chain: `read_watermark → advance_watermark → write_watermark`
+  - Establishes the watermark control-file contract (`data/watermark.json`) and proves the advance/write pattern works.
+
+### EXP-02 — Ingest (4 tasks)
+
+- [x] **EXP-02 — `exp02_ingest_bronze_dag`** — *GREEN 2026-07-14*
+  - Inserts `ingest` between `read_watermark` and `advance_watermark`.
+  - Calls real `app.ingestion.Ingestion` to write cumulative bronze `[seed_start, window_end)` into `data_exp/bronze/`.
+  - Config override seam (`build_ingest_config`) isolates experiment paths from production.
+
+### EXP-03a — Validate Gate (5 tasks)
+
+- [x] **EXP-03a — `exp03a_validate_dag`** — *GREEN 2026-07-17*
+  - Inserts `validate` between `ingest` and `advance_watermark`.
+  - Calls `validate_bronze_schema` (Pandera). Malformed bronze → `RuntimeError` → `all_success` blocks advance/write → watermark held.
+  - Writes a `validation_<timestamp>.json` log under `data_exp/silver/_validation/` on every run (pass or fail).
+
+### EXP-03b — Feature (Silver → Gold) (6 tasks)
+
+- [x] **EXP-03b — `exp03b_feature_dag`** — *GREEN 2026-07-17*
+  - Inserts `feature` between `validate` and `advance_watermark`.
+  - Calls `DataCleaner(config).run()` (bronze → silver) then `FeatureEngineer(config=config).run()` (silver → gold) under one task label — they share an override config and always run together.
+  - Config override (`build_feature_config`) redirects `data.silver_path`, `data.gold_path`, `feature.zone_shapefile_path`, `model.store_path` to experiment roots, and pins `inference.simulation.start_hour` to `window_end` (OQ4 — prevents empty-inference crash for the pre-cutoff experiment window).
+  - Added `geopandas>=1.1.3` + `scikit-learn>=1.6` to image; added read-only shapefile mount `data/reference:/opt/airflow/data/reference:ro`.
+  - Smoke result: silver (86 rows), gold (0 rows / 24 columns — expected: all-train path), `iqr_bounds.json` under `data_exp/models/` (not production `models/`). Watermark advanced `00:00 → 00:15`.
+  - **Note on gold 0-row output:** the inference split `hour >= window_end` is empty by construction for every window in the `[2021-01-18, ...)` experiment range. Gold will have non-zero rows once a training step produces features for the inference side (EXP-04+). This is the correct OQ4 all-train path, not a bug.
+
+### EXP-04 — Predict (7 tasks) — *next*
+
+- [ ] **EXP-04 — `exp04_predict_dag`** — *planned*
+  - Insert `predict` between `feature` and `advance_watermark`.
+  - Loads the trained model from MLflow registry (Production stage), runs inference on the gold feature matrix, writes predictions to `data_exp/predictions/`.
+  - Depends on: EXP-03b, a trained model in the registry.
+
+### EXP-05 — Idempotency Check — *planned*
+
+- [ ] **EXP-05 — idempotency**
+  - Verify that re-running any DAG for the same window produces identical artefacts and does not advance the watermark a second time.
+
+---
+
 ## Known Limitations & Future Considerations
 
 - **Feedback loop:** Driver recommendations influence future trip data (see DiDi's multi-driver optimization). Not addressed in MVP since heatmap approach + surge pricing mitigate herding naturally.

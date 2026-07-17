@@ -1,0 +1,781 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Portfolio Readiness Checklist (Updated) — NY Taxi Demand Forecasting</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --teal:    #1D9E75;
+    --purple:  #7F77DD;
+    --coral:   #D85A30;
+    --yellow:  #d29922;
+    --green:   #3fb950;
+    --red:     #f85149;
+    --bg:  #0e0e0d;
+    --bg2: #181816;
+    --bg3: #222220;
+    --border: rgba(255,255,255,0.08);
+    --text: #e8e6de;
+    --text-muted: #888780;
+    --font-head: 'Syne', sans-serif;
+    --font-mono: 'DM Mono', monospace;
+  }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-mono);
+    min-height: 100vh;
+    padding: 48px 24px 80px;
+    line-height: 1.6;
+  }
+  header {
+    max-width: 980px;
+    margin: 0 auto 40px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 28px;
+  }
+  .eyebrow {
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--teal);
+    margin-bottom: 12px;
+  }
+  h1 {
+    font-family: var(--font-head);
+    font-size: clamp(28px, 5vw, 48px);
+    font-weight: 800;
+    line-height: 1.05;
+    letter-spacing: -0.02em;
+    color: #fff;
+    margin-bottom: 16px;
+  }
+  h1 span { color: var(--teal); }
+  .subtitle {
+    font-size: 13px;
+    color: var(--text-muted);
+    max-width: 720px;
+  }
+  .meta {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 14px;
+    letter-spacing: 0.04em;
+  }
+  .meta strong { color: var(--text); font-weight: 500; }
+
+  .verdict {
+    max-width: 980px;
+    margin: 0 auto 24px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+  }
+  .verdict-card {
+    border: 1px solid var(--border);
+    background: var(--bg2);
+    border-radius: 12px;
+    padding: 16px 20px;
+  }
+  .verdict-card .label {
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+  .verdict-card .grade {
+    font-family: var(--font-head);
+    font-size: 28px;
+    font-weight: 800;
+    color: #fff;
+  }
+  .verdict-card .note {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 6px;
+  }
+  .verdict-card.role .label { color: var(--purple); }
+
+  section {
+    max-width: 980px;
+    margin: 0 auto 36px;
+  }
+  h2 {
+    font-family: var(--font-head);
+    font-size: 20px;
+    font-weight: 600;
+    color: #fff;
+    margin-bottom: 8px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  h2 .tag {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    padding: 3px 10px;
+    border-radius: 999px;
+    border: 1px solid;
+    color: var(--teal);
+    border-color: rgba(29,158,117,0.35);
+    background: rgba(29,158,117,0.08);
+  }
+  h2.cat-eng   .tag { color: var(--teal);   border-color: rgba(29,158,117,0.35); background: rgba(29,158,117,0.08); }
+  h2.cat-ml    .tag { color: var(--purple); border-color: rgba(127,119,221,0.35); background: rgba(127,119,221,0.08); }
+  h2.cat-ops   .tag { color: var(--coral);  border-color: rgba(216,90,48,0.35);  background: rgba(216,90,48,0.08); }
+  h2.cat-story .tag { color: var(--yellow); border-color: rgba(210,153,34,0.35); background: rgba(210,153,34,0.08); }
+  h2.cat-top   .tag { color: var(--red);    border-color: rgba(248,81,73,0.35);  background: rgba(248,81,73,0.08); }
+  h2.cat-done  .tag { color: var(--green);  border-color: rgba(63,185,80,0.35);  background: rgba(63,185,80,0.08); }
+
+  .section-sub {
+    color: var(--text-muted);
+    font-size: 12px;
+    margin-bottom: 16px;
+  }
+  ul.checklist {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  ul.checklist li {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 18px;
+    display: grid;
+    grid-template-columns: 28px 1fr auto;
+    gap: 14px;
+    align-items: start;
+  }
+  .check-box {
+    width: 18px;
+    height: 18px;
+    border: 1.5px solid var(--text-muted);
+    border-radius: 4px;
+    margin-top: 3px;
+  }
+  .check-box.done {
+    background: var(--green);
+    border-color: var(--green);
+    position: relative;
+  }
+  .check-box.done::after {
+    content: '✓';
+    color: var(--bg);
+    font-size: 13px;
+    font-weight: 700;
+    position: absolute;
+    top: -2px;
+    left: 3px;
+    line-height: 1;
+  }
+  .item-body .item-title {
+    font-family: var(--font-head);
+    font-size: 14px;
+    font-weight: 600;
+    color: #fff;
+    margin-bottom: 4px;
+  }
+  .item-body .item-detail {
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.55;
+  }
+  .item-body .role-fit {
+    font-size: 10px;
+    margin-top: 6px;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+  }
+  .item-body .role-fit strong { color: var(--purple); font-weight: 500; }
+  .item-body code {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background: var(--bg3);
+    color: var(--teal);
+    padding: 1px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+  }
+  .pill {
+    font-size: 9px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid;
+    white-space: nowrap;
+    align-self: start;
+    margin-top: 2px;
+  }
+  .pill.shipped { color: var(--green);  border-color: rgba(63,185,80,0.35);  background: rgba(63,185,80,0.08); }
+  .pill.missing { color: var(--red);    border-color: rgba(248,81,73,0.35);  background: rgba(248,81,73,0.08); }
+  .pill.weak    { color: var(--yellow); border-color: rgba(210,153,34,0.35); background: rgba(210,153,34,0.08); }
+  .pill.partial { color: var(--coral);  border-color: rgba(216,90,48,0.35);  background: rgba(216,90,48,0.08); }
+  .pill.adequate{ color: var(--purple); border-color: rgba(127,119,221,0.35); background: rgba(127,119,221,0.08); }
+  .pill.high    { color: var(--red);    border-color: rgba(248,81,73,0.35);  background: rgba(248,81,73,0.08); }
+  .pill.med     { color: var(--yellow); border-color: rgba(210,153,34,0.35); background: rgba(210,153,34,0.08); }
+
+  .role-callout {
+    max-width: 980px;
+    margin: 0 auto 36px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(440px, 1fr));
+    gap: 14px;
+  }
+  .role-card {
+    border: 1px solid var(--border);
+    background: var(--bg2);
+    border-radius: 12px;
+    padding: 18px 22px;
+  }
+  .role-card h3 {
+    font-family: var(--font-head);
+    font-size: 14px;
+    font-weight: 600;
+    color: #fff;
+    margin-bottom: 4px;
+  }
+  .role-card .role-meta {
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--purple);
+    margin-bottom: 10px;
+  }
+  .role-card ul {
+    list-style: none;
+    font-size: 11px;
+    color: var(--text-muted);
+    line-height: 1.6;
+  }
+  .role-card ul li::before {
+    content: '→ ';
+    color: var(--purple);
+  }
+  .role-card.google .role-meta { color: var(--teal); }
+  .role-card.google ul li::before { color: var(--teal); }
+
+  footer {
+    max-width: 980px;
+    margin: 48px auto 0;
+    border-top: 1px solid var(--border);
+    padding-top: 20px;
+    font-size: 10px;
+    color: var(--text-muted);
+    letter-spacing: 0.06em;
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <p class="eyebrow">Portfolio Readiness Checklist · Updated</p>
+  <h1>What Reviewers Will See<br><span>Today vs. What's Promised</span></h1>
+  <p class="subtitle">A re-graded, hiring-manager-lens audit of the NY Taxi Demand Forecasting repository — calibrated against two target roles: <strong>SmartNews ML Engineer, Recommendation Algorithm</strong> (Tokyo) and <strong>Google SWE III, Content Acquisition Platforms</strong>. Sections are ordered <em>shipped first</em>, then gaps grouped by dimension. Pills indicate current severity; <span style="color: var(--green);">✓</span> = already shipped.</p>
+  <p class="meta">Updated <strong>2026-07-17</strong> · Reflects 17 shipped PBIs (1–3, B0–B2, 12–14, 18–22, 25a, 25b, 27, 30) and the EXP orchestrator-redesign track (EXP-01 → EXP-03b GREEN).</p>
+</header>
+
+<!-- ─── Verdict cards ─── -->
+<div class="verdict">
+  <div class="verdict-card role">
+    <div class="label">SmartNews ML Eng (Rec)</div>
+    <div class="grade">B+</div>
+    <div class="note">Strong ML rigor (baseline, recall@K, registry gate); missing A/B-test framework, PyTorch/embeddings, Spark/large-scale story.</div>
+  </div>
+  <div class="verdict-card role">
+    <div class="label">Google SWE III (Content)</div>
+    <div class="grade">B+</div>
+    <div class="note">Strong data-pipeline + signals story (Pandera, lift-vs-baseline); missing Docker, latency SLO, and a clear "evaluation model" framing.</div>
+  </div>
+  <div class="verdict-card">
+    <div class="label">Overall MLE</div>
+    <div class="grade">B+</div>
+    <div class="note">Up from B−. Baseline + registry gate + fallback + prediction log are now shipped and verifiable.</div>
+  </div>
+  <div class="verdict-card">
+    <div class="label">Effort to A−</div>
+    <div class="grade">~10–14h</div>
+    <div class="note">Top-5 role-aligned fixes below. Dockerfile + PBI 25a + driver-agent harness move both grades up.</div>
+  </div>
+</div>
+
+<!-- ─── Role mapping ─── -->
+<section class="role-callout">
+  <div class="role-card">
+    <div class="role-meta">Target Role · SmartNews</div>
+    <h3>ML Engineer, Recommendation Algorithm</h3>
+    <ul>
+      <li>Python + PyTorch/TensorFlow; ranking models on user behavior data</li>
+      <li>End-to-end experimentation: hypothesis → offline eval → A/B → online perf</li>
+      <li>Large-scale data: SQL, Pandas, Spark; feature engineering pipelines</li>
+      <li>Deep-learning recs: embeddings, sequence models, multi-task</li>
+      <li>Production ML: deployment, monitoring, model iteration</li>
+      <li>Business-level Japanese (separate from technical readiness)</li>
+    </ul>
+  </div>
+  <div class="role-card google">
+    <div class="role-meta">Target Role · Google</div>
+    <h3>Software Engineer III, Content Acquisition Platforms</h3>
+    <ul>
+      <li>2y SWE in Java/Python; data structures + algorithms</li>
+      <li>Design systems &amp; algorithms to assess content <em>value</em> — quality signals + evaluation models</li>
+      <li>Robust, scalable software systems for a content platform</li>
+      <li>Large-scale data analysis, data pipelines, statistical methods</li>
+      <li>Information retrieval, ranking, search quality, signal extraction</li>
+      <li>Run experiments to refine valuation models</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ─── What's Already Shipped (lead with strengths) ─── -->
+<section>
+  <h2 class="cat-done">Already Shipped <span class="tag">Lead With This</span></h2>
+  <p class="section-sub">Concrete evidence a reviewer can click into. Each item maps directly to a bullet on one or both target JDs.</p>
+  <ul class="checklist">
+    <li>
+      <div class="check-box done"></div>
+      <div class="item-body">
+        <div class="item-title">Last-Week-Same-Hour baseline + WAPE-lift + recall@K (PBI 18)</div>
+        <div class="item-detail"><code>app/training/baseline.py</code> implements <code>LastWeekSameHourBaseline</code>; <code>app/core/metrics.py</code> centralises <code>evaluate()</code>, <code>compute_recall_at_k()</code>, <code>compute_wape_lift()</code>. Trainer logs lift to MLflow on every run — the README's "beats the naive baseline" claim is now reproducible from a number, not narrative.</div>
+        <div class="role-fit"><strong>Role fit:</strong> SmartNews "offline evaluation" / Google "evaluation models for content value, work with signals and metrics".</div>
+      </div>
+      <span class="pill shipped">Shipped</span>
+    </li>
+    <li>
+      <div class="check-box done"></div>
+      <div class="item-body">
+        <div class="item-title">Pandera schema validation gate (PBI 19)</div>
+        <div class="item-detail"><code>app/ingestion/schema.py</code> + <code>DataCleaner</code> reject bad TLC parquet rows before they hit Silver. Schema drift between years would fail loudly with a structured report, not corrupt downstream features.</div>
+        <div class="role-fit"><strong>Role fit:</strong> Google "data quality, data pipelines" / SmartNews "large-scale dataset handling".</div>
+      </div>
+      <span class="pill shipped">Shipped</span>
+    </li>
+    <li>
+      <div class="check-box done"></div>
+      <div class="item-body">
+        <div class="item-title">MLflow Model Registry with champion-vs-challenger gate (PBI 20)</div>
+        <div class="item-detail"><code>app/training/registry_gate.py</code> requires the challenger to beat the incumbent's WAPE before promotion to <code>Production</code>; previous Production demoted to <code>Archived</code>. First model auto-promoted. WAPE-lift tag attached to the model version.</div>
+        <div class="role-fit"><strong>Role fit:</strong> SmartNews "production ML workflows, model iteration" / Google "iterate on systems and algorithms".</div>
+      </div>
+      <span class="pill shipped">Shipped</span>
+    </li>
+    <li>
+      <div class="check-box done"></div>
+      <div class="item-body">
+        <div class="item-title">Multi-stage inference fallback (PBI 21)</div>
+        <div class="item-detail"><code>app/inference/predictor.py</code> falls back from <code>Production</code> → <code>Archived</code> if Production is unavailable; raises typed <code>NoApprovedModelError</code> if both missing — never a silent 503. <code>/heatmap</code> response includes <code>served_from_stage</code> so a client can tell.</div>
+        <div class="role-fit"><strong>Role fit:</strong> Google "robust, scalable software systems".</div>
+      </div>
+      <span class="pill shipped">Shipped</span>
+    </li>
+    <li>
+      <div class="check-box done"></div>
+      <div class="item-body">
+        <div class="item-title">Prediction log + actuals-join job (PBI 22)</div>
+        <div class="item-detail"><code>app/monitoring/prediction_log.py</code> writes every served <code>/heatmap</code> response to <code>data/monitoring/predictions/dt=YYYY-MM-DD/</code>; <code>actuals_join.py</code> joins with Gold actuals into a frame ready for drift + accuracy reporting. 41 tests including parametrised error handling.</div>
+        <div class="role-fit"><strong>Role fit:</strong> SmartNews "monitoring, model iteration" / Google "analyze datasets to understand attributes that contribute to quality".</div>
+      </div>
+      <span class="pill shipped">Shipped</span>
+    </li>
+    <li>
+      <div class="check-box done"></div>
+      <div class="item-body">
+        <div class="item-title"><code>/health</code> + <code>/model-info</code> endpoints (PBI 27)</div>
+        <div class="item-detail">19 acceptance tests in <code>test_e2e_health_model_info.py</code>. <code>/health</code> reports <code>simulated: true</code>, data-publication lag, last bucket; <code>/model-info</code> exposes Production model version, training date, WAPE, lift. Never raises 5xx — degrades to <code>status="no_production_model"</code> when registry is empty.</div>
+        <div class="role-fit"><strong>Role fit:</strong> Google "robust, scalable software systems" / SmartNews "online serving, model deployment".</div>
+      </div>
+      <span class="pill shipped">Shipped</span>
+    </li>
+    <li>
+      <div class="check-box done"></div>
+      <div class="item-body">
+        <div class="item-title">Parallel Bronze ingestion + temporal-sort invariant (PBIs 12–14)</div>
+        <div class="item-detail"><code>ThreadPoolExecutor</code>-based <code>load_raw()</code>; 2.6× speedup on 30 monthly parquet files; explicit post-concat <code>sort_values()</code> guarded by a regression test. Documented in <code>about_concurrency.md</code>.</div>
+        <div class="role-fit"><strong>Role fit:</strong> Both roles "large-scale data pipelines".</div>
+      </div>
+      <span class="pill shipped">Shipped</span>
+    </li>
+    <li>
+      <div class="check-box done"></div>
+      <div class="item-body">
+        <div class="item-title">k-NN spatial smoothing of lag features (B1)</div>
+        <div class="item-detail"><code>FeatureEngineer</code> borrows lag signal from spatial neighbours via <code>BallTree</code> haversine queries — addresses sparse 15-min buckets in low-volume zones. 44 test cases in <code>test_feature.py</code>.</div>
+        <div class="role-fit"><strong>Role fit:</strong> Google "signal extraction, content evaluation" (signals over a sparse spatial graph).</div>
+      </div>
+      <span class="pill shipped">Shipped</span>
+    </li>
+    <li>
+      <div class="check-box done"></div>
+      <div class="item-body">
+        <div class="item-title">CI/CD lint + test gates on every PR (PBI 30)</div>
+        <div class="item-detail"><code>.github/workflows/lint.yml</code> + <code>test.yml</code> run ruff + mypy + pytest on every PR; <code>main</code> is branch-protected (requires both checks + 1 review; direct push forbidden). README has CI badges.</div>
+        <div class="role-fit"><strong>Role fit:</strong> Google "high standards for code quality, engineering best practices, documentation".</div>
+      </div>
+      <span class="pill shipped">Shipped</span>
+    </li>
+    <li>
+      <div class="check-box done"></div>
+      <div class="item-body">
+        <div class="item-title">Test-first design (B0 → B1/B2)</div>
+        <div class="item-detail">Synthetic E2E tests written <em>before</em> B1/B2 implementation, marked <code>@pytest.mark.xfail(strict=True)</code> so they flip green exactly when the feature lands. ~11K lines of tests across 19 files; 80%+ coverage on shipped code.</div>
+        <div class="role-fit"><strong>Role fit:</strong> Both roles "code quality, maintainability".</div>
+      </div>
+      <span class="pill shipped">Shipped</span>
+    </li>
+  </ul>
+</section>
+
+<!-- ─── Top 5 Role-Aligned Fixes ─── -->
+<section>
+  <h2 class="cat-top">Top 5 Role-Aligned Fixes <span class="tag">Do First</span></h2>
+  <p class="section-sub">Ranked by impact-per-hour against the two target JDs. Completing these moves both grades to A−.</p>
+  <ul class="checklist">
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">1. Ship PBI 25a — <code>Clock</code> abstraction + <code>orchestration/</code> skeleton</div>
+        <div class="item-detail">Unblocks the entire demo story: <code>WallClock</code> vs. <code>SimulatedClock</code>, repo-wide grep regression test, <code>DEMO_MODE=1</code> selection at startup. The README already promises this. Without it, "Airflow orchestration" stays in <code>experiment/</code> and reviewers see a half-built claim.</div>
+        <div class="role-fit"><strong>Role fit:</strong> Google "robust, scalable software systems"; SmartNews "production ML workflows" — a clean clock abstraction is exactly the kind of testability move senior reviewers reward.</div>
+      </div>
+      <span class="pill high">~6–8h</span>
+    </li>
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">2. Write the Dockerfile + add it to CI</div>
+        <div class="item-detail">README promises <code>docker build -t ny-taxi-demand .</code> — no Dockerfile exists. Multi-stage build, slim Python base, non-root user, <code>uvicorn</code> entrypoint. Add <code>.github/workflows/docker.yml</code> that builds on PR and pushes to <code>ghcr.io</code> on tag pushes. Highest visibility-per-hour for a SWE reviewer.</div>
+        <div class="role-fit"><strong>Role fit:</strong> Google "scalable software systems" / SmartNews "model deployment".</div>
+      </div>
+      <span class="pill high">~1–2h</span>
+    </li>
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">3. Ship PBI 28 — Driver-agent simulation harness</div>
+        <div class="item-detail">Three policies (HeatmapFollower, LastWeekFollower, Stationary) replay a held-out TLC week and report per-policy trips served, idle %, miles-to-pickup, total fare. This is the <em>only</em> way to turn "the model is accurate" into "drivers following the model are better off" — and it's also a working A/B-test framework on synthetic data.</div>
+        <div class="role-fit"><strong>Role fit:</strong> SmartNews "experimentation: hypothesis → offline eval → A/B → online" (this is the offline arm); Google "design and run experiments to refine valuation models".</div>
+      </div>
+      <span class="pill high">~6–10h</span>
+    </li>
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">4. Ship PBI 29 — Latency SLO baseline + CI guard</div>
+        <div class="item-detail">Benchmark <code>/heatmap</code> P50/P95 under load; commit the numbers; add a CI regression test that fails the build if P95 exceeds the baseline by &gt;X%. The README claims "Sub-200ms response from precomputed cache" — make that verifiable, not aspirational. Pairs naturally with PBI 30's CI infrastructure.</div>
+        <div class="role-fit"><strong>Role fit:</strong> Google "scalable software systems, engineering best practices" / SmartNews "online serving".</div>
+      </div>
+      <span class="pill high">~3–4h</span>
+    </li>
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">5. Add a "Signals &amp; Evaluation" notebook (per-zone / per-hour error analysis)</div>
+        <div class="item-detail">Commit a rendered notebook that segments WAPE/recall@K by zone and hour-of-day, surfaces where the model fails (airports at midnight, special events), and proposes which signal would close each gap. This is the single most-undervalued portfolio asset for senior reviewers — it demonstrates ML maturity beyond "I can fit a LightGBM".</div>
+        <div class="role-fit"><strong>Role fit:</strong> Google "analyze datasets to understand attributes that contribute to quality"; SmartNews "user behavior analysis, diagnose performance gaps".</div>
+      </div>
+      <span class="pill high">~2–3h</span>
+    </li>
+  </ul>
+</section>
+
+<!-- ─── A. Engineering Craft ─── -->
+<section>
+  <h2 class="cat-eng">A. Engineering Craft <span class="tag">SWE Bar</span></h2>
+  <p class="section-sub">Project hygiene a senior SWE reviewer scans for in the first 60 seconds.</p>
+  <ul class="checklist">
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">Clean up <code>pyproject.toml</code> dependency split</div>
+        <div class="item-detail">Move <code>torch</code>, <code>jupyter</code>, <code>dask</code>, <code>folium</code>, <code>ruff</code> out of <code>[project.dependencies]</code> and into a dev/notebook optional group. Production deps should be lean — and PBI 30 already excludes torch from CI's <code>uv sync</code> for this exact reason.</div>
+      </div>
+      <span class="pill weak">Weak</span>
+    </li>
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">Remove or populate <code>app/domain/</code></div>
+        <div class="item-detail"><code>app/domain/</code> still contains only an empty <code>__init__.py</code>. Either delete or fill it. (<code>app/monitoring/</code> is now populated by PBI 22; PBIs 23/24 will add the remaining modules.)</div>
+      </div>
+      <span class="pill weak">Weak</span>
+    </li>
+    <li>
+      <div class="check-box done"></div>
+      <div class="item-body">
+        <div class="item-title">Add a real CI workflow (PBI 30)</div>
+        <div class="item-detail">Shipped in commit <code>98761fd</code>. Lint + test workflows live; branch protection on <code>main</code>; CI badges in README.</div>
+      </div>
+      <span class="pill shipped">Shipped</span>
+    </li>
+    <li>
+      <div class="check-box done"></div>
+      <div class="item-body">
+        <div class="item-title">Extract duplicated <code>evaluate()</code></div>
+        <div class="item-detail">Centralized in <code>app/core/metrics.py</code> alongside <code>compute_recall_at_k()</code> + <code>compute_wape_lift()</code>. Trainer, predictor, simulator now import from one place.</div>
+      </div>
+      <span class="pill shipped">Shipped</span>
+    </li>
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">Add data-download script + embed sample heatmap in README</div>
+        <div class="item-detail">Create <code>scripts/download_data.sh</code> for TLC parquets + taxi-zones shapefile. Embed <code>sample_heatmap.png</code> (currently untracked) and an eval-metrics table near the top of the README so readers see proof the model works before reading code.</div>
+      </div>
+      <span class="pill weak">Weak</span>
+    </li>
+  </ul>
+</section>
+
+<!-- ─── B. ML Maturity ─── -->
+<section>
+  <h2 class="cat-ml">B. ML Maturity <span class="tag">MLE Bar</span></h2>
+  <p class="section-sub">What a senior MLE reviewer expects beyond "I fit a LightGBM".</p>
+  <ul class="checklist">
+    <li>
+      <div class="check-box done"></div>
+      <div class="item-body">
+        <div class="item-title">Implement a naive baseline + publish a comparison table</div>
+        <div class="item-detail">PBI 18 shipped: <code>LastWeekSameHourBaseline</code> + WAPE-lift + recall@K logged to MLflow on every training run. Make sure the comparison table lands in the README so a reviewer sees the lift number, not just the metric machinery.</div>
+      </div>
+      <span class="pill shipped">Shipped</span>
+    </li>
+    <li>
+      <div class="check-box done"></div>
+      <div class="item-body">
+        <div class="item-title">Use the MLflow Model Registry with stages</div>
+        <div class="item-detail">PBI 20 shipped: <code>None</code> → <code>Staging</code> → <code>Production</code> → <code>Archived</code> with a champion-vs-challenger gate. WAPE-lift tag attached.</div>
+      </div>
+      <span class="pill shipped">Shipped</span>
+    </li>
+    <li>
+      <div class="check-box done"></div>
+      <div class="item-body">
+        <div class="item-title">Add validation gate before promotion</div>
+        <div class="item-detail">PBI 20's <code>app/training/registry_gate.py</code> rejects models whose val WAPE is worse than the incumbent. First model auto-promoted; subsequent need to beat lift threshold.</div>
+      </div>
+      <span class="pill shipped">Shipped</span>
+    </li>
+    <li>
+      <div class="check-box done"></div>
+      <div class="item-body">
+        <div class="item-title">Implement fallback to previous approved model</div>
+        <div class="item-detail">PBI 21 shipped: <code>app/inference/predictor.py</code> falls back <code>Production</code> → <code>Archived</code>; raises typed <code>NoApprovedModelError</code> if both missing. <code>/heatmap</code> response exposes <code>served_from_stage</code>.</div>
+      </div>
+      <span class="pill shipped">Shipped</span>
+    </li>
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">Add drift monitoring (Evidently) — PBIs 23 + 24</div>
+        <div class="item-detail">PBI 22 shipped the data foundation (prediction log + actuals join). PBI 23 adds <code>app/monitoring/drift.py</code> (<code>DataDriftPreset</code> + <code>RegressionPreset</code> over the joined frame); PBI 24 emits a <code>retrain_required</code> marker. PBI 25d then wires both into <code>monitor_hourly_dag</code>.</div>
+      </div>
+      <span class="pill missing">Missing</span>
+    </li>
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">Per-zone / per-hour error analysis notebook (covered in Top 5)</div>
+        <div class="item-detail">Segments WAPE/recall@K by zone × hour-of-day; surfaces failure modes (airports at midnight, special events). High-leverage for both target JDs.</div>
+      </div>
+      <span class="pill missing">Missing</span>
+    </li>
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">Try a deep-learning ranker as a stretch comparison</div>
+        <div class="item-detail">SmartNews specifically calls out "deep learning models for recommendations: embeddings, sequence models, multi-task". A small PyTorch comparison (DLRM-lite or a sequence model over a driver's recent zone history) — even as a notebook — would directly hit that bullet. Not required for grade, but a high-leverage differentiator for that role.</div>
+        <div class="role-fit"><strong>Role fit:</strong> SmartNews specifically.</div>
+      </div>
+      <span class="pill missing">Missing</span>
+    </li>
+  </ul>
+</section>
+
+<!-- ─── C. MLOps / Systems ─── -->
+<section>
+  <h2 class="cat-ops">C. MLOps / Systems <span class="tag">Differentiator</span></h2>
+  <p class="section-sub">Where candidates either separate themselves or blend in. Heavily weighted by both target roles.</p>
+  <ul class="checklist">
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">Write a real Dockerfile (covered in Top 5)</div>
+        <div class="item-detail">Multi-stage build, slim Python base, non-root user, <code>uvicorn</code> entrypoint. README already promises it; this is the highest-visibility unshipped item for any SWE reviewer.</div>
+      </div>
+      <span class="pill missing">Missing</span>
+    </li>
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">Add <code>docker-compose.yml</code> for the serving stack</div>
+        <div class="item-detail">API + MLflow + (optional) MinIO/Postgres. Lets a reviewer run the full system in one command. (<code>experiment/orchestration/docker-compose.yml</code> exists but only for the Airflow demo.)</div>
+      </div>
+      <span class="pill missing">Missing</span>
+    </li>
+    <li>
+      <div class="check-box done"></div>
+      <div class="item-body">
+        <div class="item-title">Orchestrator redesign — EXP series (ingest → validate → feature chain proven end-to-end)</div>
+        <div class="item-detail">The production <code>refresh_15min_dag</code> (PBI 25b) accumulated complexity through its design iterations and is being replaced by a lean rebuild under <code>orchestration_experiment/</code>. Each EXP PBI inserts one task into a linear watermark chain; all tasks proven in-container before the next is added. <strong>EXP-01</strong> (watermark), <strong>EXP-02</strong> (ingest), <strong>EXP-03a</strong> (validate gate), <strong>EXP-03b</strong> (feature: bronze→silver→gold via <code>DataCleaner</code> + <code>FeatureEngineer</code>) all GREEN as of 2026-07-17. Next: EXP-04 (predict). The completed chain will replace the production DAG.</div>
+      </div>
+      <span class="pill partial">In Progress</span>
+    </li>
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">Add idempotency + backfill support to ingestion (PBI 25b)</div>
+        <div class="item-detail"><code>refresh_15min_dag</code> in PBI 25b owns the <code>(date, bucket)</code> watermark contract — rerunning the same bucket is a no-op, and <code>airflow dags backfill</code> covers historical reruns.</div>
+      </div>
+      <span class="pill weak">Weak</span>
+    </li>
+    <li>
+      <div class="check-box done"></div>
+      <div class="item-body">
+        <div class="item-title">Add <code>/health</code> + <code>/model-info</code> endpoints (PBI 27)</div>
+        <div class="item-detail">Shipped with 19 acceptance tests. <code>/health</code> reports simulated flag + data-publication lag; <code>/model-info</code> exposes the Production model's version, training date, WAPE, and lift.</div>
+      </div>
+      <span class="pill shipped">Shipped</span>
+    </li>
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">Latency SLO baseline + CI guard (PBI 29, covered in Top 5)</div>
+        <div class="item-detail">Benchmark <code>/heatmap</code> P50/P95; commit the numbers; CI fails if P95 regresses &gt;X%. Pairs with PBI 30's CI workflow.</div>
+      </div>
+      <span class="pill missing">Missing</span>
+    </li>
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">Replace <code>df.iterrows()</code> in <code>/heatmap</code></div>
+        <div class="item-detail">Vectorize with <code>to_dict("records")</code>. Fine at 263 zones today; cleaner code and obviously the right pattern.</div>
+      </div>
+      <span class="pill weak">Weak</span>
+    </li>
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">Add <code>top_n</code> pagination to <code>/heatmap</code> (PBI 16)</div>
+        <div class="item-detail">Return the top N zones by demand. Useful for clients that only render a few markers; also matches the design diagram's "ranked zones" framing.</div>
+      </div>
+      <span class="pill missing">Missing</span>
+    </li>
+  </ul>
+</section>
+
+<!-- ─── D. Portfolio Story ─── -->
+<section>
+  <h2 class="cat-story">D. Portfolio Story <span class="tag">Reviewer Lens</span></h2>
+  <p class="section-sub">The bits a reviewer reads before they ever clone the repo.</p>
+  <ul class="checklist">
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">README: lead with the lift number, not the design</div>
+        <div class="item-detail">PBI 18 produces a concrete WAPE-lift number vs. the last-week-same-hour baseline. Put that number (and recall@K) <em>above</em> the architecture diagram in the README. Reviewers scan the first 200 lines; the value claim should be one of them.</div>
+        <div class="role-fit"><strong>Role fit:</strong> Both roles — answers "does this actually work?" before "is the architecture nice?".</div>
+      </div>
+      <span class="pill weak">Weak</span>
+    </li>
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">README: distinguish shipped vs. promised</div>
+        <div class="item-detail">The README currently describes <code>SimulatedClock</code>, <code>make demo</code>, and the driver-agent harness as if they exist. They don't — they're tracked as PBIs 25a / 25b / 28. Add a small "current state" section or use the existing PBI tracker's "Shipped" pills to be honest about what runs today.</div>
+        <div class="role-fit"><strong>Role fit:</strong> Both roles reward self-awareness over hype.</div>
+      </div>
+      <span class="pill weak">Weak</span>
+    </li>
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">Honest "Known Limitations" section</div>
+        <div class="item-detail">Where the model is weak (sparse zones, special events, weather), what you'd build next, what you'd do differently. Already partially present in <code>system_design.md</code>; surface it in the README too.</div>
+      </div>
+      <span class="pill weak">Weak</span>
+    </li>
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">Architecture diagram embedded in README</div>
+        <div class="item-detail"><code>reference/ny_taxi_demand_prediction.html</code> is the canonical five-lane diagram. Export as SVG/PNG and embed near the top of the README so the architecture is visible without leaving GitHub.</div>
+      </div>
+      <span class="pill weak">Weak</span>
+    </li>
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">Interview talking-point card</div>
+        <div class="item-detail">A short <code>docs/talking_points.md</code> (or a section in the README) listing 5 concrete claims a reviewer can verify in 60 seconds: "registry gate prevents bad deploys" → <code>app/training/registry_gate.py</code>; "every prediction logged" → <code>app/monitoring/prediction_log.py</code>; "fallback path" → <code>app/inference/predictor.py</code>; etc.</div>
+        <div class="role-fit"><strong>Role fit:</strong> Both — saves the reviewer 20 minutes of source-tree exploration.</div>
+      </div>
+      <span class="pill missing">Missing</span>
+    </li>
+  </ul>
+</section>
+
+<!-- ─── E. Role-Specific Stretch ─── -->
+<section>
+  <h2 class="cat-ml">E. Role-Specific Stretch <span class="tag">Optional</span></h2>
+  <p class="section-sub">Items that aren't strictly required, but each maps cleanly to a JD bullet a generalist portfolio rarely hits.</p>
+  <ul class="checklist">
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">Spark / SQL surface for "large-scale data processing"</div>
+        <div class="item-detail">SmartNews explicitly lists Spark. The current pipeline is Pandas-on-parquet, which is honest at TLC scale but doesn't <em>signal</em> Spark experience. Even a single notebook that aggregates a year of trips via PySpark on the same Bronze layer would demonstrate the skill without rewriting the pipeline.</div>
+        <div class="role-fit"><strong>Role fit:</strong> SmartNews specifically.</div>
+      </div>
+      <span class="pill missing">Missing</span>
+    </li>
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">Embedding-based zone similarity (deep-learning ranker)</div>
+        <div class="item-detail">Train a small embedding (zone2vec-style over historical co-occurrence) and use it as a feature or as a re-ranker on top of the LightGBM heatmap. Adds the "embeddings, sequence models" axis SmartNews wants, without abandoning the existing pipeline.</div>
+        <div class="role-fit"><strong>Role fit:</strong> SmartNews specifically.</div>
+      </div>
+      <span class="pill missing">Missing</span>
+    </li>
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">"Content valuation" framing for the heatmap (Google lens)</div>
+        <div class="item-detail">Google's role is about <em>evaluating the value of content</em>. Re-frame one section of the README (or a short doc) as: "We treat each (zone, time-bucket) as a unit of content; the model assigns it a value (predicted demand); evaluation = WAPE-lift + recall@K". Cheap pivot, large signal.</div>
+        <div class="role-fit"><strong>Role fit:</strong> Google specifically — directly mirrors their "design systems and algorithms to assess content value" bullet.</div>
+      </div>
+      <span class="pill missing">Missing</span>
+    </li>
+    <li>
+      <div class="check-box"></div>
+      <div class="item-body">
+        <div class="item-title">A/B-test framework on synthetic drivers (PBI 28 amplification)</div>
+        <div class="item-detail">Once PBI 28 ships, surface its per-policy table as an A/B-test write-up in the README: hypothesis, metrics, statistical caveat (single-agent-equivalent), conclusion. This becomes the SmartNews "hypothesis → offline eval → A/B" story without needing live traffic.</div>
+        <div class="role-fit"><strong>Role fit:</strong> SmartNews + Google both.</div>
+      </div>
+      <span class="pill missing">Missing</span>
+    </li>
+  </ul>
+</section>
+
+<footer>
+  <span>NY Taxi Demand Forecasting — Portfolio Readiness Checklist (Updated 2026-05-30)</span>
+  <span>Target: A− for SmartNews ML Eng &amp; Google SWE III</span>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,9 @@
+{
+  "validated_at": "2026-07-17T10:59:43.756256Z",
+  "rows_in": 357,
+  "rows_passing": 0,
+  "rows_failing": 357,
+  "failure_reasons": [
+    "Column 'PULocationID' failed element-wise validator number 0: in_range(1, 263) failure cases: 265.0, 264.0, 265.0"
+  ]
+}
