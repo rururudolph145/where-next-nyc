@@ -1,13 +1,13 @@
-"""Watermark primitive for DAG idempotency.
+"""Data-watermark primitive for incremental DAG runs.
 
-A watermark is an empty marker file recording that a ``(date, bucket)`` work
-unit has been completed. ``refresh_15min_dag`` uses this to make re-running
-the same bucket a no-op:
+The watermark is a single JSON control file recording how far the pipeline
+has advanced through the fixed 2021 raw timeline:
 
-    {root}/{YYYY-MM-DD}/{bucket:02d}.done
+    {root}/.current_watermark  ->  {"position": "<naive-iso>"}
 
-There are 96 buckets per UTC day (one per quarter-hour); bucket 0 is
-00:00–00:15 UTC and bucket 95 is 23:45–24:00 UTC.
+There are two functions for reading/writing that state and one pure helper
+(`next_window`) for computing the next ingest window from the current
+position.
 
 This module lives under ``app/core/`` so the dependency-direction invariant
 (``app/`` never imports from ``orchestration/``) holds: the DAG depends on
@@ -18,82 +18,12 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import date, datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
-_BUCKETS_PER_DAY = 96
-
 # Control-file name holding the incremental-pipeline position. Lives under
-# ``data/watermarks/refresh_15min/``. Distinct from the per-(day, bucket)
-# ``.done`` markers above: this records the *data* watermark — how far the
-# refresh_15min_dag has advanced through the fixed 2021 raw timeline.
+# ``data/watermarks/refresh_15min/``.
 _WATERMARK_FILE = ".current_watermark"
-
-
-def _validate_bucket(bucket: int) -> None:
-    if not 0 <= bucket < _BUCKETS_PER_DAY:
-        raise ValueError(f"bucket must be in [0, {_BUCKETS_PER_DAY - 1}]; got {bucket}")
-
-
-def bucket_path(*, root: Path, day: date, bucket: int) -> Path:
-    """Return the ``.done`` file path for ``(day, bucket)`` under ``root``.
-
-    Pure function — no I/O.
-
-    Args:
-        root: Base directory holding all watermarks (typically
-            ``data/watermarks/refresh_15min``).
-        day: UTC date the bucket belongs to.
-        bucket: Quarter-hour index in ``[0, 95]``.
-
-    Raises:
-        ValueError: if ``bucket`` is outside ``[0, 95]``.
-    """
-    _validate_bucket(bucket)
-    return root / day.isoformat() / f"{bucket:02d}.done"
-
-
-def is_complete(*, root: Path, day: date, bucket: int) -> bool:
-    """Return True iff the ``.done`` file for ``(day, bucket)`` exists.
-
-    Read-only; no side effects.
-
-    Raises:
-        ValueError: if ``bucket`` is outside ``[0, 95]``.
-    """
-    return bucket_path(root=root, day=day, bucket=bucket).is_file()
-
-
-def mark_complete(*, root: Path, day: date, bucket: int) -> None:
-    """Create the ``.done`` file for ``(day, bucket)``; idempotent.
-
-    Creates ``root`` and the ``{day}/`` subdirectory if either is missing.
-    Re-calling on an already-marked bucket is a no-op.
-
-    Raises:
-        ValueError: if ``bucket`` is outside ``[0, 95]``.
-    """
-    path = bucket_path(root=root, day=day, bucket=bucket)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.touch(exist_ok=True)
-
-
-# ---------------------------------------------------------------------------
-# Data watermark (incremental-pipeline position)
-# ---------------------------------------------------------------------------
-#
-# The refresh_15min_dag walks the FIXED 2021 raw timeline one slice at a
-# time. The "simulation position" is a data watermark — a single JSON
-# control file — not a clock. Each run reads the watermark, ingests the
-# next slice, and advances it.
-#
-# Timezone contract: ``tpep_pickup_datetime`` in the raw/bronze data is
-# ``datetime64[us]`` and tz-NAIVE; the timestamps ARE the canonical NYC
-# wall-clock timeline. The watermark is therefore stored and returned as a
-# NAIVE datetime (ISO-8601 with no ``Z`` / no offset). This keeps the
-# window filter a naive-vs-naive comparison and avoids the 5h offset / the
-# ``TypeError: Cannot compare tz-naive and tz-aware`` that tz-aware values
-# would introduce.
 
 
 def _watermark_file(root: Path) -> Path:
@@ -129,8 +59,6 @@ def read_watermark(root: Path) -> datetime | None:
         raise ValueError(f"Malformed watermark control file at {path}: {exc}") from exc
 
     if dt.tzinfo is not None:
-        # Defensive: the contract is naive. Strip any tzinfo rather than
-        # propagate a tz-aware value into the naive-vs-naive window filter.
         dt = dt.replace(tzinfo=None)
     return dt
 
@@ -156,3 +84,19 @@ def write_watermark(root: Path, dt: datetime) -> None:
     tmp = final.with_name(_WATERMARK_FILE + ".tmp")
     tmp.write_text(json.dumps({"position": dt.isoformat()}), encoding="utf-8")
     os.replace(tmp, final)
+
+
+def next_window(
+    position: datetime,
+    duration: timedelta,
+) -> tuple[datetime, datetime]:
+    """Return the ingest window ``(position, position + duration)``. Pure.
+
+    Args:
+        position: The current watermark position (naive datetime).
+        duration: The window length.
+
+    Returns:
+        A ``(start, end)`` tuple. ``start == position``; ``end == position + duration``.
+    """
+    return position, position + duration
