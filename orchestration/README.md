@@ -1,34 +1,99 @@
-# Orchestration — Airflow 3.2.2 Platform
+# Orchestration — Airflow 2.10.3 LocalExecutor
 
-This directory contains the Airflow 3.2.2 infrastructure for the NYC Taxi Demand
-Forecasting pipeline (C00 Orchestrator lane). PBI 25b ships `refresh_15min_dag`;
-the remaining two planned DAGs are documented below.
+This directory contains the production Airflow stack that hosts
+`15_minute_refresh_inference_dag`, the incremental watermark-only inference
+pipeline that feeds FastAPI's `/heatmap` endpoint.
+
+## Stack
+
+- **Airflow 2.10.3** on `apache/airflow:2.10.3-python3.11` (custom image bakes
+  the pipeline's deps — see `Dockerfile` + `requirements-airflow.txt`).
+- **LocalExecutor** — single-machine execution, no Redis/Celery.
+- **PostgreSQL 13** metadata DB.
+- **4 services**: `postgres`, `airflow-init`, `airflow-webserver`, `airflow-scheduler`.
 
 ## Planned DAGs
 
 | DAG ID | PBI | Schedule | Description |
 |---|---|---|---|
-| `refresh_15min_dag` | PBI 25b | `*/15 * * * *` | Ingestion → validation → feature → inference → log |
+| `refresh_15min_dag` → `15_minute_refresh_inference_dag` | PBI 25b | `*/15 * * * *` | Ingestion → validation → feature → inference → log |
 | `train_monthly_dag` | PBI 25c | `@monthly` | Training + PBI 20 registry gate |
 | `monitor_hourly_dag` | PBI 25d | `@hourly` | Drift detection → alert → retrain trigger |
 
 ## Bootstrap (first-time setup)
 
 ```bash
-# 1. Copy the env template and set AIRFLOW_UID to your local user ID.
-#    WARNING: override any credentials before production use.
+# 1. Copy the env template and set AIRFLOW_UID to your host UID.
 cp orchestration/.env.example orchestration/.env
+sed -i "s/^AIRFLOW_UID=.*/AIRFLOW_UID=$(id -u)/" orchestration/.env
 
-# 2. Initialize the Airflow metadata database (idempotent — safe to re-run).
+# 2. Initialize the metadata DB (idempotent).
 make airflow-init
 
-# 3. Start the full stack in the background.
+# 3. Start the stack.
 make airflow-up
 ```
 
-The Airflow UI is reachable at http://localhost:8090 after `make airflow-up`.
-Default credentials from the upstream compose file are **airflow / airflow** —
-override these in `orchestration/.env` before any shared or production deployment.
+The Airflow UI is at http://localhost:8081 (default creds: `airflow` / `airflow` —
+override in `orchestration/.env` before any shared or production use).
+
+## Running the demo
+
+Two entrypoints:
+
+### Static demo — `make demo`
+
+Starts FastAPI on port 8000 serving whatever is currently under
+`data/predictions/`. No Airflow required.
+
+```bash
+make demo
+curl localhost:8000/heatmap
+```
+
+### Live cadence — `make demo-tick`
+
+Fires exactly one run of `15_minute_refresh_inference_dag` against a running
+Airflow stack. Each tick advances the data watermark by one slice
+(`ingest.slice_duration` from `config.yml`, default 15 minutes) and
+re-materializes bronze/silver/gold/predictions under `data/`.
+
+```bash
+make airflow-up          # if not already running
+make demo-tick           # fires one slice
+make demo-tick           # advances another slice
+# ...repeat, or unpause the DAG's */15 cron for wall-clock cadence.
+```
+
+Teardown: `make demo-stop`.
+
+## Data watermark contract
+
+The DAG's simulation position is a single JSON control file at:
+
+```
+data/watermarks/refresh_15min/.current_watermark
+```
+
+Payload: `{"position": "<naive-iso>"}`. On the first run the DAG seeds from
+`config.yml`'s `ingest.seed_start`; subsequent runs read the file and
+advance by `ingest.slice_duration` per successful run. The `all_success`
+trigger rule on `write_watermark` ensures a failure or `check_no_new_data`
+skip leaves the watermark unchanged — the next run reprocesses the same
+slice.
+
+**Restart from scratch**: delete `data/watermarks/refresh_15min/` and the
+next run reseeds from `ingest.seed_start`.
+
+**Boundary stop**: when the watermark reaches `DATASET_MAX` (hardcoded to
+`2021-03-31 23:59:57` in the DAG file), `check_no_new_data` raises
+`AirflowSkipException` and the run short-circuits.
+
+## AIRFLOW_UID
+
+The `orchestration/.env.example` template sets `AIRFLOW_UID=1000`. Check your
+UID with `id -u` and update `.env` if it differs. Using the wrong UID causes
+file-ownership mismatches on mounted volumes (`dags/`, `lib/`, `logs/`).
 
 ## Stopping the stack
 
@@ -36,120 +101,48 @@ override these in `orchestration/.env` before any shared or production deploymen
 make airflow-down
 ```
 
-This stops all containers without destroying named volumes. Re-running
-`make airflow-up` picks up where you left off.
-
-## Source
-
-`orchestration/docker-compose.yaml` was fetched from:
-https://airflow.apache.org/docs/apache-airflow/3.2.2/docker-compose.yaml
-
-The file is verbatim **with one deliberate divergence**: the `airflow-apiserver`
-service's host port is remapped from `8080` to `8090` to avoid a common
-collision with Windows-side IIS / Spring Boot / Tomcat defaults on developer
-machines. Search for `PBI 25a:` in the compose file to find the single modified
-line. The container's internal port (and the healthcheck) remains `8080`.
-
-To pin a different Airflow version, re-fetch the file from the upstream URL for
-the desired version and re-apply the port remap.
-
-## Running the demo
-
-Two modes are available via the `make demo` target in the project root.
-
-### Static demo (default)
-
-```bash
-make demo
-```
-
-Starts FastAPI serving cached predictions via uvicorn on port 8000. No Airflow
-stack is launched. `bucket_time` does not change between `/heatmap` calls.
-
-### Live cadence demo (`DEMO_MODE=1`)
-
-```bash
-cp orchestration/.env.example orchestration/.env   # first time only
-make demo DEMO_MODE=1
-```
-
-This brings up the full Airflow compose stack and then runs a host-side
-**external trigger loop** that fires `refresh_15min_dag` every 2 seconds. At
-the configured 450x clock speedup, each trigger covers one 15-minute simulated
-bucket. Press **Ctrl-C** to stop the loop.
-
-The external trigger approach was chosen over relying on the cron schedule
-(`*/15 * * * *`) under DEMO_MODE because Airflow's scheduler heartbeat (default
-5 seconds) cannot reliably fire a cron at 450x simulated speed. The cron
-schedule remains correct for production (wall-clock) deployments.
-
-To tear down the compose stack:
-
-```bash
-make demo-stop
-```
-
-## Backfill semantics
-
-`refresh_15min_dag` uses **`catchup=False`** -- Airflow does not backfill
-missed intervals on startup. Combined with the watermark contract (below), this
-means:
-
-- **First run**: processes the current `(day, bucket)` determined by the active
-  clock.
-- **Re-run of the same bucket**: the `check_watermark` task detects the existing
-  `.done` file at `data/watermarks/refresh_15min/{date}/{bucket:02d}.done` and
-  raises `AirflowSkipException`. All downstream tasks skip. The run is a no-op.
-- **Manual backfill**: delete the `.done` files for the desired range, then
-  trigger the DAG for each bucket. Each run processes one bucket and writes a
-  new `.done` file on success.
-
-If a run fails between `check_watermark` and `write_done`, no `.done` file is
-written, so the next trigger retries that bucket automatically.
-
-**Edge case**: if a `.done` file exists but the corresponding Gold parquet was
-manually deleted, the DAG treats the bucket as complete and skips it. This is
-intentional -- a missing Gold file after a confirmed run is a manual-intervention
-case.
-
-## AIRFLOW_UID
-
-The `orchestration/.env.example` template sets `AIRFLOW_UID=1000`. This is the
-default UID on most single-user Linux and WSL systems. If your host UID differs,
-update the value in `orchestration/.env` after copying:
-
-```bash
-# Check your UID:
-id -u
-
-# Then edit orchestration/.env:
-AIRFLOW_UID=<your-uid>
-```
-
-Using the wrong UID causes file-ownership mismatches on the volume-mounted
-`dags/`, `logs/`, `plugins/`, and `config/` directories.
-
-## Known tuning items
-
-The upstream compose file ships with two settings appropriate for local
-development but requiring override before any production deployment:
-
-- **Airflow example DAGs enabled** (`AIRFLOW__CORE__LOAD_EXAMPLES=true` in the
-  compose file). Set to `false` in `orchestration/.env` to suppress example DAGs.
-- **Default Fernet key.** Set `AIRFLOW__CORE__FERNET_KEY` in `orchestration/.env`
-  to a key generated by `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
-
 ## Directory layout
 
 ```
 orchestration/
-  docker-compose.yaml   Airflow 3.2.2 compose file (verbatim except for one
-                        documented port remap; see "Source" section)
-  .env.example          Template — copy to .env and customize
-  .env                  Local environment (gitignored — never commit)
-  README.md             This file
-  dags/                 DAG files volume-mounted into scheduler + worker
-  plugins/              Custom Airflow plugins
-  config/               Airflow config overrides (airflow.cfg or env files)
-  logs/                 Task logs (gitignored)
+  docker-compose.yaml       # Airflow 2.10.3 LocalExecutor stack
+  Dockerfile                # apache/airflow:2.10.3-python3.11 + pipeline deps
+  requirements-airflow.txt  # pinned deps (see pyproject.toml for host parity)
+  mysql.cnf                 # (unused by postgres -- legacy from EXP)
+  .env.example              # copy to .env
+  README.md                 # this file
+  dags/
+    the_15_minute_refresh_inference_dag.py    # dag_id = 15_minute_refresh_inference_dag
+  lib/                      # non-DAG-scanned helpers (PYTHONPATH)
+    ingest_helpers.py
+    validate_helpers.py
+    feature_helpers.py
+    predict_helpers.py
+    log_predict_helpers.py
+    boundary_helpers.py
+  logs/                     # gitignored, container-written
 ```
+
+## Promotion methodology
+
+New DAGs are built **incrementally** under `orchestration_experiment/` (the
+"staging" tree), one PBI = one task added to a linear chain. Each PBI ships
+with the full quality gate (unit + structural tests, container smoke test,
+green pytest on the host). Once the DAG reaches its target shape, it is
+**promoted** into `orchestration/` — the DAG file moves to `dags/`, helpers
+move to `lib/`, imports flatten, EXP scope-guard tests retire, and the
+promotion is captured in a design doc under `docs/superpowers/specs/`.
+
+The promoted inference DAG's series is EXP-01..05 under
+`orchestration_experiment/`. See:
+
+- `orchestration_experiment/PBI_EXP02_ingest_bronze.md`
+- `orchestration_experiment/PBI_EXP03a_validate.md`
+- `orchestration_experiment/PBI_EXP03b_feature_silver_gold.md`
+- `orchestration_experiment/PBI_EXP04_predict_log.md`
+- `orchestration_experiment/PBI_EXP05_idempotency_boundary.md`
+- `orchestration_experiment/GAP_ANALYSIS_vs_production.md`
+- `docs/superpowers/specs/2026-07-24-orchestration-promotion-design.md`
+
+The `orchestration_experiment/` tree remains a permanent playground for
+future incremental DAG builds (training DAG, monitoring DAG).
