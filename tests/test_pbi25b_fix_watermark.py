@@ -374,3 +374,61 @@ class TestSliceDurationGuard:
 
         # Assert
         assert ingestion.start_ym == "2021-01"
+
+
+# ---------------------------------------------------------------------------
+# TestNextWindow
+# ---------------------------------------------------------------------------
+
+
+class TestNextWindow:
+    """next_window is a pure two-liner: (position, position + duration)."""
+
+    def test_returns_position_and_position_plus_duration(self) -> None:
+        """The window is [position, position + duration), naive throughout."""
+        # Arrange
+        from datetime import timedelta
+
+        from app.core.watermark import next_window
+
+        position = datetime(2021, 1, 18, 0, 0, 0)
+        duration = timedelta(minutes=15)
+
+        # Act
+        start, end = next_window(position, duration)
+
+        # Assert
+        assert start == datetime(2021, 1, 18, 0, 0, 0)
+        assert end == datetime(2021, 1, 18, 0, 15, 0)
+
+    def test_zero_duration_returns_position_twice(self) -> None:
+        """Edge: a zero-length window is a valid input (returns (p, p))."""
+        # Arrange
+        from datetime import timedelta
+
+        from app.core.watermark import next_window
+
+        position = datetime(2021, 1, 18, 0, 0, 0)
+
+        # Act
+        start, end = next_window(position, timedelta(0))
+
+        # Assert
+        assert start == position
+        assert end == position
+
+    def test_preserves_naive_tz(self) -> None:
+        """Naive-in, naive-out — the ingest window contract is naive."""
+        # Arrange
+        from datetime import timedelta
+
+        from app.core.watermark import next_window
+
+        position = datetime(2021, 1, 18, 0, 0, 0)
+
+        # Act
+        start, end = next_window(position, timedelta(minutes=15))
+
+        # Assert
+        assert start.tzinfo is None
+        assert end.tzinfo is None
