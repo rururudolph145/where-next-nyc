@@ -38,6 +38,20 @@ dependencies = [
 [tool.pytest.ini_options]
 pythonpath = ["orchestration/lib"]
 
+[tool.mypy]
+exclude = ["orchestration/"]
+
+[[tool.mypy.overrides]]
+module = [
+    "boundary_helpers",
+    "feature_helpers",
+    "ingest_helpers",
+    "log_predict_helpers",
+    "predict_helpers",
+    "validate_helpers",
+]
+ignore_missing_imports = true
+
 [tool.ruff]
 extend-exclude = ["experiment", "*.ipynb"]
 

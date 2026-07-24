@@ -27,7 +27,7 @@ from unittest.mock import patch
 
 import pytest
 
-from predict_helpers import (
+from predict_helpers import (  # type: ignore[import-not-found]
     build_predict_config,
     run_predict,
 )
@@ -138,9 +138,7 @@ class TestRunPredict:
             "n_predictions": 10,
         }
 
-        with patch(
-            "predict_helpers.Predictor"
-        ) as mock_predictor_cls:
+        with patch("predict_helpers.Predictor") as mock_predictor_cls:
             mock_predictor_cls.return_value.run.return_value = fake_response
 
             # Act

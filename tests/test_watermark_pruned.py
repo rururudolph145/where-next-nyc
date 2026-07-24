@@ -18,16 +18,16 @@ class TestSentinelHelpersRemoved:
         """bucket_path is not part of the public API."""
         # Arrange / Act / Assert
         with pytest.raises(ImportError):
-            from app.core.watermark import bucket_path  # noqa: F401
+            from app.core.watermark import bucket_path  # type: ignore[attr-defined]  # noqa: F401
 
     def test_is_complete_is_gone(self) -> None:
         """is_complete is not part of the public API."""
         # Arrange / Act / Assert
         with pytest.raises(ImportError):
-            from app.core.watermark import is_complete  # noqa: F401
+            from app.core.watermark import is_complete  # type: ignore[attr-defined]  # noqa: F401
 
     def test_mark_complete_is_gone(self) -> None:
         """mark_complete is not part of the public API."""
         # Arrange / Act / Assert
         with pytest.raises(ImportError):
-            from app.core.watermark import mark_complete  # noqa: F401
+            from app.core.watermark import mark_complete  # type: ignore[attr-defined]  # noqa: F401

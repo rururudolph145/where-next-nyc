@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from boundary_helpers import is_dataset_exhausted
+from boundary_helpers import is_dataset_exhausted  # type: ignore[import-not-found]
 
 # Module-level constant shared across all three tests (EXP idiom: avoid repeated
 # datetime literals in AAA blocks).

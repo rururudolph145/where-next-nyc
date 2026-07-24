@@ -163,7 +163,9 @@ class TestDockerComposeYaml:
 
         # Act
         compose_content = compose_path.read_text()
-        dockerfile_content = dockerfile_path.read_text() if dockerfile_path.exists() else ""
+        dockerfile_content = (
+            dockerfile_path.read_text() if dockerfile_path.exists() else ""
+        )
 
         # Assert
         assert compose_path.exists(), "orchestration/docker-compose.yaml must exist"

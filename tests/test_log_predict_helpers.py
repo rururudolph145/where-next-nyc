@@ -25,7 +25,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from log_predict_helpers import run_log_predict
+from log_predict_helpers import run_log_predict  # type: ignore[import-not-found]
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -80,9 +80,7 @@ class TestRunLogPredict:
         parquet_path = tmp_path / "predictions" / "demand_predictions.parquet"
         _write_predictions_parquet(parquet_path, n_rows=3)
 
-        with patch(
-            "log_predict_helpers.log_predictions"
-        ) as mock_log:
+        with patch("log_predict_helpers.log_predictions") as mock_log:
             mock_log.return_value = (
                 Path(MONITORING_ROOT) / "dt=2021-01-18" / "f.parquet"
             )
@@ -120,9 +118,7 @@ class TestRunLogPredict:
         # Arrange
         parquet_path = tmp_path / "does_not_exist.parquet"
 
-        with patch(
-            "log_predict_helpers.log_predictions"
-        ) as mock_log:
+        with patch("log_predict_helpers.log_predictions") as mock_log:
             # Act
             result = run_log_predict(str(parquet_path), monitoring_root=MONITORING_ROOT)
 
@@ -136,9 +132,7 @@ class TestRunLogPredict:
         parquet_path = tmp_path / "predictions" / "demand_predictions.parquet"
         _write_empty_predictions_parquet(parquet_path)
 
-        with patch(
-            "log_predict_helpers.log_predictions"
-        ) as mock_log:
+        with patch("log_predict_helpers.log_predictions") as mock_log:
             # Act
             result = run_log_predict(str(parquet_path), monitoring_root=MONITORING_ROOT)
 
