@@ -1,0 +1,44 @@
+"""predict_helpers.py — inference helpers for 15_minute_refresh_inference_dag.
+
+Airflow-free by design (the host test env has no Airflow). The DAG file
+is a thin wrapper that builds the override config and calls ``run_predict``.
+
+Two seams keep this unit-testable:
+
+  * :func:`build_predict_config` redirects gold, model, and predictions
+    output paths to the experiment root. The base config is deep-copied, never
+    mutated.
+  * :func:`run_predict` constructs ``Predictor(config=config)``, calls
+    ``.run()``, and returns the ``output_path`` string.
+"""
+
+from __future__ import annotations
+
+import copy
+from typing import Any
+
+from app.inference.predictor import Predictor
+
+
+def build_predict_config(
+    base: dict[str, Any],
+    *,
+    gold_root: str,
+    model_root: str,
+    predictions_path: str,
+) -> dict[str, Any]:
+    """Return a copy of *base* redirected to the experiment roots.
+
+    Overrides three paths. The base is deep-copied, never mutated.
+    """
+    config = copy.deepcopy(base)
+    config["data"]["gold_path"] = gold_root
+    config["model"]["store_path"] = model_root
+    config["inference"]["output_path"] = predictions_path
+    return config
+
+
+def run_predict(*, config: dict[str, Any]) -> str:
+    """Run Predictor with the override config and return the output path."""
+    response = Predictor(config=config).run()
+    return response["output_path"]
