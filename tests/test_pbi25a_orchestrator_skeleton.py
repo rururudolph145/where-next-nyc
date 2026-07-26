@@ -148,10 +148,36 @@ class TestAirflowNotInPyproject:
 
 
 class TestDockerComposeYaml:
-    """AC #8 — docker-compose.yaml must reference airflow:3.2.2 and source URL recorded."""
+    """AC #8 — docker-compose.yaml must reference airflow:2.10.3 (LocalExecutor stack)."""
 
-    def test_orchestration_docker_compose_yaml_references_airflow_3_2_2(self) -> None:
-        """orchestration/docker-compose.yaml must contain 'apache/airflow:3.2.2'."""
+    def test_orchestration_docker_compose_yaml_references_airflow_2_10_3(self) -> None:
+        """orchestration/ must reference Airflow 2.10.3 (Dockerfile or compose comment).
+
+        Updated during orchestration promotion (2026-07-24): stack replaced
+        from Airflow 3.2.2 Celery to 2.10.3 LocalExecutor. The version lives
+        in the Dockerfile FROM line; the compose file records it in its header.
+        """
+        # Arrange
+        compose_path = REPO_ROOT / "orchestration" / "docker-compose.yaml"
+        dockerfile_path = REPO_ROOT / "orchestration" / "Dockerfile"
+
+        # Act
+        compose_content = compose_path.read_text()
+        dockerfile_content = (
+            dockerfile_path.read_text() if dockerfile_path.exists() else ""
+        )
+
+        # Assert
+        assert compose_path.exists(), "orchestration/docker-compose.yaml must exist"
+        assert "2.10.3" in compose_content or "2.10.3" in dockerfile_content, (
+            "Neither docker-compose.yaml nor Dockerfile references airflow 2.10.3"
+        )
+
+    def test_orchestration_docker_compose_uses_local_executor(self) -> None:
+        """docker-compose.yaml must configure LocalExecutor (not Celery).
+
+        AC #8 updated — the promoted stack is single-machine LocalExecutor.
+        """
         # Arrange
         compose_path = REPO_ROOT / "orchestration" / "docker-compose.yaml"
 
@@ -159,32 +185,8 @@ class TestDockerComposeYaml:
         content = compose_path.read_text()
 
         # Assert
-        assert compose_path.exists(), "orchestration/docker-compose.yaml must exist"
-        assert "apache/airflow:3.2.2" in content, (
-            "docker-compose.yaml does not reference apache/airflow:3.2.2"
-        )
-
-    def test_orchestration_docker_compose_source_url_recorded_in_readme(
-        self,
-    ) -> None:
-        """The upstream source URL for docker-compose.yaml must be in orchestration/README.md.
-
-        AC #8 — 'The file's source URL is recorded in a comment or in orchestration/README.md'.
-        """
-        # Arrange
-        readme_path = REPO_ROOT / "orchestration" / "README.md"
-        source_url = (
-            "https://airflow.apache.org/docs/apache-airflow/3.2.2/docker-compose.yaml"
-        )
-
-        # Act
-        content = readme_path.read_text()
-
-        # Assert
-        assert source_url in content, (
-            f"orchestration/README.md does not record the source URL "
-            f"'{source_url}' — AC #8 requires the origin of docker-compose.yaml "
-            "to be documented."
+        assert "LocalExecutor" in content, (
+            "docker-compose.yaml does not configure LocalExecutor"
         )
 
 

@@ -14,6 +14,7 @@ import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import geopandas as gpd
@@ -21,7 +22,9 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 from mlflow.tracking import MlflowClient
 
+from app.core.clock import Clock, WallClock
 from app.core.config import load_config
+from app.core.watermark import read_watermark
 from app.ingestion.feature import build_centroid_lookup
 
 # Module-level import: a broken monitoring module should fail at startup,
@@ -42,6 +45,11 @@ _model_name: str = "ny_taxi_demand_model"
 _model_version: str | None = None
 _served_from_stage: str | None = None
 _config: dict[str, Any] = {}
+_clock: Clock = WallClock()
+# Source of truth for the simulation position (PBI 25b FIX): the incremental
+# pipeline's data watermark, NOT a clock. /health reads this for simulated_now
+# and data_publication_lag_days. Mirrors refresh_15min_dag's _WATERMARK_ROOT.
+_watermark_root: Path = Path("data/watermarks/refresh_15min")
 
 
 def _load_predictions(config: dict[str, Any]) -> pd.DataFrame:
@@ -101,7 +109,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         _centroid_lookup = build_centroid_lookup(
             config["serving"]["zone_shapefile_path"]
         )
-        _generated_at = datetime.now(tz=timezone.utc).isoformat()
+        _generated_at = _clock.now().isoformat()
         df = _predictions_df
         if not df.empty and "model_version" in df.columns:
             _model_version = str(df["model_version"].iloc[0])
@@ -121,6 +129,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             "until the simulation pipeline runs."
         )
     yield
+
+
+def _current_sim_position() -> datetime:
+    """Return the current simulation position as a NAIVE datetime.
+
+    The simulation position is the incremental pipeline's data watermark. When
+    the watermark control file is absent (before the first DAG run) it falls
+    back to the configured ``ingest.seed_start``. Both are tz-naive NYC
+    wall-clock timestamps — never attach tzinfo (the watermark/feature window
+    comparisons are naive-vs-naive).
+
+    Returns:
+        The watermark position, or the seed_start fallback, as a naive datetime.
+    """
+    watermark = read_watermark(_watermark_root)
+    if watermark is not None:
+        return watermark
+    seed_start: str = _config["ingest"]["seed_start"]
+    return datetime.fromisoformat(seed_start)
 
 
 app = FastAPI(title="NYC Taxi Demand Forecasting API", lifespan=lifespan)
@@ -231,7 +258,7 @@ async def get_heatmap(
 
     return {
         "generated_at": _generated_at,
-        "simulated": True,
+        "simulated": os.environ.get("DEMO_MODE") == "1",
         "model_version": _model_version,
         "served_from_stage": _served_from_stage,
         "hour": target_hour.isoformat(),
@@ -272,10 +299,17 @@ async def get_health() -> dict[str, Any]:
     else:
         last_bucket = _predictions_df["hour"].max()
         last_prediction_bucket = last_bucket.isoformat()
-        today = datetime.now(tz=timezone.utc).date()
-        # Treat naive timestamp as UTC per brief; clamp lag at 0.
-        lag = (today - last_bucket.date()).days
-        data_publication_lag_days = max(0, lag)
+        # Lag is measured against the simulation position (watermark), not the
+        # wall clock: in a simulation "now" is how far ingestion has advanced,
+        # so lag ≈ 0 when ingestion is current. Both sides are naive.
+        try:
+            today = _current_sim_position().date()
+            lag = (today - last_bucket.date()).days
+            data_publication_lag_days = max(0, lag)
+        except (KeyError, ValueError, TypeError):
+            # /health must never raise: degrade lag to unknown on a malformed
+            # watermark or missing seed_start rather than 500.
+            data_publication_lag_days = None
 
     # Look up Production model version from registry; degrade gracefully on error.
     model_version: str | None = None
@@ -289,13 +323,21 @@ async def get_health() -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
 
-    return {
+    demo_mode = os.environ.get("DEMO_MODE") == "1"
+    payload: dict[str, Any] = {
         "status": status,
-        "simulated": True,
+        "simulated": demo_mode,
         "data_publication_lag_days": data_publication_lag_days,
         "last_prediction_bucket": last_prediction_bucket,
         "model_version": model_version,
     }
+    if demo_mode:
+        try:
+            payload["simulated_now"] = _current_sim_position().isoformat()
+        except (KeyError, ValueError, TypeError):
+            payload["simulated_now"] = None
+        payload["wall_clock_now"] = datetime.now(tz=timezone.utc).isoformat()
+    return payload
 
 
 @app.get("/model-info")

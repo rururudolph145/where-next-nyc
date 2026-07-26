@@ -51,6 +51,9 @@ data/**/*.csv
 data/*.parquet
 data/*.csv
 
+# Parquet files anywhere in the repo (large binary artefacts)
+**/*.parquet
+
 # Reference / lookup files (shapefiles, etc.)
 data/reference/*
 !data/reference/.gitkeep
@@ -61,9 +64,63 @@ reference/
 # Implementation checklists
 implementation_checklist/
 
+# Watermarks (DAG idempotency markers — keep .gitkeep only)
+data/watermarks/
+!data/watermarks/refresh_15min/.gitkeep
+
 # Orchestration
 orchestration/logs/
 orchestration/.env
 
+# Orchestration experiment (EXP DAGs scratch area — data files are large/ephemeral)
+orchestration_experiment/data/
+
 # DVC
 .dvc/tmp/
+
+# Agent / AI tooling state (runtime, not source)
+.agents/
+.claude/agent-memory/
+.claude/hooks/
+.superpowers/
+
+# Generated HTML docs and scratch assets
+docs/*.html
+docs/css/
+docs/100.86.66.89
+docs/New folder/
+
+# Host-staged model artifacts (untracked by design — see plan docs)
+data/models/
+data/models_trained/
+data/silver/
+
+# MLflow runtime database
+mlflow.db
+
+# Stale/backup orchestration directories
+orchestration/dags_old/
+orchestration/dags_uid50000_bak/
+orchestration/config/airflow.cfg
+
+# Experiment notebooks and scratch data
+experiment/
+raw/
+
+# Project wiki (local knowledge base, not codebase)
+wiki/
+
+# Authored local content (design docs, experiment source, architecture notes)
+almanac/
+docs/
+orchestration_experiment/
+models/
+
+# Top-level scratch files
+sample_heatmap.png
+session.txt
+user_story_map.html
+*.zip
+*.Zone.Identifier
+*:Zone.Identifier
+store sales project/

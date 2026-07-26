@@ -13,24 +13,32 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
+from app.core.clock import Clock, WallClock
+
 logger = logging.getLogger(__name__)
 
+# Module-level clock instance; tests can replace via monkeypatch or by
+# passing clock= to log_predictions().
+_clock: Clock = WallClock()
 
-def _now() -> datetime:
+
+def _now(clock: Clock | None = None) -> datetime:
     """Return the current UTC datetime.
 
-    Extracted as a thin wrapper so tests can monkeypatch a deterministic value.
+    Args:
+        clock: Optional ``Clock`` override. Falls back to the module-level
+            ``_clock`` (``WallClock`` by default).
 
     Returns:
         Current datetime with UTC timezone.
     """
-    return datetime.now(tz=timezone.utc)
+    return (clock or _clock).now()
 
 
 def log_predictions(response: dict[str, Any], path: str) -> Path | None:

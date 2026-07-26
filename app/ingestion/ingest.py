@@ -1,7 +1,10 @@
 """Data ingestion: consolidate raw daily parquets into a single Bronze file."""
 
+from __future__ import annotations
+
 import os
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +42,25 @@ class Ingestion:
         self.end_ym: str = self.config["ingest"]["end_year_month"]
         self.max_workers: int = self.config["ingest"].get(
             "max_workers", _DEFAULT_MAX_WORKERS
+        )
+        self._assert_slice_matches_bucket()
+
+    def _assert_slice_matches_bucket(self) -> None:
+        """Guard that ``ingest.slice_duration`` == ``feature.bucket``.
+
+        A mismatch would make the DAG advance the watermark by a different
+        width than the feature aggregation bucket, silently dropping or
+        double-counting demand. Only enforced when BOTH keys are present so
+        that legacy test configs (which omit them) keep their behaviour.
+        """
+        slice_duration = self.config.get("ingest", {}).get("slice_duration")
+        bucket = self.config.get("feature", {}).get("bucket")
+        if slice_duration is None or bucket is None:
+            return
+        assert pd.Timedelta(slice_duration) == pd.Timedelta(bucket), (
+            f"ingest.slice_duration ({slice_duration!r}) must equal "
+            f"feature.bucket ({bucket!r}); the watermark advance width must "
+            "match the feature aggregation width."
         )
 
     # ------------------------------------------------------------------
@@ -185,14 +207,60 @@ class Ingestion:
         print(f"Saved → {self.bronze_path}  ({len(df):,} rows)")
         return self.bronze_path
 
-    def run(self) -> str:
+    @staticmethod
+    def _filter_window(
+        df: pd.DataFrame,
+        window_start: datetime | None,
+        window_end: datetime | None,
+    ) -> pd.DataFrame:
+        """Filter *df* to ``[window_start, window_end)`` on pickup time.
+
+        Left-inclusive / right-exclusive (``>= start`` and ``< end``). Bounds
+        are compared NAIVE (the data's ``tpep_pickup_datetime`` is tz-naive
+        NYC wall-clock); any tz-aware bound is stripped to naive defensively.
+        ``None`` for both bounds → no filtering (backward compatible
+        full-range ingest); a single ``None`` bound is treated as unbounded
+        on that side.
+        """
+        if window_start is None and window_end is None:
+            return df
+        if "tpep_pickup_datetime" not in df.columns:
+            return df
+
+        pickup = df["tpep_pickup_datetime"]
+        mask = pd.Series(True, index=df.index)
+        if window_start is not None:
+            mask &= pickup >= Ingestion._naive(window_start)
+        if window_end is not None:
+            mask &= pickup < Ingestion._naive(window_end)
+        return df[mask]
+
+    @staticmethod
+    def _naive(dt: datetime) -> datetime:
+        """Strip tzinfo so a bound is comparable to the naive data timeline."""
+        return dt.replace(tzinfo=None) if dt.tzinfo is not None else dt
+
+    def run(
+        self,
+        window_start: datetime | None = None,
+        window_end: datetime | None = None,
+    ) -> str:
         """Orchestrate the full raw → bronze consolidation.
+
+        Args:
+            window_start: Optional inclusive lower bound (NAIVE) on
+                ``tpep_pickup_datetime``. When both bounds are ``None`` the
+                full configured range is ingested (backward compatible).
+            window_end: Optional exclusive upper bound (NAIVE).
 
         Returns:
             Path to the written bronze parquet file.
         """
         print(f"Ingestion: consolidating raw files ({self.start_ym} → {self.end_ym})")
         df = self.load_raw()
+        df = self._filter_window(df, window_start, window_end)
+        if window_start is not None or window_end is not None:
+            print(f"  Window [{window_start}, {window_end}) → {len(df):,} rows")
         print(f"  Total raw rows: {len(df):,}")
         return self.save_bronze(df)
 

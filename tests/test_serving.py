@@ -86,6 +86,7 @@ def client(
     orig_model_version = serving_module._model_version
     orig_served_from_stage = serving_module._served_from_stage
     orig_config = serving_module._config
+    orig_watermark_root = serving_module._watermark_root
 
     serving_module._predictions_df = sample_predictions
     serving_module._zone_lookup = zone_lookup
@@ -107,6 +108,7 @@ def client(
     serving_module._model_version = orig_model_version
     serving_module._served_from_stage = orig_served_from_stage
     serving_module._config = orig_config
+    serving_module._watermark_root = orig_watermark_root
 
 
 class TestHealthCheck:
@@ -758,6 +760,9 @@ class TestLifespanCentroidWiring:
 # ---------------------------------------------------------------------------
 
 _FAKE_CONFIG = {
+    # PBI 25b FIX: /health derives the simulation position from the watermark,
+    # falling back to ingest.seed_start when no watermark file exists.
+    "ingest": {"seed_start": "2021-01-18T00:00:00"},
     "serving": {
         "predictions_path": "fake/predictions.parquet",
         "zone_shapefile_path": "fake/taxi_zones.shp",
@@ -769,18 +774,32 @@ _FAKE_CONFIG = {
 class TestHealthEndpoint:
     """Tests for GET /health (PBI 27)."""
 
+    @pytest.fixture(autouse=True)
+    def _health_state(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Provide _config (with ingest.seed_start) and an isolated watermark root.
+
+        PBI 25b FIX: /health derives the simulation position from the watermark,
+        falling back to ingest.seed_start. These tests build a TestClient without
+        entering its lifespan, so they set the module globals directly.
+        """
+        import app.api.main as serving_module
+
+        monkeypatch.setattr(serving_module, "_config", _FAKE_CONFIG)
+        monkeypatch.setattr(serving_module, "_watermark_root", tmp_path / "watermarks")
+
     def test_get_health_happy_path_returns_ok_with_version(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """GET /health returns 200 ok with model_version when parquet loaded and Production version exists.
 
-        Arrange: non-empty _predictions_df; MlflowClient returns one Production version.
+        Arrange: non-empty _predictions_df; MlflowClient returns one Production version; DEMO_MODE unset.
         Act: GET /health.
-        Assert: 200, status=="ok", simulated==True, model_version is a non-empty string,
+        Assert: 200, status=="ok", simulated==False (PBI 25b: dynamic), model_version is a non-empty string,
                 data_publication_lag_days >= 0.
         """
         import app.api.main as serving_module
 
+        monkeypatch.delenv("DEMO_MODE", raising=False)
         predictions = pd.DataFrame(
             {
                 "pulocationid": [1],
@@ -803,7 +822,9 @@ class TestHealthEndpoint:
         assert resp.status_code == 200
         body: dict[str, Any] = resp.json()
         assert body["status"] == "ok"
-        assert body["simulated"] is True
+        assert (
+            body["simulated"] is False
+        )  # PBI 25b: dynamic, False when DEMO_MODE unset
         assert isinstance(body["model_version"], str)
         assert body["model_version"] != ""
         assert isinstance(body["data_publication_lag_days"], int)
@@ -820,6 +841,7 @@ class TestHealthEndpoint:
         """
         import app.api.main as serving_module
 
+        monkeypatch.delenv("DEMO_MODE", raising=False)
         predictions = pd.DataFrame(
             {
                 "pulocationid": [1],
@@ -842,7 +864,9 @@ class TestHealthEndpoint:
         body = resp.json()
         assert body["status"] == "degraded"
         assert body["model_version"] is None
-        assert body["simulated"] is True
+        assert (
+            body["simulated"] is False
+        )  # PBI 25b: dynamic, False when DEMO_MODE unset
 
     def test_get_health_returns_503_when_predictions_not_loaded(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1075,22 +1099,29 @@ class TestModelInfoEndpoint:
 
 
 class TestHeatmapSimulatedFlag:
-    """Tests for the simulated flag added to /heatmap (PBI 27 AC #9)."""
+    """Tests for the simulated flag added to /heatmap (PBI 27 AC #9, PBI 25b update)."""
 
     def test_get_heatmap_envelope_contains_simulated_flag(
-        self, client: TestClient
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """GET /heatmap envelope includes 'simulated': true at the top level.
+        """GET /heatmap envelope includes 'simulated' bool at the top level.
 
-        Arrange: standard client fixture (non-empty predictions).
+        PBI 25b update: simulated is dynamic (DEMO_MODE env var).
+        DEMO_MODE unset → simulated=False.
+
+        Arrange: standard client fixture (non-empty predictions); DEMO_MODE unset.
         Act: GET /heatmap.
-        Assert: body["simulated"] is True.
+        Assert: body["simulated"] is False.
         """
+        monkeypatch.delenv("DEMO_MODE", raising=False)
         resp = client.get("/heatmap")
 
         assert resp.status_code == 200
         body: dict[str, Any] = resp.json()
-        assert body["simulated"] is True
+        assert isinstance(body["simulated"], bool)
+        assert (
+            body["simulated"] is False
+        )  # PBI 25b: dynamic, False when DEMO_MODE unset
 
 
 # ---------------------------------------------------------------------------

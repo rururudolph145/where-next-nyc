@@ -58,6 +58,9 @@ from tests.conftest import make_mock_version
 # ---------------------------------------------------------------------------
 
 _FAKE_SERVING_CONFIG: dict[str, Any] = {
+    # PBI 25b FIX: /health derives the simulation position from the watermark,
+    # falling back to ingest.seed_start when no watermark file exists.
+    "ingest": {"seed_start": "2021-01-18T00:00:00"},
     "serving": {
         "predictions_path": "fake/predictions.parquet",
         "zone_shapefile_path": "fake/taxi_zones.shp",
@@ -76,6 +79,20 @@ def _make_predictions_df(hour_str: str = "2021-03-01 00:00:00") -> pd.DataFrame:
             "actual_trip_count": [9.0],
         }
     )
+
+
+@pytest.fixture()
+def _health_sim_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Set _config (ingest.seed_start) and an isolated watermark root for /health.
+
+    PBI 25b FIX: /health derives the simulation position from the watermark,
+    falling back to ingest.seed_start. These tests build a TestClient without
+    entering its lifespan, so the module globals are set directly.
+    """
+    import app.api.main as serving_module
+
+    monkeypatch.setattr(serving_module, "_config", _FAKE_SERVING_CONFIG)
+    monkeypatch.setattr(serving_module, "_watermark_root", tmp_path / "watermarks")
 
 
 def _make_empty_predictions_df() -> pd.DataFrame:
@@ -230,18 +247,19 @@ class TestHealthHappyPath:
     """AC-1: /health returns ok shape when predictions loaded + Production model present."""
 
     def test_ac1_health_happy_path_returns_ok_shape(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, _health_sim_state: None
     ) -> None:
-        """AC-1: 200 response has status=ok, simulated=true, non-negative lag, model_version string.
+        """AC-1: 200 response has status=ok, simulated is a bool, non-negative lag, model_version string.
 
         Arrange: non-empty predictions df; MlflowClient returns Production version "3".
-        Act: GET /health.
-        Assert: 200, status=="ok", simulated==True, model_version=="3",
+        Act: GET /health (DEMO_MODE unset → simulated=False per PBI 25b AC #4).
+        Assert: 200, status=="ok", simulated==False, model_version=="3",
                 data_publication_lag_days >= 0 (int), last_prediction_bucket parseable.
         """
         import app.api.main as serving_module
 
         # Arrange
+        monkeypatch.delenv("DEMO_MODE", raising=False)
         predictions = _make_predictions_df("2021-03-01 00:00:00")
         monkeypatch.setattr(serving_module, "_predictions_df", predictions)
 
@@ -263,7 +281,9 @@ class TestHealthHappyPath:
         assert resp.status_code == 200
         body: dict[str, Any] = resp.json()
         assert body["status"] == "ok"
-        assert body["simulated"] is True
+        assert (
+            body["simulated"] is False
+        )  # PBI 25b: dynamic, False when DEMO_MODE unset
         assert body["model_version"] == "3"
         assert isinstance(body["data_publication_lag_days"], int)
         assert body["data_publication_lag_days"] >= 0
@@ -280,7 +300,7 @@ class TestHealthLagClamping:
     """AC-2: data_publication_lag_days is 0 when predictions are from the future."""
 
     def test_ac2_health_lag_is_zero_when_bucket_in_future(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, _health_sim_state: None
     ) -> None:
         """AC-2: lag must never be negative — clamped to 0 for future bucket timestamps.
 
@@ -357,18 +377,19 @@ class TestHealthDegraded:
     """AC-4: /health returns degraded shape when predictions loaded but no Production model."""
 
     def test_ac4_health_degraded_when_no_production_version(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, _health_sim_state: None
     ) -> None:
         """AC-4: status=degraded, model_version=null, freshness fields still populated.
 
         Arrange: non-empty predictions df; MlflowClient returns empty version list.
         Act: GET /health.
         Assert: 200, status=="degraded", model_version is null,
-                simulated==True, freshness fields are non-null.
+                simulated==False (DEMO_MODE unset per PBI 25b AC #4), freshness fields are non-null.
         """
         import app.api.main as serving_module
 
         # Arrange
+        monkeypatch.delenv("DEMO_MODE", raising=False)
         predictions = _make_predictions_df("2021-03-01 00:00:00")
         monkeypatch.setattr(serving_module, "_predictions_df", predictions)
 
@@ -385,7 +406,9 @@ class TestHealthDegraded:
         assert resp.status_code == 200
         body: dict[str, Any] = resp.json()
         assert body["status"] == "degraded"
-        assert body["simulated"] is True
+        assert (
+            body["simulated"] is False
+        )  # PBI 25b: dynamic, False when DEMO_MODE unset
         assert body["model_version"] is None
         # Freshness fields must still be populated even without a model
         assert body["last_prediction_bucket"] is not None
@@ -665,20 +688,25 @@ class TestModelInfoNoProduction:
 
 
 class TestHeatmapSimulatedFlag:
-    """AC-9: /heatmap top-level envelope includes simulated=true."""
+    """AC-9: /heatmap top-level envelope includes simulated flag (PBI 25b: dynamic)."""
 
-    def test_ac9_heatmap_envelope_contains_simulated_true(
+    def test_ac9_heatmap_envelope_contains_simulated_flag(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """AC-9: 'simulated' key is present and equals True in the /heatmap response envelope.
+        """AC-9: 'simulated' key is present in the /heatmap response envelope.
 
-        Arrange: non-empty predictions df with centroid and zone lookups.
+        PBI 25b update: simulated is now dynamic (True only when DEMO_MODE=1).
+        Without DEMO_MODE, the flag is False. The key invariant is that 'simulated'
+        is always present and is a bool.
+
+        Arrange: non-empty predictions df with centroid and zone lookups; DEMO_MODE unset.
         Act: GET /heatmap (no hour param → latest hour).
-        Assert: body["simulated"] is True.
+        Assert: body["simulated"] is a bool (False when DEMO_MODE unset).
         """
         import app.api.main as serving_module
 
         # Arrange
+        monkeypatch.delenv("DEMO_MODE", raising=False)
         predictions = pd.DataFrame(
             {
                 "pulocationid": [1, 2, 3],
@@ -714,7 +742,8 @@ class TestHeatmapSimulatedFlag:
         assert resp.status_code == 200
         body: dict[str, Any] = resp.json()
         assert "simulated" in body
-        assert body["simulated"] is True
+        assert isinstance(body["simulated"], bool)
+        assert body["simulated"] is False  # PBI 25b: False when DEMO_MODE unset
 
 
 # ---------------------------------------------------------------------------

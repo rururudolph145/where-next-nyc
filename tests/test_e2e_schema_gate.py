@@ -184,15 +184,15 @@ def test_ac2_each_required_column_missing_raises(col: str, tmp_path: Path) -> No
 
 
 # ---------------------------------------------------------------------------
-# AC #3 — PULocationID outside 1–263 raises DataValidationError
+# AC #3 — PULocationID outside 1–265 raises DataValidationError
 # ---------------------------------------------------------------------------
 
 
 def test_ac3_pulocationid_out_of_range_raises(tmp_path: Path) -> None:
-    """AC #3: PULocationID = 264 raises DataValidationError."""
+    """AC #3: PULocationID = 266 (above highest TLC zone) raises DataValidationError."""
     # Arrange
     bad_df = _valid_bronze_df().copy()
-    bad_df.loc[0, "PULocationID"] = 264.0
+    bad_df.loc[0, "PULocationID"] = 266.0
     cleaner = _make_cleaner(tmp_path, bronze_df=bad_df)
 
     # Act / Assert
@@ -443,6 +443,54 @@ def test_edge_pulocationid_float_one_accepted(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Edge: TLC non-geographic zones 264 ("Unknown") and 265 ("NV") are accepted
+# ---------------------------------------------------------------------------
+
+
+def test_edge_pulocationid_264_accepted(tmp_path: Path) -> None:
+    """Edge: PULocationID = 264 is a valid TLC raw code and must not be rejected.
+
+    Zone 264 ('Unknown') appears in real NYC TLC data and is dropped
+    downstream by DataCleaner (feature.py shapefile-orphan filter).
+    The bronze schema must not block it before that stage runs.
+    """
+    # Arrange
+    df = _valid_bronze_df().copy()
+    df.loc[0, "PULocationID"] = 264.0
+    cleaner = _make_cleaner(tmp_path, bronze_df=df)
+
+    # Act / Assert — no exception
+    cleaner.run()
+
+
+def test_edge_pulocationid_265_accepted(tmp_path: Path) -> None:
+    """Edge: PULocationID = 265 is a valid TLC raw code and must not be rejected.
+
+    Zone 265 ('NV') appears in real NYC TLC data and is dropped downstream
+    by DataCleaner. The bronze schema must not block it.
+    """
+    # Arrange
+    df = _valid_bronze_df().copy()
+    df.loc[0, "PULocationID"] = 265.0
+    cleaner = _make_cleaner(tmp_path, bronze_df=df)
+
+    # Act / Assert — no exception
+    cleaner.run()
+
+
+def test_edge_pulocationid_266_raises(tmp_path: Path) -> None:
+    """Edge: PULocationID = 266 exceeds the highest known TLC zone and must raise."""
+    # Arrange
+    bad_df = _valid_bronze_df().copy()
+    bad_df.loc[0, "PULocationID"] = 266.0
+    cleaner = _make_cleaner(tmp_path, bronze_df=bad_df)
+
+    # Act / Assert
+    with pytest.raises(DataValidationError):
+        cleaner.run()
+
+
+# ---------------------------------------------------------------------------
 # Edge: repeat runs produce distinct log files (no silent overwrite)
 # ---------------------------------------------------------------------------
 
@@ -456,7 +504,6 @@ def test_edge_repeat_runs_produce_distinct_log_files(tmp_path: Path) -> None:
     """
     import app.ingestion.schema as schema_module
     from datetime import datetime as _real_datetime
-
     from datetime import timezone as _tz
 
     timestamps = [
@@ -465,15 +512,16 @@ def test_edge_repeat_runs_produce_distinct_log_files(tmp_path: Path) -> None:
     ]
     call_index: list[int] = [0]
 
-    class _FakeDatetime:
-        @classmethod
-        def now(cls, tz: Any = None) -> _real_datetime:
+    class _FakeWallClock:
+        """Fake WallClock that cycles through predetermined timestamps."""
+
+        def now(self) -> _real_datetime:
             ts = timestamps[min(call_index[0], len(timestamps) - 1)]
             call_index[0] += 1
             return ts
 
-    original_datetime = schema_module.datetime
-    schema_module.datetime = _FakeDatetime  # type: ignore[misc,assignment]
+    original_wallclock = schema_module.WallClock
+    schema_module.WallClock = _FakeWallClock  # type: ignore[misc,assignment]
 
     try:
         bronze_df = _valid_bronze_df()
@@ -506,7 +554,7 @@ def test_edge_repeat_runs_produce_distinct_log_files(tmp_path: Path) -> None:
         c2.run()
 
     finally:
-        schema_module.datetime = original_datetime  # type: ignore[misc,assignment]
+        schema_module.WallClock = original_wallclock  # type: ignore[misc,assignment]
 
     # Assert — two distinct log files
     log_dir = shared_silver / "_validation"

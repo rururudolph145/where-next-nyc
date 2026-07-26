@@ -1,0 +1,7 @@
+# Airflow runtime artifacts — regenerated on every run, never source.
+logs/
+__pycache__/
+
+# Mutable experiment state and regenerated data outputs.
+data/bronze/
+data/watermark.json

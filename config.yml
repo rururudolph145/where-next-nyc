@@ -4,6 +4,13 @@ ingest:
   start_year_month: "2021-01"
   end_year_month: "2021-03"
   max_workers: 8  # ThreadPoolExecutor size for parallel parquet reads
+  # PBI 25b FIX — incremental-pipeline watermark over the fixed 2021 data.
+  # seed_start is the LOWER bound of the cumulative ingest window (naive ISO,
+  # NO 'Z': tpep_pickup_datetime is tz-naive NYC wall-clock). The window's
+  # upper bound advances by slice_duration each DAG run, so bronze grows
+  # monotonically. slice_duration MUST equal feature.bucket.
+  seed_start: "2021-01-18T00:00:00"  # 3rd week of Jan 2021
+  slice_duration: "15min"
   bronze_schema:
     VendorID: float64
     tpep_pickup_datetime: datetime64[us]
