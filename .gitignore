@@ -51,6 +51,9 @@ data/**/*.csv
 data/*.parquet
 data/*.csv
 
+# Parquet files anywhere in the repo (large binary artefacts)
+**/*.parquet
+
 # Reference / lookup files (shapefiles, etc.)
 data/reference/*
 !data/reference/.gitkeep
