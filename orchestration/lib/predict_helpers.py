@@ -15,9 +15,15 @@ Two seams keep this unit-testable:
 from __future__ import annotations
 
 import copy
+import logging
+import os
 from typing import Any
 
+import pandas as pd
+
 from app.inference.predictor import Predictor
+
+logger = logging.getLogger(__name__)
 
 
 def build_predict_config(
@@ -38,7 +44,17 @@ def build_predict_config(
     return config
 
 
-def run_predict(*, config: dict[str, Any]) -> str:
-    """Run Predictor with the override config and return the output path."""
+def run_predict(*, config: dict[str, Any]) -> str | None:
+    """Run Predictor with the override config and return the output path.
+
+    Returns None when gold has 0 rows — the lag window exceeds the available
+    history on early pipeline runs, so FeatureEngineer drops every row.
+    The DAG logs the skip and lets write_watermark advance normally.
+    """
+    gold_file = os.path.join(config["data"]["gold_path"], "hourly_demand_featured.parquet")
+    gold = pd.read_parquet(gold_file)
+    if gold.empty:
+        logger.info("run_predict: gold frame is empty — skipping inference for this window")
+        return None
     response = Predictor(config=config).run()
     return response["output_path"]

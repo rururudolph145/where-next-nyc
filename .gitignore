@@ -69,5 +69,8 @@ data/watermarks/
 orchestration/logs/
 orchestration/.env
 
+# Orchestration experiment (EXP DAGs scratch area — data files are large/ephemeral)
+orchestration_experiment/data/
+
 # DVC
 .dvc/tmp/

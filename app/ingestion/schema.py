@@ -29,7 +29,7 @@ _BRONZE_SCHEMA = pa.DataFrameSchema(
         "tpep_dropoff_datetime": pa.Column(pa.DateTime, nullable=True),
         "PULocationID": pa.Column(
             pa.Float,
-            checks=pa.Check.in_range(1, 263),
+            checks=pa.Check.in_range(1, 265),
             nullable=True,
         ),
         "passenger_count": pa.Column(pa.Float, nullable=True),

@@ -178,10 +178,10 @@ class TestSchemaValidation:
     def test_validate_bronze_schema_pulocationid_out_of_range_raises(
         self,
     ) -> None:
-        """AC #3 / #8c: PULocationID = 264.0 raises DataValidationError."""
+        """AC #3 / #8c: PULocationID = 266.0 (above highest TLC zone) raises DataValidationError."""
         # Arrange
         df = _valid_bronze_df().copy()
-        df.loc[0, "PULocationID"] = 264.0
+        df.loc[0, "PULocationID"] = 266.0
         # Act / Assert
         with pytest.raises(DataValidationError):
             validate_bronze_schema(df)

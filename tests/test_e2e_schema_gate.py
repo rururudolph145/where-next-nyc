@@ -184,15 +184,15 @@ def test_ac2_each_required_column_missing_raises(col: str, tmp_path: Path) -> No
 
 
 # ---------------------------------------------------------------------------
-# AC #3 — PULocationID outside 1–263 raises DataValidationError
+# AC #3 — PULocationID outside 1–265 raises DataValidationError
 # ---------------------------------------------------------------------------
 
 
 def test_ac3_pulocationid_out_of_range_raises(tmp_path: Path) -> None:
-    """AC #3: PULocationID = 264 raises DataValidationError."""
+    """AC #3: PULocationID = 266 (above highest TLC zone) raises DataValidationError."""
     # Arrange
     bad_df = _valid_bronze_df().copy()
-    bad_df.loc[0, "PULocationID"] = 264.0
+    bad_df.loc[0, "PULocationID"] = 266.0
     cleaner = _make_cleaner(tmp_path, bronze_df=bad_df)
 
     # Act / Assert
@@ -440,6 +440,54 @@ def test_edge_pulocationid_float_one_accepted(tmp_path: Path) -> None:
 
     # Act / Assert — no exception
     cleaner.run()
+
+
+# ---------------------------------------------------------------------------
+# Edge: TLC non-geographic zones 264 ("Unknown") and 265 ("NV") are accepted
+# ---------------------------------------------------------------------------
+
+
+def test_edge_pulocationid_264_accepted(tmp_path: Path) -> None:
+    """Edge: PULocationID = 264 is a valid TLC raw code and must not be rejected.
+
+    Zone 264 ('Unknown') appears in real NYC TLC data and is dropped
+    downstream by DataCleaner (feature.py shapefile-orphan filter).
+    The bronze schema must not block it before that stage runs.
+    """
+    # Arrange
+    df = _valid_bronze_df().copy()
+    df.loc[0, "PULocationID"] = 264.0
+    cleaner = _make_cleaner(tmp_path, bronze_df=df)
+
+    # Act / Assert — no exception
+    cleaner.run()
+
+
+def test_edge_pulocationid_265_accepted(tmp_path: Path) -> None:
+    """Edge: PULocationID = 265 is a valid TLC raw code and must not be rejected.
+
+    Zone 265 ('NV') appears in real NYC TLC data and is dropped downstream
+    by DataCleaner. The bronze schema must not block it.
+    """
+    # Arrange
+    df = _valid_bronze_df().copy()
+    df.loc[0, "PULocationID"] = 265.0
+    cleaner = _make_cleaner(tmp_path, bronze_df=df)
+
+    # Act / Assert — no exception
+    cleaner.run()
+
+
+def test_edge_pulocationid_266_raises(tmp_path: Path) -> None:
+    """Edge: PULocationID = 266 exceeds the highest known TLC zone and must raise."""
+    # Arrange
+    bad_df = _valid_bronze_df().copy()
+    bad_df.loc[0, "PULocationID"] = 266.0
+    cleaner = _make_cleaner(tmp_path, bronze_df=bad_df)
+
+    # Act / Assert
+    with pytest.raises(DataValidationError):
+        cleaner.run()
 
 
 # ---------------------------------------------------------------------------
