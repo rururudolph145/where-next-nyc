@@ -107,6 +107,12 @@ raw/
 # Project wiki (local knowledge base, not codebase)
 wiki/
 
+# Authored local content (design docs, experiment source, architecture notes)
+almanac/
+docs/
+orchestration_experiment/
+models/
+
 # Top-level scratch files
 sample_heatmap.png
 session.txt
