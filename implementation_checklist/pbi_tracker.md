@@ -353,7 +353,7 @@ Promotes the orchestrator out of `experiment/` and into a first-class lane (C00 
   - Depends on: PBI 30 (CI gates)
   - Difficulty: S (narrowed from M after scope split)
 
-- [x] **PBI 25b — `refresh_15min_dag` (Ingestion → Inference Cadence)** — *shipped in `00b36f8`, redesigned in `8a17bda…fc52a8f` (PBI 25b FIX, 2026-06-11)* — Original 16 commits shipped an 8-task DAG with `_SpeedupClock` for 450× demo cadence; the clock was set process-global in the dag-processor but task callables run in the worker, so DEMO_MODE=1 silently fell back to WallClock. **FIX** replaces the clock-illusion with a watermark-advancing pipeline: data watermark IS the simulation position (JSON control file at `data/watermarks/refresh_15min/.current_watermark`); DAG grows to 11 tasks; bronze is cumulative (lower bound frozen at `ingest.seed_start = 2021-01-18`); boundary stop at `2021-03-31T23:59:57`. `WallClock`/`SimulatedClock` classes retained for `/health`. 439 tests passed / 8 skipped (was 418/6); validator loop closed in one pass.
+- [x] **PBI 25b — `refresh_15min_dag` (Ingestion → Inference Cadence)** — *shipped in `00b36f8`, redesigned (PBI 25b FIX), final promotion merged in PR #16 (`5a12186`)* — Original 16 commits shipped an 8-task DAG with `_SpeedupClock` for 450× demo cadence; the clock was set process-global in the dag-processor but task callables run in the worker, so DEMO_MODE=1 silently fell back to WallClock. **FIX** replaces the clock-illusion with a watermark-advancing pipeline: data watermark IS the simulation position (JSON control file at `data/watermarks/refresh_15min/.current_watermark`); EXP-01→EXP-05 chain rebuilt and promoted; wall-clock sentinel trio (`decide_bucket`/`check_watermark`/`write_done`) dropped per gap analysis — watermark-only model handles the same invariant; final DAG is **8 tasks** (`read_watermark → check_no_new_data → ingest → validate → feature → predict → log_predict → write_watermark`); bronze is cumulative (lower bound frozen at `ingest.seed_start = 2021-01-18`); boundary stop at `2021-03-31T23:59:57`. `WallClock`/`SimulatedClock` classes retained for `/health`. Helpers live in `orchestration/lib/`. 489 tests passed / 14 skipped at promotion.
   - Add `orchestration/dags/refresh_15min_dag.py` — ingest → validate (PBI 19) → feature → predict → log (PBI 22)
   - Driven by the injected `Clock` from PBI 25a, not `datetime.utcnow()`
   - Idempotent on `(date, bucket)` watermark — rerunning the same bucket-date pair is a no-op
@@ -651,7 +651,7 @@ PBI 22 (prediction log + actuals) ──> PBI 23 (drift detector) ──> PBI 24
 | Done | Order | PBI | Rationale |
 |------|-------|-----|-----------|
 | [x] | 16 | ~~PBI 25a~~ | ~~Orchestrator foundation: `Clock` abstraction + `orchestration/` skeleton (no DAGs). Unblocks 25b / 25c / 25d. **Split 2026-05-30** from the monolithic 25a so the `Clock` refactor lands isolated from any specific DAG. Depends on PBI 30.~~ — *shipped in `ff466e9`* |
-| [x] | 17 | ~~PBI 25b~~ | ~~`refresh_15min_dag` — ingestion → inference cadence; delivers the `DEMO_MODE=1 make demo` story. Independently shippable in parallel with 25c. Depends on PBI 25a.~~ — *shipped in `00b36f8`* |
+| [x] | 17 | ~~PBI 25b~~ | ~~`refresh_15min_dag` — ingestion → inference cadence; watermark-advancing pipeline (EXP-01 → EXP-05 chain promoted to `orchestration/lib/` + 8-task `the_15_minute_refresh_inference_dag`). PR #16 merged `5a12186`. Original `_SpeedupClock` design replaced by watermark-only model.~~ — *shipped in `5a12186`* |
 | [ ] | 18 | PBI 25c | `train_monthly_dag` — training + PBI 20 registry gate. Independently shippable in parallel with 25b. Depends on PBI 25a, PBI 20. |
 
 ### Open — Phase E · Closed-loop monitoring (~24h)
@@ -775,17 +775,26 @@ PBI 22 (prediction log + actuals) ──> PBI 23 (drift detector) ──> PBI 24
   - Smoke result: silver (86 rows), gold (0 rows / 24 columns — expected: all-train path), `iqr_bounds.json` under `data_exp/models/` (not production `models/`). Watermark advanced `00:00 → 00:15`.
   - **Note on gold 0-row output:** the inference split `hour >= window_end` is empty by construction for every window in the `[2021-01-18, ...)` experiment range. Gold will have non-zero rows once a training step produces features for the inference side (EXP-04+). This is the correct OQ4 all-train path, not a bug.
 
-### EXP-04 — Predict (7 tasks) — *next*
+### EXP-04 — Predict + Log (8 tasks)
 
-- [ ] **EXP-04 — `exp04_predict_dag`** — *planned*
-  - Insert `predict` between `feature` and `advance_watermark`.
-  - Loads the trained model from MLflow registry (Production stage), runs inference on the gold feature matrix, writes predictions to `data_exp/predictions/`.
-  - Depends on: EXP-03b, a trained model in the registry.
+- [x] **EXP-04 — `exp04_predict_log_dag`** — *GREEN + SMOKE VERIFIED 2026-07-17*
+  - Inserts `predict` + `log_predict` between `feature` and `advance_watermark` (8 tasks total).
+  - Loads trained model from `data_exp/models_trained/` (`PREDICT_MODEL_ROOT`); model was retrained with 17 features (host model.pkl was stale at 14 features — retrained in-container).
+  - Predictions parquet: 823k rows, one per `(zone, hour)`; monitoring parquet written under `data_exp/monitoring/predictions/dt=.../`.
+  - `libgomp1` apt dep added to Dockerfile for LightGBM. `bucket_time` = `hour` ISO string. `served_from_stage` = `"exp04_predict_log_dag"`.
+  - Crash-safety verified: watermark held at `2021-03-01T00:30:00` when predict failed.
+  - All 8 tasks succeeded in-container (487 passed / 13 skipped on host).
+  - **NOT committed** — gitignored under `orchestration_experiment/`; helpers promoted to `orchestration/lib/predict_helpers.py` and `orchestration/lib/log_predict_helpers.py` in PBI 25b promotion commits.
 
-### EXP-05 — Idempotency Check — *planned*
+### EXP-05 — Idempotency Boundary (9 tasks)
 
-- [ ] **EXP-05 — idempotency**
-  - Verify that re-running any DAG for the same window produces identical artefacts and does not advance the watermark a second time.
+- [x] **EXP-05 — `exp05_idempotency_boundary_dag`** — *GREEN + SMOKE VERIFIED 2026-07-23*
+  - Inserts `check_no_new_data` after `read_watermark` (9 tasks total).
+  - `DATASET_MAX = datetime(2021, 3, 31, 23, 59, 57)` hardcoded (derived value was 2 s late — causes overrun runs; one deterministic constant is the fix).
+  - `is_dataset_exhausted` pure helper in `exp05_boundary.py` (Airflow-free, host-testable); DAG wrapper raises `AirflowSkipException` when exhausted.
+  - Wall-clock sentinel trio (`decide_bucket` / `check_watermark` / `write_done`) dropped — watermark-only model handles the same invariant; gap analysis confirmed these are unnecessary.
+  - Boundary-skip holds watermark; fresh-slot full chain succeeds + watermark advances (489 passed / 14 skipped on host).
+  - **NOT committed** — gitignored; `is_dataset_exhausted` helper promoted to `orchestration/lib/boundary_helpers.py` in PBI 25b promotion commit `1bc9b7a`.
 
 ---
 

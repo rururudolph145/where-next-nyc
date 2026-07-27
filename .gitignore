@@ -89,6 +89,7 @@ docs/*.html
 docs/css/
 docs/100.86.66.89
 docs/New folder/
+docs/superpowers/
 
 # Host-staged model artifacts (untracked by design — see plan docs)
 data/models/
