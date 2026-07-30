@@ -96,8 +96,15 @@ data/models/
 data/models_trained/
 data/silver/
 
-# MLflow runtime database
+# MLflow runtime database (lives under data/ so the container volume mount can reach it)
 mlflow.db
+data/mlflow.db
+
+# Backup files
+*.bak
+**/*.bak
+*_bak/
+**/*_bak/
 
 # Stale/backup orchestration directories
 orchestration/dags_old/

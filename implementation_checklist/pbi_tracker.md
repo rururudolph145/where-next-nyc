@@ -366,15 +366,15 @@ Promotes the orchestrator out of `experiment/` and into a first-class lane (C00 
   - Depends on: PBI 25a (foundation)
   - Difficulty: S
 
-- [ ] **PBI 25c — `train_monthly_dag` (Training + Registry Gate)**
-  - Add `orchestration/dags/train_monthly_dag.py` — cron `@monthly` + manual trigger; train → gate (PBI 20) → register
-  - Driven by the injected `Clock` from PBI 25a
-  - Update `orchestration/README.md` to remove the TODO for this DAG and document its schedule + gate semantics
-  - Acceptance:
-    - `airflow dags list` shows `train_monthly_dag`
-    - DAG parses cleanly under `pytest tests/test_dag_integrity.py`
-    - End-to-end manual trigger: trains a model, runs the PBI 20 gate against the incumbent, registers iff the gate passes; gate-fail path leaves the incumbent in `Production`
-    - Re-triggering the same month is either a no-op or produces a clearly-versioned re-run (decision documented in the README)
+- [x] **PBI 25c — `train_monthly_dag` (Training + Registry Gate)** — *host-green 2026-07-28; Phase 4 container hand-off pending*
+  - `orchestration/dags/train_monthly_dag.py` — manual trigger (`schedule=None`); 5-task linear chain: `read_watermarks → check_window_ready → compute_window → train → write_training_watermark`
+  - `orchestration/lib/training_helpers.py` — pure Airflow-free helper seam; 3 exception classes (`WatermarkNotFoundError`, `WatermarkInvariantError`, `EmptyTrainingWindowError`); dependency-injection seam (`trainer_factory`/`client_factory`) for host-testability
+  - Dual-watermark contract: reads `refresh_15min/.current_watermark` (inference position) + `last_training/.current_watermark` (bootstrap falls back to `seed_start`); advances `last_training` watermark only on success
+  - Fault model: crash → watermark held; gate reject → watermark advances, incumbent preserved; `check_window_ready` skip (inference < 30d ahead) → watermark held
+  - 462 host tests pass / 11 skipped (7 `TestDagStructure` Airflow-only + 4 integration skeletons). `@pytest.mark.integration` marker registered in `pyproject.toml`.
+  - `orchestration/README.md` updated with Training DAG section (trigger command, dual-watermark contract, fault-model table)
+  - TDD routine documented in `docs/superpowers/specs/2026-07-27-airflow-dag-tdd-routine.md`
+  - Phase 4 (container boot → `list-import-errors` → `TestDagStructure` in-container → 4 e2e integration tests) is user hand-off
   - Depends on: PBI 25a (foundation), PBI 20 (registry stage label for the gate step)
   - Difficulty: S
 
@@ -652,7 +652,7 @@ PBI 22 (prediction log + actuals) ──> PBI 23 (drift detector) ──> PBI 24
 |------|-------|-----|-----------|
 | [x] | 16 | ~~PBI 25a~~ | ~~Orchestrator foundation: `Clock` abstraction + `orchestration/` skeleton (no DAGs). Unblocks 25b / 25c / 25d. **Split 2026-05-30** from the monolithic 25a so the `Clock` refactor lands isolated from any specific DAG. Depends on PBI 30.~~ — *shipped in `ff466e9`* |
 | [x] | 17 | ~~PBI 25b~~ | ~~`refresh_15min_dag` — ingestion → inference cadence; watermark-advancing pipeline (EXP-01 → EXP-05 chain promoted to `orchestration/lib/` + 8-task `the_15_minute_refresh_inference_dag`). PR #16 merged `5a12186`. Original `_SpeedupClock` design replaced by watermark-only model.~~ — *shipped in `5a12186`* |
-| [ ] | 18 | PBI 25c | `train_monthly_dag` — training + PBI 20 registry gate. Independently shippable in parallel with 25b. Depends on PBI 25a, PBI 20. |
+| [x] | 18 | ~~PBI 25c~~ | ~~`train_monthly_dag` — training + PBI 20 registry gate.~~ — *host-green 2026-07-28; Phase 4 container hand-off pending* |
 
 ### Open — Phase E · Closed-loop monitoring (~24h)
 
@@ -804,3 +804,5 @@ PBI 22 (prediction log + actuals) ──> PBI 23 (drift detector) ──> PBI 24
 - **Multi-driver coordination:** MVP serves the same heatmap to all drivers (Uber model). DiDi-style per-driver optimization requires fleet state tracking and is deferred to post-MVP.
 - **A/B testing:** No framework for measuring if recommendations improve driver outcomes. Design doc recommended before scaling.
 - **Batch vs streaming inference:** Prediction is batch by nature — the model needs aggregates over completed time windows (e.g., hourly trip counts). Data ingestion can be streaming into a DB, but inference runs as a periodic batch job (every 15 min in Uber's case). These two loops are decoupled. For demo purposes, historical replay with a simulated clock exercises the same code path as a production cron job.
+- **Bronze layer scalability (known limitation):** Current ingestion rewrites the full cumulative bronze parquet on every DAG run (ADR 001). Cost grows linearly with dataset size. Migration path: (1) switch write pattern to append-only date-partitioned bronze (DAG writes only the new slice, never rewrites old partitions); (2) optionally add DuckDB as a read layer for partition-pruned queries over the growing partition tree. DuckDB alone does not fix the write cost — the partition change must come first. No design work started; defer until rewrite cost becomes observable.
+- **LLM routing assistant (post-MVP, nice-to-have):** Natural-language endpoint (`GET /suggest?zone_id=&time=`) where a driver asks "where should I go next?" — LLM receives driver's current zone, current time, and top-N demand zones from the existing predictions store, and returns a plain-English recommendation. LLM adds no forecasting logic; it is purely a narrative layer over pre-computed predictions. Requires rate-limiting strategy and async dispatch at scale. Detail to be added after dedicated brainstorming session.
