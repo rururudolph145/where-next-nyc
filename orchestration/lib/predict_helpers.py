@@ -51,10 +51,14 @@ def run_predict(*, config: dict[str, Any]) -> str | None:
     history on early pipeline runs, so FeatureEngineer drops every row.
     The DAG logs the skip and lets write_watermark advance normally.
     """
-    gold_file = os.path.join(config["data"]["gold_path"], "hourly_demand_featured.parquet")
+    gold_file = os.path.join(
+        config["data"]["gold_path"], "hourly_demand_featured.parquet"
+    )
     gold = pd.read_parquet(gold_file)
     if gold.empty:
-        logger.info("run_predict: gold frame is empty — skipping inference for this window")
+        logger.info(
+            "run_predict: gold frame is empty — skipping inference for this window"
+        )
         return None
     response = Predictor(config=config).run()
     return response["output_path"]
