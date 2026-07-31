@@ -1,4 +1,4 @@
-"""Tests for orchestration_experiment/dags/exp03a_validate.py.
+"""Tests for orchestration/lib/validate_helpers.py.
 
 PBI EXP-03a (experimentation) — the pure helpers the validate DAG delegates to.
 Inserts a ``validate`` task between ``ingest`` and ``advance_watermark`` so
@@ -42,7 +42,7 @@ import pytest
 
 from app.core.clock import SimulatedClock
 from app.ingestion.schema import DataValidationError
-from orchestration_experiment.dags.exp03a_validate import (
+from orchestration.lib.validate_helpers import (
     build_validate_config,
     run_validate,
 )
@@ -133,13 +133,11 @@ class TestRunValidateHappyPath:
         df = pd.DataFrame({"PULocationID": [1.0]})
         with (
             patch(
-                "orchestration_experiment.dags.exp03a_validate.pd.read_parquet",
+                "orchestration.lib.validate_helpers.pd.read_parquet",
                 return_value=df,
             ) as mock_read,
-            patch(
-                "orchestration_experiment.dags.exp03a_validate.validate_bronze_schema"
-            ),
-            patch("orchestration_experiment.dags.exp03a_validate.write_validation_log"),
+            patch("orchestration.lib.validate_helpers.validate_bronze_schema"),
+            patch("orchestration.lib.validate_helpers.write_validation_log"),
         ):
             # Act
             run_validate(BRONZE_PATH, config=override_config)
@@ -155,13 +153,13 @@ class TestRunValidateHappyPath:
         df = pd.DataFrame({"PULocationID": [1.0]})
         with (
             patch(
-                "orchestration_experiment.dags.exp03a_validate.pd.read_parquet",
+                "orchestration.lib.validate_helpers.pd.read_parquet",
                 return_value=df,
             ),
             patch(
-                "orchestration_experiment.dags.exp03a_validate.validate_bronze_schema"
+                "orchestration.lib.validate_helpers.validate_bronze_schema"
             ) as mock_validate,
-            patch("orchestration_experiment.dags.exp03a_validate.write_validation_log"),
+            patch("orchestration.lib.validate_helpers.write_validation_log"),
         ):
             # Act
             run_validate(BRONZE_PATH, config=override_config)
@@ -179,14 +177,12 @@ class TestRunValidateHappyPath:
         df = pd.DataFrame({"PULocationID": [1.0]})
         with (
             patch(
-                "orchestration_experiment.dags.exp03a_validate.pd.read_parquet",
+                "orchestration.lib.validate_helpers.pd.read_parquet",
                 return_value=df,
             ),
+            patch("orchestration.lib.validate_helpers.validate_bronze_schema"),
             patch(
-                "orchestration_experiment.dags.exp03a_validate.validate_bronze_schema"
-            ),
-            patch(
-                "orchestration_experiment.dags.exp03a_validate.write_validation_log"
+                "orchestration.lib.validate_helpers.write_validation_log"
             ) as mock_log,
         ):
             # Act
@@ -208,13 +204,11 @@ class TestRunValidateHappyPath:
         df = pd.DataFrame({"PULocationID": [1.0]})
         with (
             patch(
-                "orchestration_experiment.dags.exp03a_validate.pd.read_parquet",
+                "orchestration.lib.validate_helpers.pd.read_parquet",
                 return_value=df,
             ),
-            patch(
-                "orchestration_experiment.dags.exp03a_validate.validate_bronze_schema"
-            ),
-            patch("orchestration_experiment.dags.exp03a_validate.write_validation_log"),
+            patch("orchestration.lib.validate_helpers.validate_bronze_schema"),
+            patch("orchestration.lib.validate_helpers.write_validation_log"),
         ):
             # Act
             result = run_validate(BRONZE_PATH, config=override_config)
@@ -240,14 +234,14 @@ class TestRunValidateFailurePath:
         reasons = ["PULocationID out of range [1, 263]"]
         with (
             patch(
-                "orchestration_experiment.dags.exp03a_validate.pd.read_parquet",
+                "orchestration.lib.validate_helpers.pd.read_parquet",
                 return_value=df,
             ),
             patch(
-                "orchestration_experiment.dags.exp03a_validate.validate_bronze_schema",
+                "orchestration.lib.validate_helpers.validate_bronze_schema",
                 side_effect=DataValidationError(reasons),
             ),
-            patch("orchestration_experiment.dags.exp03a_validate.write_validation_log"),
+            patch("orchestration.lib.validate_helpers.write_validation_log"),
         ):
             # Act / Assert
             with pytest.raises(RuntimeError) as exc_info:
@@ -264,15 +258,15 @@ class TestRunValidateFailurePath:
         reasons = ["PULocationID out of range [1, 263]"]
         with (
             patch(
-                "orchestration_experiment.dags.exp03a_validate.pd.read_parquet",
+                "orchestration.lib.validate_helpers.pd.read_parquet",
                 return_value=df,
             ),
             patch(
-                "orchestration_experiment.dags.exp03a_validate.validate_bronze_schema",
+                "orchestration.lib.validate_helpers.validate_bronze_schema",
                 side_effect=DataValidationError(reasons),
             ),
             patch(
-                "orchestration_experiment.dags.exp03a_validate.write_validation_log"
+                "orchestration.lib.validate_helpers.write_validation_log"
             ) as mock_log,
         ):
             # Act
@@ -293,14 +287,12 @@ class TestRunValidateFailurePath:
         clock = SimulatedClock(datetime(2021, 1, 18, 0, 15, 0, tzinfo=timezone.utc))
         with (
             patch(
-                "orchestration_experiment.dags.exp03a_validate.pd.read_parquet",
+                "orchestration.lib.validate_helpers.pd.read_parquet",
                 return_value=df,
             ),
+            patch("orchestration.lib.validate_helpers.validate_bronze_schema"),
             patch(
-                "orchestration_experiment.dags.exp03a_validate.validate_bronze_schema"
-            ),
-            patch(
-                "orchestration_experiment.dags.exp03a_validate.write_validation_log"
+                "orchestration.lib.validate_helpers.write_validation_log"
             ) as mock_log,
         ):
             # Act
