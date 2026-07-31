@@ -158,7 +158,7 @@ def _feature(**context: object) -> None:
     logger.info("feature: silver+gold materialized for %s", bronze_path)
 
 
-def _predict(**context: object) -> str:
+def _predict(**context: object) -> str | None:
     """Run Predictor on gold -> write demand_predictions.parquet."""
     config = build_predict_config(
         load_config(),
