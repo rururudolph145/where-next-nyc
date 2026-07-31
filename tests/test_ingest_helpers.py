@@ -1,4 +1,4 @@
-"""Tests for orchestration_experiment/dags/exp02_ingest.py.
+"""Tests for orchestration/lib/ingest_helpers.py.
 
 PBI EXP-02 (experimentation) — the pure helpers the ingest DAG delegates to.
 Inserts an ``ingest`` task between ``read_watermark`` and ``advance_watermark``
@@ -37,7 +37,7 @@ from unittest.mock import patch
 
 import pytest
 
-from orchestration_experiment.dags.exp02_ingest import (
+from orchestration.lib.ingest_helpers import (
     build_ingest_config,
     run_ingest,
 )
@@ -144,7 +144,7 @@ class TestRunIngest:
         """Cumulative bronze: window_start is ALWAYS the seed, never window_end."""
         # Arrange
         window_end = datetime(2021, 1, 18, 0, 15, 0)
-        with patch("orchestration_experiment.dags.exp02_ingest.Ingestion") as mock_cls:
+        with patch("orchestration.lib.ingest_helpers.Ingestion") as mock_cls:
             instance = mock_cls.return_value
             instance.run.return_value = BRONZE_ROOT
 
@@ -159,7 +159,7 @@ class TestRunIngest:
         """The advancing upper bound is passed to run() unchanged."""
         # Arrange
         window_end = datetime(2021, 1, 18, 0, 30, 0)
-        with patch("orchestration_experiment.dags.exp02_ingest.Ingestion") as mock_cls:
+        with patch("orchestration.lib.ingest_helpers.Ingestion") as mock_cls:
             instance = mock_cls.return_value
             instance.run.return_value = BRONZE_ROOT
 
@@ -176,7 +176,7 @@ class TestRunIngest:
         """Ingestion is built from the injected config (path isolation seam)."""
         # Arrange
         window_end = datetime(2021, 1, 18, 0, 15, 0)
-        with patch("orchestration_experiment.dags.exp02_ingest.Ingestion") as mock_cls:
+        with patch("orchestration.lib.ingest_helpers.Ingestion") as mock_cls:
             mock_cls.return_value.run.return_value = BRONZE_ROOT
 
             # Act
@@ -190,7 +190,7 @@ class TestRunIngest:
         """run_ingest returns the path Ingestion.run() reports."""
         # Arrange
         window_end = datetime(2021, 1, 18, 0, 15, 0)
-        with patch("orchestration_experiment.dags.exp02_ingest.Ingestion") as mock_cls:
+        with patch("orchestration.lib.ingest_helpers.Ingestion") as mock_cls:
             mock_cls.return_value.run.return_value = BRONZE_ROOT
 
             # Act
@@ -203,7 +203,7 @@ class TestRunIngest:
         """A single run() call per invocation — no accidental double-ingest."""
         # Arrange
         window_end = datetime(2021, 1, 18, 0, 15, 0)
-        with patch("orchestration_experiment.dags.exp02_ingest.Ingestion") as mock_cls:
+        with patch("orchestration.lib.ingest_helpers.Ingestion") as mock_cls:
             instance = mock_cls.return_value
             instance.run.return_value = BRONZE_ROOT
 

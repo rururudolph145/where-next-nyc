@@ -7,7 +7,7 @@ confirms the directory exists and contains only expected files.
 Extension plan:
   - PBI 25b Leg 2+ adds TestRefresh15minDag: imports refresh_15min_dag,
     asserts dag_id == "refresh_15min_dag", task count, and schedule interval.
-  - PBI 25c adds TestTrainMonthlyDag (dropped from build queue).
+  - PBI 25c adds ``train_monthly_dag.py`` (shipped); TestTrainMonthlyDag lives in test_train_monthly_dag.py.
   - PBI 25d adds TestMonitorHourlyDag (dropped from build queue).
 
 All DAG-structure assertions should live in this file to keep the DAG surface
@@ -18,13 +18,16 @@ AC #14.
 
 from __future__ import annotations
 
-import struct
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
 
-# Files expected in orchestration/dags/ as of PBI 25b Leg 1.
-_ALLOWED_PY_FILES = {"__init__.py", "the_15_minute_refresh_inference_dag.py"}
+# Files expected in orchestration/dags/ as of PBI 25c.
+_ALLOWED_PY_FILES = {
+    "__init__.py",
+    "the_15_minute_refresh_inference_dag.py",
+    "train_monthly_dag.py",
+}
 
 # Paths required for `make demo-tick` to succeed end-to-end.
 _MODEL_PKL = REPO_ROOT / "data" / "models_trained" / "model.pkl"

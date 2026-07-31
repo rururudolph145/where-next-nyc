@@ -12,13 +12,13 @@ pipeline that feeds FastAPI's `/heatmap` endpoint.
 - **PostgreSQL 13** metadata DB.
 - **4 services**: `postgres`, `airflow-init`, `airflow-webserver`, `airflow-scheduler`.
 
-## Planned DAGs
+## DAG registry
 
 | DAG ID | PBI | Schedule | Description |
 |---|---|---|---|
-| `refresh_15min_dag` → `15_minute_refresh_inference_dag` | PBI 25b | `*/15 * * * *` | Ingestion → validation → feature → inference → log |
-| `train_monthly_dag` | PBI 25c | `@monthly` | Training + PBI 20 registry gate |
-| `monitor_hourly_dag` | PBI 25d | `@hourly` | Drift detection → alert → retrain trigger |
+| `15_minute_refresh_inference_dag` (née `refresh_15min_dag`) | PBI 25b | `*/15 * * * *` | Ingestion → validation → feature → inference → log |
+| `train_monthly_dag` | PBI 25c | manual (`None`) | Gold read → training → registry gate → watermark advance |
+| `monitor_hourly_dag` | PBI 25d | `@hourly` | Drift detection → alert → retrain trigger (planned) |
 
 ## Bootstrap (first-time setup)
 
@@ -89,6 +89,47 @@ next run reseeds from `ingest.seed_start`.
 `2021-03-31 23:59:57` in the DAG file), `check_no_new_data` raises
 `AirflowSkipException` and the run short-circuits.
 
+## Training DAG — `train_monthly_dag`
+
+`train_monthly_dag` is manually triggered (`schedule=None`). It reads a 30-day
+windowed slice of gold, calls `Trainer.run()`, and applies the PBI 20 registry
+gate. Trigger it after at least one inference run has completed:
+
+```bash
+# From inside the container, or via the Airflow UI "Trigger DAG" button:
+airflow dags trigger train_monthly_dag
+```
+
+### Dual-watermark contract
+
+The DAG manages a **second** watermark alongside the inference one:
+
+| File | Written by | Meaning |
+|---|---|---|
+| `data/watermarks/refresh_15min/.current_watermark` | inference DAG | inference position (read-only by training DAG) |
+| `data/watermarks/last_training/.current_watermark` | training DAG | last completed training window end |
+
+### Bootstrap sequencing
+
+On the very first trigger `last_training/.current_watermark` is absent; the
+DAG falls back to `ingest.seed_start` from `config.yml`. The
+`check_window_ready` task then verifies that the inference watermark leads by
+≥ 30 sim-days before proceeding. If it does not, the task raises
+`AirflowSkipException` and the entire run short-circuits — watermark unchanged,
+safe to re-trigger later.
+
+### Fault model
+
+| Outcome | Watermark | Model |
+|---|---|---|
+| Promote | advances to `last_training_wm + 30d` | new version in Production |
+| Reject (gate fails) | advances to `last_training_wm + 30d` | incumbent unchanged |
+| Crash (`Trainer.run` raises) | **held** (no advance) | unchanged |
+| Skip (`check_window_ready`) | **held** | unchanged |
+
+Re-triggering after a promote or reject is a no-op until the inference
+watermark advances another 30 sim-days.
+
 ## AIRFLOW_UID
 
 The `orchestration/.env.example` template sets `AIRFLOW_UID=1000`. Check your
@@ -113,6 +154,7 @@ orchestration/
   README.md                 # this file
   dags/
     the_15_minute_refresh_inference_dag.py    # dag_id = 15_minute_refresh_inference_dag
+    train_monthly_dag.py                      # dag_id = train_monthly_dag (manual trigger)
   lib/                      # non-DAG-scanned helpers (PYTHONPATH)
     ingest_helpers.py
     validate_helpers.py
@@ -120,6 +162,7 @@ orchestration/
     predict_helpers.py
     log_predict_helpers.py
     boundary_helpers.py
+    training_helpers.py
   logs/                     # gitignored, container-written
 ```
 

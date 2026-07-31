@@ -179,9 +179,7 @@ class TestRunPredict:
         empty_gold = pd.DataFrame(
             columns=["pulocationid", "hour", "trip_count", "target_sum_t1_t2"]
         )
-        empty_gold.to_parquet(
-            tmp_path / "hourly_demand_featured.parquet", index=False
-        )
+        empty_gold.to_parquet(tmp_path / "hourly_demand_featured.parquet", index=False)
 
         with patch("predict_helpers.Predictor") as mock_predictor_cls:
             mock_predictor_cls.return_value.load_gold.return_value = empty_gold
