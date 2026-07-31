@@ -256,7 +256,7 @@ class TestRegistryGateAcceptance:
     # ------------------------------------------------------------------
 
     def test_ac1_config_yml_has_sqlite_tracking_uri(self) -> None:
-        """AC-1: config.yml tracking_uri is sqlite:///mlflow.db."""
+        """AC-1: config.yml tracking_uri uses a SQLite backend under data/."""
         # Arrange
         config_path = Path(__file__).parent.parent / "config.yml"
 
@@ -264,8 +264,9 @@ class TestRegistryGateAcceptance:
         with open(config_path) as fh:
             config = yaml.safe_load(fh)
 
-        # Assert
-        assert config["mlflow"]["tracking_uri"] == "sqlite:///mlflow.db"
+        # Assert — canonical path is data/mlflow.db so the container volume mount
+        # (../data → /opt/airflow/data) can reach it from both host and container.
+        assert config["mlflow"]["tracking_uri"] == "sqlite:///data/mlflow.db"
 
     def test_ac2_config_yml_has_model_name_key(self) -> None:
         """AC-2: config.yml contains mlflow.model_name = ny_taxi_demand_model."""

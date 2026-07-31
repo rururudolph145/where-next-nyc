@@ -110,5 +110,5 @@ monitoring:
 
 mlflow:
   experiment_name: ny_taxi_demand_model
-  tracking_uri: sqlite:///mlflow.db
+  tracking_uri: sqlite:///data/mlflow.db
   model_name: ny_taxi_demand_model

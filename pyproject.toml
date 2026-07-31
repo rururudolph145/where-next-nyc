@@ -37,6 +37,9 @@ dependencies = [
 
 [tool.pytest.ini_options]
 pythonpath = ["orchestration/lib"]
+markers = [
+    "integration: requires container + MLflow; skipped in default host CI",
+]
 
 [tool.mypy]
 exclude = ["orchestration/"]
