@@ -40,7 +40,7 @@ Medallion architecture (Bronze → Silver → Gold), with monitoring closing the
 
 ### Portfolio Goals
 - Showcase a clean **medallion architecture** data pipeline with explicit data-validation and feature-store seams
-- Demonstrate **MLflow** experiment tracking, model registry with staging/production stages, and **DVC** data versioning
+- Demonstrate **MLflow** experiment tracking and a model registry with staging/production stages
 - Provide a working **FastAPI** `/heatmap` endpoint with a refreshable, cache-backed sub-200ms response
 - Show a closed-loop **monitoring** lane (prediction log → actuals join → drift → retrain trigger)
 - Maintain **production-quality** standards (strict typing, tests, lint/format) despite being a personal project
@@ -63,40 +63,33 @@ The `makefile` targets (`make setup`, `make run`) use a plain venv + pip workflo
 - **Python 3.13+** (required)
 - Package management: **uv** (`pyproject.toml` + `uv.lock`)
 - Linter / formatter: **ruff** (line-length=88, docstring checks enabled)
-- Type checking: **mypy strict mode** — all functions need type hints
+- Type checking: **mypy** (`uv run mypy app tests`; `orchestration/` is excluded — see `pyproject.toml`)
 - Tests: **pytest**
 
 ### Key Dependencies
 - **pandas, numpy** — data manipulation
 - **scikit-learn** — basic machine learning utilities
 - **lightgbm** — `LGBMRegressor` is the current default model
-- **mlflow** — experiment tracking (local `mlruns/` store)
-- **dvc** — data versioning
+- **mlflow** — experiment tracking (local `mlruns/` store) + model registry
+- **pandera** — schema/quality validation at the ingest gate
+- **geopandas** — taxi-zone shapefile → zone centroids for the heatmap
 - **fastapi** + **uvicorn** — serving API
-- **evidently** — model monitoring
+- Monitoring is **hand-rolled** in `app/monitoring/` (prediction log + actuals join), not a third-party tool
 
-### Frontend (planned, not yet implemented)
-A frontend layer is **planned for a later phase** to visualize predictions (e.g., heatmap of taxi demand by zone × hour, comparison of forecast vs actuals). When added, the intended stack is:
-
-- **Vite + React + TypeScript** — SPA build tooling
-- **@tanstack/react-query** — server-state management for FastAPI calls
-- **react-router-dom** — routing
-- Minimal styling via **CSS Modules** + a single `styles.css` (no heavy UI framework)
-- During development, `vite.config.ts` will proxy `/api` → `http://127.0.0.1:8000` to avoid CORS
-- Planned location: `frontend/` directory at the repo root, with `src/{api,components,pages,types,...}`
-
-Until the frontend is built, the FastAPI `GET /heatmap` endpoint is the only deliverable interface (consume via `curl`, Swagger UI at `/docs`, or any HTTP client).
+### Interface
+There is **no frontend**. The FastAPI service is the only deliverable interface — consume `GET /heatmap` via `curl`, the Swagger UI at `/docs`, or any HTTP client. The service also exposes `GET /health` (data freshness / simulated-now) and `GET /model-info` (Production model provenance).
 
 ## Common Commands
 
 ```bash
 uv run python -m pipeline.run_all                      # run the full ingestion pipeline (MLflow-tracked)
 uv run pytest                                          # run all tests
-uv run pytest tests/test_clean.py::test_clean_data     # run a single test
+uv run pytest tests/test_serving.py                    # run a single test file
+uv run pytest -k "watermark"                           # run tests matching an expression
 uv run mlflow ui                                       # open MLflow experiment tracker
-uv run uvicorn app.api.main:app --reload               # start the FastAPI serving endpoint (dev mode)
-uv run ruff check app/ && uv run ruff format app/      # lint + format
-uv run mypy app/ --strict                              # type check (strict)
+make demo                                              # serve FastAPI on :8000 (uvicorn app.api.main:app)
+uv run ruff check . && uv run ruff format --check .    # lint + format check (CI gate)
+uv run mypy app tests                                  # type check (orchestration/ excluded)
 ```
 
 ## Architecture
@@ -111,7 +104,7 @@ NewYorkTaxiDemandForecasting/
 │   │   ├── config.py         #   load_config() — single source of YAML config loading
 │   │   └── logging.py        #   setup_logging() — shared logger configuration
 │   ├── ingestion/            # Bronze → Silver → Gold pipeline
-│   │   ├── ingest.py         #   Ingestion class (Socrata API → Bronze parquet)
+│   │   ├── ingest.py         #   Ingestion class (local TLC parquet → Bronze parquet)
 │   │   ├── clean.py          #   DataCleaner class (Bronze → Silver)
 │   │   └── feature.py        #   FeatureEngineer class (Silver → Gold)
 │   ├── training/             # Model training pipeline
@@ -140,7 +133,7 @@ NewYorkTaxiDemandForecasting/
 - `app.api.main:app` — FastAPI ASGI app served via `uvicorn app.api.main:app`
 
 **Ingestion pipeline** (orchestrated by `pipeline.run_all`):
-1. `app/ingestion/ingest.py` — downloads raw trip data from the Socrata API into the configured `data.bronze_path`
+1. `app/ingestion/ingest.py` — reads raw NYC TLC parquet (fixed 2021 Q1 window in `config.yml`) into the configured `data.bronze_path`. Under the Airflow demo it is a **cumulative** ingest: each run extends the window `[seed_start, window_end)` and bronze grows monotonically. There is no live/Socrata fetch.
 2. `app/ingestion/clean.py` — drops nulls, removes non-positive trip values, clips fare outliers via IQR, engineers time features (`hour`, `day_of_week`, `month`, `is_weekend`)
 3. `app/ingestion/feature.py` — produces Gold-layer features (lags, rolling windows, cyclical encoding)
 
@@ -148,7 +141,7 @@ NewYorkTaxiDemandForecasting/
 
 **Inference:** `app/inference/predictor.py` — loads `models/model.pkl`, evaluates with MAE / RMSE / R².
 
-**Serving:** `app/api/main.py` exposes a FastAPI endpoint at `GET /heatmap`. It loads pre-computed predictions at startup, so the inference simulation must be run before the server is started.
+**Serving:** `app/api/main.py` exposes `GET /heatmap` (plus `GET /health` for data freshness / simulated-now and `GET /model-info` for Production model provenance). It loads pre-computed predictions and the zone lookup into memory at startup, so the inference simulation must be run before the server is started.
 
 **Configuration:** All data paths, train/test split settings, and model hyperparameters live in `config.yml`. Configuration is loaded via `app.core.config.load_config()`.
 
@@ -156,9 +149,17 @@ NewYorkTaxiDemandForecasting/
 
 **Forecasting checklist:** `pipeline.MD` contains a detailed checklist of all pipeline stages (ingestion → monitoring). Use it to track implementation progress.
 
+**Clock abstraction (hard invariant):** `app/core/clock.py` is the **only** legitimate caller of `datetime.now(tz=...)`. Everything else takes a `Clock` (Protocol) — `WallClock` in production, `SimulatedClock` in tests. Do not reintroduce direct `datetime.utcnow()` / `time.sleep` calls in application code.
+
+**The watermark IS the simulation position.** `data/watermarks/refresh_15min/.current_watermark` is a control file, not derived from a clock. Each demo DAG run reads it, ingests the next 15-min slice, advances it, and writes it back. `/health` reads it for `simulated_now`. In `config.yml`, `ingest.slice_duration` MUST equal `feature.bucket` (both `15min`). Timestamps are **tz-naive NYC wall-clock** (`tpep_pickup_datetime` has no `Z`) — do not attach UTC.
+
+**Orchestration layer:** the Airflow stack lives under `orchestration/` (Airflow 3.2.2 via docker-compose). **`app/` MUST NOT import from `orchestration/`** — enforced by `tests/test_pbi25a_orchestrator_skeleton.py::test_app_does_not_import_from_orchestration`. DAG business logic lives in Airflow-free, host-testable `orchestration/lib/*_helpers.py`; DAG files are thin wrappers. `orchestration_experiment/` is a separate incremental-build sandbox (Airflow 2.10.3), not production. Run it with `make airflow-up` then repeat `make demo-tick` to walk the timeline one 15-min slice per trigger. If a DAG vanishes from the UI, first run `docker compose -f orchestration/docker-compose.yaml exec airflow-scheduler airflow dags list-import-errors` — Airflow swallows import errors.
+
+**MLflow DB caveat:** never reuse an `mlflow.db` created on the host inside the container — its `experiments.artifact_location` bakes a host absolute path that is unreachable in-container. Delete `data/mlflow.db` before the first container training run and let MLflow recreate it (`model.pkl` on disk is unaffected).
+
 ## Code Standards
 - **Python 3.13** required
-- **Mypy strict mode** enabled — all functions need type hints. Use `uv run mypy app/ --strict`
+- **Mypy** — type-check with `uv run mypy app tests` (config in `pyproject.toml`; `orchestration/` is excluded)
 - **Ruff** for linting and formatting (line length: 88, docstring checks enabled)
 - Docstrings in code should be in **English**
 - Python functions must include **Google-style** docstrings
@@ -167,7 +168,7 @@ NewYorkTaxiDemandForecasting/
 ## Key Decisions
 
 - **Time-series split:** Use time-based splits only — never shuffle for temporal data (see `pipeline.MD` §6).
-- **Target column:** `trip_count` — features and target are separated in `app.training.trainer.Trainer.feature_target_separator()` and `app.inference.predictor.Predictor.feature_target_separator()` by dropping this column.
+- **Target column:** `target_sum_t1_t2` (set in `config.yml` under `train.target`) — a 30-min lookahead = sum of the next two 15-min bins. Not raw `trip_count`.
 - **MLflow model name:** registered as `ny_taxi_demand_model` in the local `mlruns/` store.
 
 ## Development Workflow
@@ -179,18 +180,21 @@ Every new feature or pipeline step **must** follow this workflow in order:
 3. **Implementation** — Implement the feature following the checklist step by step. Check off items as they are completed.
 4. **Testing** — Add or update test cases in `tests/` to cover the new functionality. All tests must pass (`uv run python -m pytest`).
 5. **Code quality** — Ensure the code passes all linters before considering the work done:
-   - `uv run mypy app/ --strict` — all type checks must pass
-   - `uv run ruff check app/` — all lint rules must pass
-   - `uv run ruff format --check app/` — formatting must be consistent
+   - `uv run mypy app tests` — all type checks must pass
+   - `uv run ruff check .` — all lint rules must pass
+   - `uv run ruff format --check .` — formatting must be consistent
 
 Do **not** skip or reorder these steps. If a step reveals issues, go back and fix before proceeding.
 
 ## Development Rules
 
-- **Secrets:** Always put API keys (e.g., Socrata app token) and database credentials in `.env`. Never commit `.env`.
-- **App settings:** Put non-sensitive, environment-specific toggles in `config.yml` or `.config/`.
-- **Data hygiene:** Never commit `.parquet` / `.csv` files under `data/`. Use DVC for data versioning.
+- **Secrets:** Always put API keys and database credentials in `.env`. Never commit `.env`.
+- **App settings:** Put non-sensitive, environment-specific toggles in `config.yml`.
+- **Data hygiene:** Never commit `.parquet` / `.csv` files under `data/` (all are gitignored at any depth).
 - **No force-kill:** Do not run `pkill` or `kill -9` (can disconnect VSCode etc.). Ask the user to restart servers.
+- **Branch/PR flow:** `main` ← `dev_MVP` (release PRs only) ← `feature/*` / `bug_fix_*`. **Never** PR a feature branch directly to `main` — always `gh pr create --base dev_MVP`. One commit = one logical change; emoji prefixes (✨ feat, 🐛 fix, ♻️ refactor, 📝 docs, 💚 CI, 🙈 chore).
+
+The authoritative, detailed rules live in `.claude/rules/` (coding-style, testing, git-workflow, security, performance, agents) — consult them for anything not covered here.
 
 ## Commit Operation Rule
 
