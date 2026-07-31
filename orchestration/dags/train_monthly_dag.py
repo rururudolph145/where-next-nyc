@@ -32,6 +32,8 @@ from airflow.operators.python import PythonOperator  # type: ignore[import-not-f
 
 from app.core.config import load_config
 from app.core.watermark import write_watermark
+from app.training.trainer import Trainer
+from mlflow.tracking import MlflowClient  # type: ignore[import-not-found]
 
 try:
     from orchestration.lib.training_helpers import (
@@ -102,10 +104,6 @@ def _compute_window(**context: object) -> dict[str, str]:
 
 def _train(**context: object) -> dict[str, object]:
     """Call run_train; return gate_result, model_version, wape_lift_pct via XCom."""
-    from mlflow.tracking import MlflowClient  # type: ignore[import-not-found]
-
-    from app.training.trainer import Trainer
-
     ti = context["ti"]  # type: ignore[index]
     window: dict[str, str] = ti.xcom_pull(task_ids="compute_window")  # type: ignore[attr-defined]
     window_start = datetime.fromisoformat(window["window_start"])

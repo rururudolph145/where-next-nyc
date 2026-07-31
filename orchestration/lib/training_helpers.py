@@ -21,6 +21,8 @@ from typing import Any, Callable
 
 import pandas as pd
 
+from app.core.watermark import read_watermark
+
 logger = logging.getLogger(__name__)
 
 # ADR-003 §Decision.6 — fixed 30-day training window
@@ -49,8 +51,6 @@ def resolve_watermarks(
     Raises WatermarkNotFoundError when the refresh watermark is absent —
     training before inference has run is invalid.
     """
-    from app.core.watermark import read_watermark
-
     refresh_wm = read_watermark(refresh_root)
     if refresh_wm is None:
         raise WatermarkNotFoundError(
@@ -60,7 +60,11 @@ def resolve_watermarks(
 
     last_wm_raw = read_watermark(last_training_root)
     is_bootstrap = last_wm_raw is None
-    last_wm: datetime = last_wm_raw if last_wm_raw is not None else datetime.fromisoformat(config["ingest"]["seed_start"])
+    last_wm: datetime = (
+        last_wm_raw
+        if last_wm_raw is not None
+        else datetime.fromisoformat(config["ingest"]["seed_start"])
+    )
 
     return {
         "refresh_wm": refresh_wm.isoformat(),

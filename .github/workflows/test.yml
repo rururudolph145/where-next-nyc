@@ -1,14 +1,7 @@
 name: test
 
 on:
-  pull_request:
-    branches:
-      - dev_MVP
-      - main
-  push:
-    branches:
-      - dev_MVP
-      - main
+  workflow_dispatch:
 
 jobs:
   test:
