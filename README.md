@@ -28,56 +28,35 @@ Model-quality metrics (MAE / RMSE / WAPE) measure the model. They don't measure 
 
 A model that beats the naive baseline by a meaningful WAPE margin *and* keeps recall@3 above the baseline is doing real work. A model that only wins on MAE but offers no recall@K lift is a vanity win.
 
-## How the Demo Works (Compressed Simulated Clock)
+## How the Demo Works (Watermark-Driven Simulation)
 
-Because the underlying data has a publication lag, the system can't actually run live — but it *can* run end-to-end on a compressed clock, exercising the exact same code path a production deployment would. This is the only way to credibly demonstrate a 15-minute-refresh system from a portfolio repo.
+Because the underlying TLC data is published on a 1–2 month lag, the system can't run against a live feed — but it *can* run end-to-end over the fixed 2021 timeline, exercising the exact same code path a production deployment would. This is the only way to credibly demonstrate a 15-minute-refresh system from a portfolio repo.
 
-**Two layers of simulation, kept deliberately separate:**
+**The data watermark *is* the simulation position.** There is no wall-clock speedup and no background timer. A control file — `data/watermarks/refresh_15min/.current_watermark` — records how far along the 2021 timeline the pipeline has advanced. Each Airflow DAG run:
 
-### Layer 1 — System-level: the `SimulatedClock`
+1. reads the watermark,
+2. checks whether any new data exists past it (stops cleanly if not),
+3. ingests the next 15-minute slice into Bronze (a **cumulative** window, so Bronze grows monotonically),
+4. validates → features → predicts → logs the prediction,
+5. advances the watermark and writes it back.
 
-A `Clock` abstraction (`app/core/clock.py`, PBI 25) replaces every direct call to `datetime.utcnow()` / `time.sleep` in the application. Two implementations:
+Because the watermark is only written on success, a mid-run crash leaves it untouched and the next run safely re-does the slice — the pipeline is crash-safe and idempotent at the slice boundary.
 
-| Implementation | When used | Behaviour |
-|---|---|---|
-| `WallClock` | production (`DEMO_MODE` unset) | wraps real time |
-| `SimulatedClock(start, speedup=450)` | demo (`DEMO_MODE=1`) | advances 15 simulated minutes per ~2 seconds of wall-clock |
+**What this lets a reviewer do:** `make airflow-up`, then fire `make demo-tick` repeatedly. Each trigger walks the timeline forward by one 15-minute slice. `curl /heatmap` between ticks shows the ranked zones for the current bucket, and `GET /health` reports the `simulated_now` derived from the watermark and the data publication lag — nothing is hidden.
 
-Every component that asks "what time is it" — Airflow sensors, ingestion watermarks, the predictor's "current bucket", the API's "latest hour" lookup — reads from the injected `Clock`, never from the OS. A repo-wide test (`tests/test_clock_discipline.py`) enforces this: no production module is allowed to import `datetime.utcnow` or `time.sleep` directly.
+> **Note on the `Clock` abstraction.** `app/core/clock.py` provides a `Clock` protocol (`WallClock` for production, `SimulatedClock` for tests) and remains the *only* legitimate caller of `datetime.now(...)` in the codebase. An earlier design drove the demo with a speed-up clock; that was replaced — the watermark model above is simpler and avoids the process-global state that made the clock approach fragile.
 
-**What this lets a reviewer do:** run `DEMO_MODE=1 make demo`, then `curl /heatmap` repeatedly. The `bucket_time` field advances by 15 simulated minutes every ~2 seconds. They see Midtown light up at simulated 5pm, JFK at simulated 6am, and so on — on a real timeline, in a few minutes total. The `/health` endpoint reports `{"simulated": true, "simulated_now": "...", "wall_clock_now": "..."}` so nothing is hidden.
+### Business-level evaluation (deferred)
 
-### Layer 2 — Business-level: the driver-agent harness
-
-A `SimulatedClock` proves the *system* runs. It does **not** prove that drivers following the heatmap are better off. That requires a closed-loop simulation with synthetic drivers (`app/simulation/`, PBI 28).
-
-The harness spawns N synthetic drivers, gives each one a policy, and replays a held-out week of historical TLC data:
-
-| Policy | Behaviour |
-|---|---|
-| `HeatmapFollower` | calls `/heatmap`, drives to a top-K predicted zone |
-| `LastWeekFollower` | baseline — drives to whatever was busy this hour last week |
-| `Stationary` | control — never moves |
-
-At each simulated 15-min tick: idle drivers pick a destination per their policy → en-route drivers travel → on arrival, the harness consults the historical trip table to see if a real trip actually started in that zone during that window → if yes and a driver is there, the driver gets the trip and is locked into its historical duration → repeat.
-
-Output is a per-policy results table in `docs/simulation_results.md`:
-
-| Policy | Trips served | % idle time | Avg miles to pickup | Total fare |
-|---|---|---|---|---|
-| HeatmapFollower | *populated by PBI 28* | | | |
-| LastWeekFollower | | | | |
-| Stationary | | | | |
-
-The lift of `HeatmapFollower` over `LastWeekFollower` is the number that backs up the README's value claim. If lift is zero or negative on a given week, the result is reported honestly — the harness is an evaluator, not a marketing tool.
+A running system does **not** prove that drivers following the heatmap are better off. That requires a closed-loop harness with synthetic drivers replaying a held-out week (`HeatmapFollower` vs a `LastWeekFollower` baseline vs a `Stationary` control), measuring trips served, idle time, and fare lift. This **outcome harness is a roadmap item, not yet implemented** — the recall@K and WAPE-lift metrics above are the current basis for the value claim.
 
 ## Honest Limitations
 
 - **Data publication lag.** NYC TLC publishes trip records on a 1–2 month lag. This repo treats the data as if it streamed in real time; the 15-minute refresh cadence is *simulated*, not live. A production deployment would need an upstream telemetry feed.
-- **Single-agent equivalent.** The driver-agent harness gives all N synthetic drivers the same heatmap and draws trips from a fixed historical pool. It captures recall-style lift, but it does **not** model demand-supply equilibration — if every real driver flocked to the same zone, the prediction would self-defeat. A future iteration could add a supply-aware demand model.
+- **Single-agent assumption.** The model predicts demand as if the heatmap did not itself change driver behaviour. It does **not** model demand-supply equilibration — if every real driver flocked to the same top zone, the prediction would self-defeat. Capturing that requires the deferred outcome harness plus a supply-aware demand model.
 - **Macro patterns only.** The model captures temporal + spatial regularities. It does not yet incorporate weather, events, or transit disruptions — the cases where intuition most often fails. Those are roadmap items.
 
-Built with **LightGBM**, tracked with **MLflow**, served via **FastAPI**, orchestrated with **Airflow** (on a `SimulatedClock` in demo mode), and organised as a Bronze / Silver / Gold data pipeline.
+Built with **LightGBM**, tracked with **MLflow**, served via **FastAPI**, orchestrated with **Airflow** (watermark-driven, walking the 2021 timeline one 15-min slice per DAG run), and organised as a Bronze / Silver / Gold data pipeline.
 
 ## Current Forecasting Design (PBI B2)
 
@@ -118,26 +97,37 @@ Anomalous trip-attribute outliers (speed, distance, fare) are **out of scope** f
 
 ```
 app/                       Production source
-├── ingestion/             ingest.py · clean.py · feature.py
-├── training/              trainer.py (LightGBM + MLflow logging)
+├── ingestion/             ingest.py · clean.py · feature.py · schema.py (Pandera)
+├── training/              trainer.py · baseline.py · registry_gate.py
 ├── inference/             predictor.py · simulator.py
-├── api/                   FastAPI app — GET /heatmap
-└── core/                  config loading, paths, logging
+├── monitoring/            prediction_log.py · actuals_join.py
+├── api/                   FastAPI app — GET / · /heatmap · /health · /model-info
+└── core/                  config · clock · paths · watermark · logging · metrics
 
-pipeline/                  CLI entry points (`uv run python -m pipeline.run_all`)
-├── 01_ingest.py
-├── 02_clean.py
-├── 03_feature.py
-├── 04_train.py
-├── 05_inference.py
-├── 06_simulate.py
-└── run_all.py
+orchestration/             Airflow 3.2.2 stack (docker-compose)
+├── dags/                  15_minute_refresh_inference_dag (8-task watermark chain)
+└── lib/                   *_helpers.py — Airflow-free DAG logic (host-testable)
 
-tests/                     pytest suite (~85 tests, including E2E on synthetic data)
-docs/                      System design + smoke-test reports (HTML)
+pipeline/                  Standalone batch orchestrator (whole-dataset, no Airflow)
+├── 00_seed_raw.py         split monthly Bronze parquet into daily raw files (setup)
+├── 00_seed_march.py       download + seed March 2021 (setup)
+├── 01_ingest.py           raw daily parquets → Bronze
+├── 02_clean.py            Bronze → Silver
+├── 03_feature.py          Silver → Gold
+├── 04_train.py            Gold → LightGBM model (+ MLflow)
+├── 05_inference.py        model + Gold → predictions table
+├── 06_simulate.py         hourly inference replay over an out-of-sample window
+└── run_all.py             runs steps 01→04 (ingest → clean → feature → train)
+
+tests/                     pytest suite (~445 tests, including E2E on synthetic data)
+docs/                      System design + smoke-test reports (HTML) + ADRs
 implementation_checklist/  PBI tracker — single source of truth for design decisions
 config.yml                 All runtime configuration (paths, lags, model params, …)
 ```
+
+> **Invariant:** `app/` must never import from `orchestration/` — the domain code is orchestrator-agnostic, and a test enforces it. DAG task bodies stay thin; the real logic lives in `orchestration/lib/*_helpers.py` so it can be unit-tested without Airflow.
+
+> **Two orchestrators, one set of domain code.** `pipeline/` and `orchestration/` are independent ways to drive the same `app/` classes. `pipeline/` is a dependency-free, single-process **batch** run over the whole dataset — ideal for a from-scratch train or a quick local reproduction with no Docker. `orchestration/` is the **incremental** Airflow demo that advances the watermark one 15-min slice per run. Both prove the domain code is orchestrator-agnostic.
 
 ## Setup
 
@@ -153,28 +143,71 @@ uv sync
 
 ## Run
 
+There are two ways to drive the pipeline. Both run the identical `app/` domain code.
+
+### Option A — Standalone batch (no Docker)
+
+The `pipeline/` orchestrator runs each stage in-process over the whole dataset. Best for a clean train from scratch or a quick local reproduction.
+
 ```bash
-# Full pipeline: ingest → clean → feature → train
+# One-time: seed the raw daily-file layout from the bulk download
+uv run python pipeline/00_seed_raw.py       # split monthly Bronze into daily raw files
+uv run python pipeline/00_seed_march.py     # add March 2021
+
+# Full run: ingest → clean → feature → train
 uv run python -m pipeline.run_all
 
-# Or one stage at a time
+# …or one stage at a time
 uv run python pipeline/01_ingest.py
 uv run python pipeline/02_clean.py
 uv run python pipeline/03_feature.py
 uv run python pipeline/04_train.py
-uv run python pipeline/05_inference.py
-uv run python pipeline/06_simulate.py     # hourly simulation replay
+uv run python pipeline/05_inference.py       # produce the predictions table
+uv run python pipeline/06_simulate.py        # hourly out-of-sample replay
+```
+
+> `run_all` stops after training (steps 01–04). Run `05_inference` afterwards to generate the predictions table the `/heatmap` endpoint serves.
+
+### Option B — Incremental Airflow demo (watermark-driven)
+
+Executes the full Bronze → Silver → Gold → predict path one 15-minute slice per trigger, walking the 2021 timeline.
+
+```bash
+# One-time: seed the raw daily-file layout (same as Option A)
+uv run python pipeline/00_seed_raw.py
+uv run python pipeline/00_seed_march.py
+
+# Start the Airflow stack (container-only)
+cp orchestration/.env.example orchestration/.env   # first time only
+make airflow-init
+make airflow-up
+
+# Walk the 2021 timeline: each tick advances one 15-min slice
+make demo-tick        # repeat to step the watermark forward
+make airflow-down     # (or make demo-stop) to tear down
+```
+
+If a DAG doesn't appear in the Airflow UI, check for swallowed import errors first:
+
+```bash
+docker compose -f orchestration/docker-compose.yaml \
+  exec airflow-scheduler airflow dags list-import-errors
 ```
 
 ## Serve
 
 ```bash
-# Start the FastAPI heatmap service
-uv run uvicorn app.api.main:app --reload
-# Then: GET http://localhost:8000/heatmap
+# Static demo: serve the latest cached predictions on :8000
+make demo             # = uv run uvicorn app.api.main:app --host 0.0.0.0 --port 8000
 ```
 
-The `/heatmap` endpoint returns the latest per-zone predictions with `pulocationid`, `zone_name`, and `predicted_trip_count`. Sorted descending by demand.
+Endpoints:
+
+- `GET /heatmap` — latest per-zone predictions (`pulocationid`, `zone_name`, `predicted_trip_count`, `bucket_time`), sorted descending by demand.
+- `GET /health` — service health + data freshness (`simulated_now`, publication lag), read from the watermark.
+- `GET /model-info` — Production model provenance from the MLflow registry.
+
+Interactive docs are at `http://localhost:8000/docs`.
 
 ## MLflow UI
 
@@ -188,13 +221,14 @@ Training runs log model params, training/val/test metrics (MAE, RMSE, MAPE, WAPE
 ## Test
 
 ```bash
-uv run pytest                              # full suite
+uv run pytest                              # full suite (~445 tests)
 uv run pytest tests/test_feature.py -v     # one module
 uv run pytest tests/test_e2e_synthetic.py  # end-to-end smoke on synthetic data
 
-# Lint + type-check
-uv run ruff check app/ tests/
-uv run mypy app/ tests/
+# Quality gates (enforced in CI)
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app tests                      # orchestration/ is excluded
 ```
 
 ## Configuration
@@ -223,14 +257,17 @@ docker run -p 80:80 ny-taxi-demand
 
 ## Documentation
 
-- `docs/system_design.html` — overall architecture
 - `docs/design_t30_15min_refresh.html` — t+30 / 15-min refresh design (B-track rationale)
+- `docs/orchestration_services_overview.html` — Airflow stack topology
+- `docs/pbi25b_refresh_15min_dag_summary.html` — the watermark-driven refresh DAG
 - `docs/phase6_smoke_test_report.html` — end-to-end smoke report
+- `docs/adr/` — architecture decision records
 - `implementation_checklist/pbi_tracker.md` — PBI history, dependencies, priority order
 
 ## Roadmap (high level)
 
 - **MVP (shipped)** — single-horizon training, inference, heatmap API
 - **B-track (shipped)** — 15-min bucket + spatial smoothing + 30-min summed-horizon target
-- **Performance hardening (in progress)** — parallel Bronze ingestion, `/heatmap` pagination, streaming Bronze write
-- **Post-MVP** — personalised ranking (DiDi-style), simulated near-real-time inference, model drift monitoring
+- **Live cadence (shipped)** — watermark-driven `15_minute_refresh_inference_dag` on Airflow, `/health` freshness, `make demo-tick`
+- **Deferred** — outcome harness (synthetic-driver evaluation of heatmap lift), closed training/feedback loops, drift-triggered retrain
+- **Post-MVP** — personalised ranking (DiDi-style)
