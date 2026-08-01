@@ -153,9 +153,44 @@ class TestRunPredict:
 
         # Assert — Predictor constructed with the override config
         mock_predictor_cls.assert_called_once_with(config=cfg)
-        mock_predictor_cls.return_value.run.assert_called_once_with()
+        mock_predictor_cls.return_value.run.assert_called_once_with(since=None)
         # Assert — returns the output_path string
         assert result == PREDICTIONS_PATH
+
+    def test_run_predict_passes_since_through(
+        self, base_config: dict[str, Any], tmp_path: Any
+    ) -> None:
+        """run_predict forwards since= kwarg to Predictor.run(since=...)."""
+        import pandas as pd
+        from datetime import datetime
+
+        # Arrange
+        gold_dir = tmp_path / "gold"
+        gold_dir.mkdir()
+        pd.DataFrame({"pulocationid": [1], "trip_count": [5]}).to_parquet(
+            gold_dir / "hourly_demand_featured.parquet", index=False
+        )
+        cfg = build_predict_config(
+            base_config,
+            gold_root=str(gold_dir),
+            model_root=MODEL_ROOT,
+            predictions_path=PREDICTIONS_PATH,
+        )
+        since_ts = datetime(2021, 1, 15, 13, 0, 0)
+        fake_response = {
+            "metrics": {},
+            "output_path": PREDICTIONS_PATH,
+            "n_predictions": 5,
+        }
+
+        with patch("predict_helpers.Predictor") as mock_predictor_cls:
+            mock_predictor_cls.return_value.run.return_value = fake_response
+
+            # Act
+            run_predict(config=cfg, since=since_ts)
+
+        # Assert — since forwarded to .run()
+        mock_predictor_cls.return_value.run.assert_called_once_with(since=since_ts)
 
     def test_run_predict_returns_none_when_gold_is_empty(
         self, base_config: dict[str, Any], tmp_path: Any
