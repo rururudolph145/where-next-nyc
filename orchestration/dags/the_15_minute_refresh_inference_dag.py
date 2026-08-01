@@ -159,14 +159,21 @@ def _feature(**context: object) -> None:
 
 
 def _predict(**context: object) -> str | None:
-    """Run Predictor on gold -> write demand_predictions.parquet."""
+    """Run Predictor on gold -> write demand_predictions.parquet.
+
+    Pulls window_start from the read_watermark XCom and passes it as ``since``
+    so only the new slice is scored (not the full cumulative gold table).
+    """
+    ti = context["ti"]  # type: ignore[index]
+    window: dict[str, str] = ti.xcom_pull(task_ids="read_watermark")  # type: ignore[attr-defined]
+    since = datetime.fromisoformat(window["window_start"])
     config = build_predict_config(
         load_config(),
         gold_root=GOLD_ROOT,
         model_root=PREDICT_MODEL_ROOT,
         predictions_path=PREDICTIONS_PATH,
     )
-    output_path = run_predict(config=config)
+    output_path = run_predict(config=config, since=since)
     logger.info("predict: wrote predictions -> %s", output_path)
     return output_path
 

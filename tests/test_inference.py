@@ -263,6 +263,162 @@ class TestSavePredictions:
         assert len(loaded) == len(table)
         assert set(loaded.columns) == set(table.columns)
 
+    def test_history_partition_written(
+        self, predictor: Predictor, gold_df: pd.DataFrame
+    ) -> None:
+        """save_predictions writes a single flat history/dt=<date>.parquet (no hour subdirs)."""
+        # Arrange
+        predictor.load_model()
+        preds = predictor.predict(gold_df)
+        table = predictor.build_predictions_table(gold_df, preds)
+        # restrict to a single date so the assertion is exact
+        one_day = table[table["hour"].dt.date == table["hour"].dt.date.min()].copy()
+
+        # Act
+        predictor.save_predictions(one_day)
+
+        # Assert — flat file, no per-hour subdirectory
+        pred_dir = os.path.dirname(predictor.output_path)
+        date_str = one_day["hour"].dt.date.min().isoformat()
+        day_file = os.path.join(pred_dir, "history", f"dt={date_str}.parquet")
+        assert os.path.isfile(day_file), f"day-partition file missing: {day_file}"
+        assert not os.path.isdir(os.path.join(pred_dir, "history", f"dt={date_str}")), (
+            "old per-hour dir should not exist"
+        )
+        # round-trip: day file holds exactly the input rows with the same columns
+        loaded = pd.read_parquet(day_file)
+        assert len(loaded) == len(one_day)
+        assert set(loaded.columns) == set(one_day.columns)
+
+    def test_history_multiday_partitions(
+        self, predictor: Predictor, gold_df: pd.DataFrame
+    ) -> None:
+        """A batch spanning >=2 dates produces one dt=<date>.parquet file per date."""
+        # Arrange
+        predictor.load_model()
+        preds = predictor.predict(gold_df)
+        table = predictor.build_predictions_table(gold_df, preds)
+        expected_dates = {d.isoformat() for d in table["hour"].dt.date.unique()}
+        assert len(expected_dates) >= 2  # gold_df spans ~42 days
+
+        # Act
+        predictor.save_predictions(table)
+
+        # Assert — flat .parquet files, not directories
+        history_root = os.path.join(os.path.dirname(predictor.output_path), "history")
+        got_files = {f for f in os.listdir(history_root) if f.endswith(".parquet")}
+        expected_files = {f"dt={d}.parquet" for d in expected_dates}
+        assert got_files == expected_files
+
+    def test_history_write_failure_isolated(
+        self, predictor: Predictor, gold_df: pd.DataFrame
+    ) -> None:
+        """A history-write failure never breaks the hot-slot nor propagates."""
+        # Arrange
+        predictor.load_model()
+        preds = predictor.predict(gold_df)
+        table = predictor.build_predictions_table(gold_df, preds)
+        date_str = table["hour"].dt.date.min().isoformat()
+
+        # Act — force the history write to fail; hot-slot write must still land
+        real_makedirs = os.makedirs
+
+        def makedirs_side_effect(path: str, **kwargs: Any) -> None:
+            if "/history/" in str(path) or str(path).endswith("/history"):
+                raise OSError("boom")
+            real_makedirs(path, **kwargs)
+
+        with patch(
+            "app.inference.predictor.os.makedirs", side_effect=makedirs_side_effect
+        ):
+            path = predictor.save_predictions(table)
+
+        # Assert
+        assert os.path.exists(path)  # hot-slot written
+        pred_dir = os.path.dirname(predictor.output_path)
+        assert not os.path.isfile(
+            os.path.join(pred_dir, "history", f"dt={date_str}.parquet")
+        )
+
+    def test_upsert_appends_across_ticks(
+        self, predictor: Predictor, gold_df: pd.DataFrame
+    ) -> None:
+        """Two consecutive saves to the same date accumulate all buckets.
+
+        Simulates two DAG ticks writing non-overlapping 15-min buckets on the
+        same calendar date — all 4 buckets must survive in the day file.
+        """
+        # Arrange
+        predictor.load_model()
+        preds = predictor.predict(gold_df)
+        table = predictor.build_predictions_table(gold_df, preds)
+        date_min = table["hour"].dt.date.min()
+        same_day = table[table["hour"].dt.date == date_min].copy()
+        # split into two non-overlapping bucket halves by sorted hour
+        sorted_hours = sorted(same_day["hour"].unique())
+        half = len(sorted_hours) // 2
+        tick1 = same_day[same_day["hour"].isin(sorted_hours[:half])].copy()
+        tick2 = same_day[same_day["hour"].isin(sorted_hours[half:])].copy()
+        assert len(tick1) > 0 and len(tick2) > 0
+
+        # Act — two sequential saves
+        predictor.save_predictions(tick1)
+        predictor.save_predictions(tick2)
+
+        # Assert — day file contains all buckets from both ticks
+        pred_dir = os.path.dirname(predictor.output_path)
+        day_file = os.path.join(
+            pred_dir, "history", f"dt={date_min.isoformat()}.parquet"
+        )
+        loaded = pd.read_parquet(day_file)
+        assert len(loaded) == len(tick1) + len(tick2)
+
+    def test_upsert_dedup_keeps_last(
+        self, predictor: Predictor, gold_df: pd.DataFrame
+    ) -> None:
+        """Re-scoring the same (pulocationid, hour) keeps the second (newer) value.
+
+        Pins the concat([existing, new], keep='last') order — reversing it would
+        silently keep the stale value and this test would catch the regression.
+        """
+        # Arrange — build a two-row table with identical keys but different predictions
+        predictor.load_model()
+        fixed_hour = pd.Timestamp("2022-01-01 13:00:00")
+        row_first = pd.DataFrame(
+            {
+                "pulocationid": [1],
+                "hour": [fixed_hour],
+                "predicted_trip_count": [10.0],
+                "actual_trip_count": [5],
+            }
+        )
+        row_second = pd.DataFrame(
+            {
+                "pulocationid": [1, 2],
+                "hour": [fixed_hour, fixed_hour],
+                "predicted_trip_count": [99.0, 7.0],  # zone 1 updated; zone 2 new
+                "actual_trip_count": [5, 3],
+            }
+        )
+
+        # Act — first tick, then second tick with updated zone-1 value
+        predictor.save_predictions(row_first)
+        predictor.save_predictions(row_second)
+
+        # Assert — zone 1 holds the SECOND value (99.0), not the first (10.0)
+        pred_dir = os.path.dirname(predictor.output_path)
+        day_file = os.path.join(
+            pred_dir, "history", f"dt={fixed_hour.date().isoformat()}.parquet"
+        )
+        loaded = pd.read_parquet(day_file)
+        assert len(loaded) == 2  # zone 1 deduped + zone 2 new = 2 rows
+        zone1_val = loaded.loc[
+            loaded["pulocationid"] == 1, "predicted_trip_count"
+        ].iloc[0]
+        assert zone1_val == pytest.approx(99.0), (
+            f"Expected 99.0 (second write) but got {zone1_val} — concat order is wrong"
+        )
+
 
 # -- Test: run (end-to-end) -------------------------------------------------
 
@@ -292,6 +448,68 @@ class TestRun:
         """n_predictions matches input row count."""
         result = predictor.run(data=gold_df)
         assert result["n_predictions"] == len(gold_df)
+
+    def test_run_with_since_filters_gold(
+        self, predictor: Predictor, gold_df: pd.DataFrame
+    ) -> None:
+        """run(data=gold, since=ts) scores only rows with hour >= since.
+
+        n_predictions and the hot-slot row count must match the filtered slice.
+        """
+        # Arrange — pick the second distinct bucket as the since cutoff
+        sorted_hours = sorted(gold_df["hour"].unique())
+        since = sorted_hours[1]  # skip the very first bucket
+        expected_rows = int((gold_df["hour"] >= since).sum())
+
+        # Act
+        result = predictor.run(data=gold_df, since=since)
+
+        # Assert — n_predictions reflects the filtered slice
+        assert result["n_predictions"] == expected_rows
+        hot_slot = pd.read_parquet(result["output_path"])
+        assert len(hot_slot) == expected_rows
+
+    def test_run_without_since_unchanged(
+        self, predictor: Predictor, gold_df: pd.DataFrame
+    ) -> None:
+        """run(data=gold) with no since argument scores all rows (regression pin)."""
+        # Arrange / Act
+        result = predictor.run(data=gold_df)
+
+        # Assert — all input rows scored
+        assert result["n_predictions"] == len(gold_df)
+
+    def test_run_empty_slice_preserves_hot_slot(
+        self, predictor: Predictor, gold_df: pd.DataFrame, tmp_path: Any
+    ) -> None:
+        """When since filters out ALL rows the hot-slot is left untouched.
+
+        Overwriting the hot-slot with 0 rows would break /predict — this test
+        guards Decision 3 from the plan.
+        """
+        # Arrange — seed hot-slot with a sentinel row
+        sentinel = pd.DataFrame(
+            {
+                "pulocationid": [999],
+                "hour": [pd.Timestamp("2000-01-01")],
+                "predicted_trip_count": [42.0],
+                "actual_trip_count": [42],
+            }
+        )
+        os.makedirs(os.path.dirname(predictor.output_path), exist_ok=True)
+        sentinel.to_parquet(predictor.output_path, index=False)
+
+        # since is beyond every row in gold_df → empty slice
+        beyond = gold_df["hour"].max() + pd.Timedelta(hours=1)
+
+        # Act
+        result = predictor.run(data=gold_df, since=beyond)
+
+        # Assert — no predictions scored, hot-slot sentinel row survives
+        assert result["n_predictions"] == 0
+        hot_slot = pd.read_parquet(predictor.output_path)
+        assert len(hot_slot) == 1
+        assert hot_slot["predicted_trip_count"].iloc[0] == pytest.approx(42.0)
 
 
 # ---------------------------------------------------------------------------

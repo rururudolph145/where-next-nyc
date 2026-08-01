@@ -44,8 +44,13 @@ def build_predict_config(
     return config
 
 
-def run_predict(*, config: dict[str, Any]) -> str | None:
+def run_predict(*, config: dict[str, Any], since: Any | None = None) -> str | None:
     """Run Predictor with the override config and return the output path.
+
+    Args:
+        config: Inference configuration dict (built by build_predict_config).
+        since: Optional lower-bound timestamp passed to Predictor.run(since=).
+            When supplied, only rows with ``hour >= since`` are scored.
 
     Returns None when gold has 0 rows — the lag window exceeds the available
     history on early pipeline runs, so FeatureEngineer drops every row.
@@ -60,5 +65,5 @@ def run_predict(*, config: dict[str, Any]) -> str | None:
             "run_predict: gold frame is empty — skipping inference for this window"
         )
         return None
-    response = Predictor(config=config).run()
+    response = Predictor(config=config).run(since=since)
     return response["output_path"]

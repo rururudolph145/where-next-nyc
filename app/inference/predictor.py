@@ -6,6 +6,7 @@ builds a predictions table, evaluates metrics, and saves results.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
@@ -15,6 +16,8 @@ import pandas as pd
 
 from app.core.config import load_config
 from app.core.metrics import evaluate as _evaluate
+
+logger = logging.getLogger(__name__)
 
 
 class Predictor:
@@ -149,8 +152,29 @@ class Predictor:
     # Persistence
     # ------------------------------------------------------------------
 
+    def _upsert_day_partition(self, history_dir: str, new_rows: pd.DataFrame) -> None:
+        """Upsert new_rows into the flat history/dt=<date>.parquet for each date.
+
+        Uses concat([existing, new_rows]) + drop_duplicates(keep="last") so a
+        re-scored (pulocationid, hour) bucket keeps the freshest value.
+        """
+        for date_val, group in new_rows.groupby(new_rows["hour"].dt.date):
+            day_path = os.path.join(history_dir, f"dt={date_val!s}.parquet")
+            if os.path.exists(day_path):
+                existing = pd.read_parquet(day_path)
+                group = (
+                    pd.concat([existing, group])
+                    .drop_duplicates(subset=["pulocationid", "hour"], keep="last")
+                    .reset_index(drop=True)
+                )
+            group.to_parquet(day_path, index=False)
+
     def save_predictions(self, predictions_df: pd.DataFrame) -> str:
         """Save the predictions table to a parquet file.
+
+        Writes the hot-slot first, then upserts each touched calendar date into
+        ``history/dt=<YYYY-MM-DD>.parquet``.  A history-write failure is logged
+        and swallowed so the hot-slot is never affected.
 
         Args:
             predictions_df: DataFrame produced by :meth:`build_predictions_table`.
@@ -160,25 +184,38 @@ class Predictor:
         """
         os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
         predictions_df.to_parquet(self.output_path, index=False)
+        try:
+            history_dir = os.path.join(os.path.dirname(self.output_path), "history")
+            os.makedirs(history_dir, exist_ok=True)
+            self._upsert_day_partition(history_dir, predictions_df)
+        except Exception:
+            logger.warning("History write failed; hot-slot unaffected.", exc_info=True)
         return self.output_path
 
     # ------------------------------------------------------------------
     # Orchestration
     # ------------------------------------------------------------------
 
-    def run(self, data: pd.DataFrame | None = None) -> dict[str, Any]:
+    def run(
+        self,
+        data: pd.DataFrame | None = None,
+        since: Any | None = None,
+    ) -> dict[str, Any]:
         """Execute the full inference pipeline.
 
         1. Load model.
         2. Load Gold data (or use provided DataFrame).
-        3. Generate predictions.
-        4. Build predictions table.
-        5. Evaluate metrics.
-        6. Save predictions.
+        3. Optionally filter to rows with ``hour >= since``.
+        4. If the filtered frame is empty, return early without touching the hot-slot.
+        5. Generate predictions, build table, evaluate metrics, save.
 
         Args:
             data: Optional Gold layer DataFrame. If ``None``, loads from
                 the configured gold path.
+            since: Optional lower-bound timestamp (inclusive). When supplied,
+                only rows with ``hour >= since`` are scored. Pass the
+                ``window_start`` watermark value to restrict work to the new
+                DAG slice. ``None`` preserves the full-gold behaviour.
 
         Returns:
             Dictionary with ``metrics``, ``output_path``, and
@@ -188,6 +225,18 @@ class Predictor:
 
         if data is None:
             data = self.load_gold()
+
+        if since is not None:
+            data = data[data["hour"] >= since]
+            if data.empty:
+                logger.info(
+                    "run: since-filter emptied the frame — skipping predict/save"
+                )
+                return {
+                    "metrics": {},
+                    "output_path": self.output_path,
+                    "n_predictions": 0,
+                }
 
         preds = self.predict(data)
         predictions_df = self.build_predictions_table(data, preds)
