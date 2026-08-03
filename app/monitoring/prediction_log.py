@@ -100,7 +100,13 @@ def log_predictions(response: dict[str, Any], path: str) -> Path | None:
     filename = f"served_at={ts_safe}-{uid8}.parquet"
 
     out_dir = os.path.join(path, f"dt={dt_str}")
-    os.makedirs(out_dir, exist_ok=True)
+    # Use umask=0 so new date dirs are world-writable (777).
+    # Airflow worker runs as UID 50000; host user (jason) needs write access too.
+    old_mask = os.umask(0)
+    try:
+        os.makedirs(out_dir, mode=0o777, exist_ok=True)
+    finally:
+        os.umask(old_mask)
 
     out_path = os.path.join(out_dir, filename)
     df.to_parquet(out_path, index=False)
