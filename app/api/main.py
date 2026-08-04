@@ -218,6 +218,14 @@ async def get_heatmap(
                 f"Available range: {available[0]} → {available[-1]}.",
             )
     else:
+        watermark = read_watermark(_watermark_root)
+        if watermark is not None:
+            df = df[df["hour"] <= pd.Timestamp(watermark)]
+            if df.empty:
+                raise HTTPException(
+                    status_code=503,
+                    detail="No predictions available at or before the current watermark position.",
+                )
         latest = df["hour"].max()
         df = df[df["hour"] == latest]
         target_hour = latest

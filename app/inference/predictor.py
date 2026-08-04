@@ -108,21 +108,31 @@ class Predictor:
     ) -> pd.DataFrame:
         """Build a predictions table from input data and predictions.
 
+        The target column is optional.  When absent (inference path),
+        ``actual_trip_count`` is written as ``NaN`` so the deferred
+        monitoring join (``actuals_join``) can fill it later.
+
         Args:
-            df: Gold layer DataFrame with ``pulocationid``, ``hour``,
-                and the target column.
+            df: Gold layer DataFrame with ``pulocationid`` and ``hour``.
+                The target column (``trip_count``) is optional.
             preds: Predicted values from :meth:`predict`.
 
         Returns:
             DataFrame with columns ``pulocationid``, ``hour``,
-            ``predicted_trip_count``, ``actual_trip_count``.
+            ``predicted_trip_count``, ``actual_trip_count``
+            (NaN when target absent).
         """
+        actual = (
+            df[self.target].to_numpy()
+            if self.target in df.columns
+            else np.full(len(df), np.nan)
+        )
         return pd.DataFrame(
             {
                 "pulocationid": df["pulocationid"].values,
                 "hour": df["hour"].values,
                 "predicted_trip_count": preds,
-                "actual_trip_count": df[self.target].values,
+                "actual_trip_count": actual,
             }
         )
 
@@ -219,7 +229,9 @@ class Predictor:
 
         Returns:
             Dictionary with ``metrics``, ``output_path``, and
-            ``n_predictions``.
+            ``n_predictions``.  ``metrics`` is ``{}`` when the target column
+            is absent (inference path) — evaluation is a monitoring concern
+            and is handled by deferred ``actuals_join``.
         """
         self.load_model()
 
@@ -241,15 +253,24 @@ class Predictor:
         preds = self.predict(data)
         predictions_df = self.build_predictions_table(data, preds)
 
-        y_true: pd.Series[Any] = data[self.target]
-        metrics = self.evaluate(y_true, preds)
-
-        print(
-            f"Inference: MAE={metrics['mae']:.2f}  "
-            f"RMSE={metrics['rmse']:.2f}  "
-            f"MAPE={metrics['mape']:.2f}%  "
-            f"WAPE={metrics['wape']:.2f}%"
-        )
+        # Evaluate only when the target column is present and has scorable rows.
+        # Live DAG ticks arrive with inference gold (no target) — metrics stay {}
+        # and scoring is deferred to the monitoring actuals_join path.
+        metrics: dict[str, float] = {}
+        if self.target in data.columns:
+            scorable = data[self.target].notna()
+            if scorable.any():
+                metrics = self.evaluate(
+                    data.loc[scorable, self.target],
+                    preds[scorable.to_numpy()],
+                )
+        if metrics:
+            print(
+                f"Inference: MAE={metrics['mae']:.2f}  "
+                f"RMSE={metrics['rmse']:.2f}  "
+                f"MAPE={metrics['mape']:.2f}%  "
+                f"WAPE={metrics['wape']:.2f}%"
+            )
 
         output_path = self.save_predictions(predictions_df)
         print(f"Predictions saved → {output_path} ({len(predictions_df):,} rows)")
