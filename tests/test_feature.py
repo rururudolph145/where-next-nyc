@@ -854,6 +854,161 @@ class TestSummedHorizonTarget:
             assert (result["pulocationid"] == zone).sum() == n_per_zone - 2
 
 
+# -- Test: for_training switch (inference target decoupling) ---------------
+
+
+def _make_large_silver_df() -> pd.DataFrame:
+    """Create a Silver-like DataFrame with 2 zones and 120 hours.
+
+    Large enough that lag dropna doesn't consume the entire tail — leaves
+    enough rows after lag warm-up to exercise the trailing-bucket assertions.
+    """
+    rows: list[dict[str, object]] = []
+    for zone in [1, 2]:
+        for h in range(120):
+            ts = pd.Timestamp("2022-01-01") + pd.Timedelta(hours=h)
+            for _ in range(zone):
+                rows.append(
+                    {
+                        "tpep_pickup_datetime": ts + pd.Timedelta(minutes=5),
+                        "pulocationid": zone,
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def _fe_horizon_sum_config(tmp_path: Any) -> dict[str, Any]:
+    """Build a FeatureEngineer config with horizon_sum_buckets=2 for F1–F4."""
+    return {
+        "env": "local",
+        "data": {
+            "silver_path": str(tmp_path / "silver.parquet"),
+            "gold_path": str(tmp_path / "gold" / "yellow_tripdata"),
+        },
+        "feature": {
+            "lag_hours": [1, 3],
+            "horizon_sum_buckets": 2,
+            "zone_shapefile_path": "data/reference/taxi_zones.shp",
+        },
+    }
+
+
+class TestForTrainingSwitch:
+    """Tests for FeatureEngineer.run(for_training=...) — inference target decoupling."""
+
+    def test_run_for_training_true_generates_target(self, tmp_path: Any) -> None:
+        """Default run() emits target_sum_t1_t2 and drops the trailing 2 buckets.
+
+        Regression pin: existing training behaviour is preserved when
+        for_training is omitted (defaults to True).
+        """
+        # Arrange
+        silver = _make_large_silver_df()
+        cfg = _fe_horizon_sum_config(tmp_path)
+        silver.to_parquet(cfg["data"]["silver_path"], index=False)
+        eng = FeatureEngineer(config=cfg)
+
+        # Act
+        gold = eng.run()
+
+        # Assert — target column present
+        assert "target_sum_t1_t2" in gold.columns
+
+        # Assert — the featured (post-lag-dropna) max hour per zone is 2 buckets
+        # below the input's featured max: target dropna eats the trailing 2 rows.
+        # Build a reference run without target to find the featured max.
+        lag_hours = [1, 3]
+        silver_hours = sorted(silver["tpep_pickup_datetime"].dt.floor("h").unique())
+        # featured domain = silver_hours[max_lag:]  (lag dropna removes first max_lag)
+        featured_hours = silver_hours[max(lag_hours) :]
+        featured_max = featured_hours[-1]
+        for zone in gold["pulocationid"].unique():
+            zone_max = gold[gold["pulocationid"] == zone]["hour"].max()
+            assert zone_max < featured_max, (
+                f"zone {zone}: target dropna should cap the tail "
+                f"(got {zone_max}, expected < {featured_max})"
+            )
+
+    def test_run_for_training_false_keeps_tail(self, tmp_path: Any) -> None:
+        """run(for_training=False) preserves the trailing 2 buckets per zone.
+
+        The inference path must not drop rows that lack a future target —
+        those are exactly the buckets the model predicts for.
+        """
+        # Arrange
+        silver = _make_large_silver_df()
+        cfg = _fe_horizon_sum_config(tmp_path)
+        silver.to_parquet(cfg["data"]["silver_path"], index=False)
+        eng = FeatureEngineer(config=cfg)
+
+        # Act
+        gold_infer = eng.run(for_training=False)
+
+        # Assert — max hour per zone equals the featured max (no target dropna)
+        silver_hours = sorted(silver["tpep_pickup_datetime"].dt.floor("h").unique())
+        featured_max = silver_hours[-1]  # lag dropna only eats the leading rows
+        for zone in gold_infer["pulocationid"].unique():
+            zone_max = gold_infer[gold_infer["pulocationid"] == zone]["hour"].max()
+            assert zone_max == featured_max, (
+                f"zone {zone}: inference gold tail should equal featured max "
+                f"(got {zone_max}, expected {featured_max})"
+            )
+
+    def test_run_for_training_false_omits_target_column(self, tmp_path: Any) -> None:
+        """Inference gold must not contain any target column.
+
+        Absence of the target is the signal that the row is not yet scorable;
+        downstream monitoring (actuals_join) fills it later.
+        """
+        # Arrange
+        silver = _make_large_silver_df()
+        cfg = _fe_horizon_sum_config(tmp_path)
+        silver.to_parquet(cfg["data"]["silver_path"], index=False)
+        eng = FeatureEngineer(config=cfg)
+
+        # Act
+        gold_infer = eng.run(for_training=False)
+
+        # Assert — no target-related columns
+        assert "target_sum_t1_t2" not in gold_infer.columns
+        target_cols = [c for c in gold_infer.columns if c.startswith("target_")]
+        assert target_cols == [], f"Unexpected target columns: {target_cols}"
+
+    def test_inference_feature_columns_match_training(self, tmp_path: Any) -> None:
+        """Feature columns (excluding target) are identical across both modes.
+
+        Guarantees that the model's feature vector is bit-for-bit the same
+        whether the run was for training or inference — no silent column drift.
+        """
+        # Arrange
+        silver = _make_large_silver_df()
+        cfg = _fe_horizon_sum_config(tmp_path)
+        silver.to_parquet(cfg["data"]["silver_path"], index=False)
+        # Two separate gold dirs so the two runs don't stomp each other
+        cfg_train = {
+            **cfg,
+            "data": {**cfg["data"], "gold_path": str(tmp_path / "gold_train")},
+        }
+        cfg_infer = {
+            **cfg,
+            "data": {**cfg["data"], "gold_path": str(tmp_path / "gold_infer")},
+        }
+
+        # Act
+        gold_train = FeatureEngineer(config=cfg_train).run()
+        gold_infer = FeatureEngineer(config=cfg_infer).run(for_training=False)
+
+        # Assert — feature columns identical (target excluded from training set)
+        target_cols = {c for c in gold_train.columns if c.startswith("target_")}
+        train_features = set(gold_train.columns) - target_cols
+        infer_features = set(gold_infer.columns)
+        assert train_features == infer_features, (
+            f"Column drift between modes.\n"
+            f"  train-only: {train_features - infer_features}\n"
+            f"  infer-only: {infer_features - train_features}"
+        )
+
+
 # -- Test: build_centroid_lookup -------------------------------------------
 
 

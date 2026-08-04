@@ -589,8 +589,13 @@ class TestAC8HeatmapEnvelopeProvenance:
                                 "_generated_at",
                                 "2021-03-01T12:00:00+00:00",
                             ):
-                                local_client = TestClient(serving_module.app)
-                                resp = local_client.get("/heatmap")
+                                with patch.object(
+                                    serving_module,
+                                    "_watermark_root",
+                                    tmp_path / "wm",
+                                ):
+                                    local_client = TestClient(serving_module.app)
+                                    resp = local_client.get("/heatmap")
 
         # Assert
         assert resp.status_code == 200
@@ -618,7 +623,7 @@ class TestAC9HeatmapPreExistingBehaviour:
     """AC-9: All pre-existing /heatmap acceptance criteria remain satisfied."""
 
     @pytest.fixture(autouse=True)
-    def _setup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def _setup(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Inject standard module state with PBI-21 columns included."""
         import app.api.main as serving_module
 
@@ -661,6 +666,7 @@ class TestAC9HeatmapPreExistingBehaviour:
         )
         monkeypatch.setattr(serving_module, "_model_version", "3")
         monkeypatch.setattr(serving_module, "_served_from_stage", "Production")
+        monkeypatch.setattr(serving_module, "_watermark_root", tmp_path / "wm")
 
     def test_ac9_heatmap_preserves_pre_existing_behaviour(self) -> None:
         """AC-9: zone_count > 0, descending sort by predicted_trip_count, required envelope keys.
@@ -915,7 +921,7 @@ class TestEdgeLegacyParquetNullProvenance:
     """Edge: parquet written before PBI-21 has no provenance columns → null in API."""
 
     def test_edge_legacy_parquet_serves_null_provenance_in_heatmap(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Edge: When _model_version and _served_from_stage are None (legacy parquet),
         /heatmap still returns 200 with null provenance fields — no 500 error.
@@ -951,6 +957,7 @@ class TestEdgeLegacyParquetNullProvenance:
         monkeypatch.setattr(
             serving_module, "_generated_at", "2021-03-01T01:00:00+00:00"
         )
+        monkeypatch.setattr(serving_module, "_watermark_root", tmp_path / "wm")
 
         # Act
         local_client = TestClient(serving_module.app)

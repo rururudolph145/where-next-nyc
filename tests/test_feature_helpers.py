@@ -250,7 +250,7 @@ class TestRunFeature:
 
         # Assert
         mock_engineer.assert_called_once_with(config=override_config)
-        mock_engineer.return_value.run.assert_called_once_with()
+        mock_engineer.return_value.run.assert_called_once_with(for_training=False)
 
     def test_cleaner_saves_before_engineer_runs(
         self, override_config: dict[str, Any]
