@@ -691,7 +691,7 @@ class TestHeatmapSimulatedFlag:
     """AC-9: /heatmap top-level envelope includes simulated flag (PBI 25b: dynamic)."""
 
     def test_ac9_heatmap_envelope_contains_simulated_flag(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """AC-9: 'simulated' key is present in the /heatmap response envelope.
 
@@ -733,6 +733,7 @@ class TestHeatmapSimulatedFlag:
         monkeypatch.setattr(
             serving_module, "_generated_at", "2021-03-01T12:00:00+00:00"
         )
+        monkeypatch.setattr(serving_module, "_watermark_root", tmp_path / "wm")
 
         # Act
         local_client = TestClient(serving_module.app)
@@ -755,7 +756,9 @@ class TestHeatmapBackwardsCompatibility:
     """AC-10: all prior /heatmap criteria still hold after PBI-27 changes."""
 
     @pytest.fixture(autouse=True)
-    def _setup_module_state(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def _setup_module_state(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         import app.api.main as serving_module
 
         monkeypatch.setattr(
@@ -792,6 +795,7 @@ class TestHeatmapBackwardsCompatibility:
         monkeypatch.setattr(
             serving_module, "_generated_at", "2021-03-01T12:00:00+00:00"
         )
+        monkeypatch.setattr(serving_module, "_watermark_root", tmp_path / "wm")
 
     def test_ac10_heatmap_existing_criteria_still_pass(
         self, monkeypatch: pytest.MonkeyPatch

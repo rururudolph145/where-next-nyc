@@ -512,6 +512,127 @@ class TestRun:
         assert hot_slot["predicted_trip_count"].iloc[0] == pytest.approx(42.0)
 
 
+# -- Test: target decoupling (inference path) --------------------------------
+
+
+class TestTargetDecoupling:
+    """Tests for Predictor target-optional contract (inference decoupling)."""
+
+    def test_build_predictions_table_nan_actual_when_target_absent(
+        self, predictor: Predictor, gold_df: pd.DataFrame
+    ) -> None:
+        """build_predictions_table writes NaN actuals when target column absent.
+
+        When gold has no trip_count column (inference path), actual_trip_count
+        must be all-NaN — not a KeyError.
+        """
+        # Arrange
+        predictor.load_model()
+        gold_no_target = gold_df.drop(columns=["trip_count"])
+        preds = predictor.predict(gold_no_target)
+
+        # Act
+        table = predictor.build_predictions_table(gold_no_target, preds)
+
+        # Assert — actual_trip_count all-NaN, no KeyError, other cols intact
+        assert table["actual_trip_count"].isna().all()
+        assert "predicted_trip_count" in table.columns
+        assert "pulocationid" in table.columns
+        assert "hour" in table.columns
+
+    def test_run_predicts_when_target_absent(
+        self, predictor: Predictor, gold_df: pd.DataFrame
+    ) -> None:
+        """run(data=gold_no_target) succeeds with n_predictions > 0 and metrics == {}.
+
+        The live DAG tick arrives with inference gold (no target column).
+        The predictor must not KeyError and must return an empty metrics dict.
+        """
+        # Arrange
+        gold_no_target = gold_df.drop(columns=["trip_count"])
+
+        # Act
+        result = predictor.run(data=gold_no_target)
+
+        # Assert
+        assert result["n_predictions"] > 0
+        assert result["metrics"] == {}
+
+    def test_run_evaluates_only_scorable_rows(
+        self, predictor: Predictor, gold_df: pd.DataFrame
+    ) -> None:
+        """run() computes metrics on only the non-NaN subset of trip_count.
+
+        When half the rows have NaN trip_count (partially-scored frame),
+        metrics must be non-empty and contain the expected keys.
+        """
+        # Arrange — set half the trip_count values to NaN
+        mixed = gold_df.copy()
+        half = len(mixed) // 2
+        mixed.loc[mixed.index[:half], "trip_count"] = np.nan
+
+        # Act
+        result = predictor.run(data=mixed)
+
+        # Assert — metrics computed on the non-NaN half only
+        assert result["metrics"] != {}
+        assert set(result["metrics"].keys()) == {"mae", "rmse", "mape", "wape"}
+
+    def test_run_with_target_present_metrics_nonempty(
+        self, predictor: Predictor, gold_df: pd.DataFrame
+    ) -> None:
+        """Regression: run(data=gold_df) with full target yields non-empty metrics.
+
+        Manual/batch runs with a known target must still score inline.
+        Pins that the target-absent path doesn't break the normal path.
+        """
+        # Arrange / Act
+        result = predictor.run(data=gold_df)
+
+        # Assert
+        assert result["metrics"] != {}
+        assert set(result["metrics"].keys()) == {"mae", "rmse", "mape", "wape"}
+
+    def test_history_actual_nan_survives_then_upsert_fills(
+        self, predictor: Predictor, gold_df: pd.DataFrame
+    ) -> None:
+        """NaN actual_trip_count in history is overwritten by a later upsert.
+
+        First run: inference gold (no target) → history rows with NaN actual.
+        Second run: same (pulocationid, hour) with a known actual → upsert
+        replaces NaN (keep='last' semantics), confirming NaN is not sticky.
+        """
+        # Arrange — inference run writes NaN actuals
+        gold_no_target = gold_df.drop(columns=["trip_count"])
+        predictor.run(data=gold_no_target)
+
+        # Verify first run wrote NaN actuals in history
+        history_dir = os.path.join(os.path.dirname(predictor.output_path), "history")
+        assert os.path.exists(history_dir)
+        first_parquets = [f for f in os.listdir(history_dir) if f.endswith(".parquet")]
+        assert len(first_parquets) > 0
+        first_history = pd.concat(
+            [pd.read_parquet(os.path.join(history_dir, f)) for f in first_parquets]
+        )
+        assert first_history["actual_trip_count"].isna().all()
+
+        # Act — second run with the same (pulocationid, hour) but known actuals
+        predictor.run(data=gold_df)
+
+        # Assert — after upsert, NaN is replaced by real actuals
+        second_history = pd.concat(
+            [
+                pd.read_parquet(os.path.join(history_dir, f))
+                for f in os.listdir(history_dir)
+                if f.endswith(".parquet")
+            ]
+        )
+        # Every (pulocationid, hour) pair kept only the latest write (keep='last')
+        assert not second_history["actual_trip_count"].isna().all(), (
+            "After upsert with known actuals, history should not be all-NaN"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Helpers for HourlySimulator / fallback tests
 # ---------------------------------------------------------------------------

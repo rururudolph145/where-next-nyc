@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -98,6 +99,9 @@ def client(
     serving_module._config = {
         "monitoring": {"predictions_path": str(tmp_path / "monitoring_predictions")}
     }
+    # Point watermark root at an empty tmp dir so read_watermark returns None
+    # and the no-hour branch falls back to latest-hour (no watermark cap).
+    serving_module._watermark_root = tmp_path / "watermarks" / "refresh_15min"
 
     yield TestClient(serving_module.app)
 
@@ -547,6 +551,7 @@ class TestHeatmapAcceptance:
         centroid_lookup: dict[int, tuple[float, float]],
         zone_lookup: dict[int, str],
         monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         """AC #7: a zone absent from _centroid_lookup must have latitude=null,
         longitude=null, and zone_name="Unknown" in the response.
@@ -573,6 +578,7 @@ class TestHeatmapAcceptance:
         monkeypatch.setattr(
             serving_module, "_generated_at", "2021-03-01T12:00:00+00:00"
         )
+        monkeypatch.setattr(serving_module, "_watermark_root", tmp_path / "wm")
 
         local_client = TestClient(serving_module.app)
         resp = local_client.get("/heatmap")
@@ -1158,7 +1164,7 @@ class TestHeatmapModelProvenance:
         assert body["served_from_stage"] == "Production"
 
     def test_get_heatmap_provenance_null_when_legacy_parquet(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """GET /heatmap returns null provenance fields for pre-PBI-21 parquets.
 
@@ -1188,6 +1194,7 @@ class TestHeatmapModelProvenance:
         )
         monkeypatch.setattr(serving_module, "_model_version", None)
         monkeypatch.setattr(serving_module, "_served_from_stage", None)
+        monkeypatch.setattr(serving_module, "_watermark_root", tmp_path / "wm")
 
         local_client = TestClient(serving_module.app)
         resp = local_client.get("/heatmap")
@@ -1249,3 +1256,159 @@ class TestPredictionLogHook:
         assert resp.status_code == 200
         body: dict[str, Any] = resp.json()
         assert "predictions" in body
+
+
+class TestHeatmapWatermarkFilter:
+    """GET /heatmap caps the default hour to the watermark when one exists."""
+
+    @pytest.fixture(autouse=True)
+    def _restore_globals(self) -> Generator[None, None, None]:
+        """Snapshot and restore all module globals mutated by this class."""
+        import app.api.main as serving_module
+
+        orig_predictions = serving_module._predictions_df
+        orig_zone_lookup = serving_module._zone_lookup
+        orig_centroid_lookup = serving_module._centroid_lookup
+        orig_generated_at = serving_module._generated_at
+        orig_model_version = serving_module._model_version
+        orig_served_from_stage = serving_module._served_from_stage
+        orig_config = serving_module._config
+        orig_watermark_root = serving_module._watermark_root
+        yield
+        serving_module._predictions_df = orig_predictions
+        serving_module._zone_lookup = orig_zone_lookup
+        serving_module._centroid_lookup = orig_centroid_lookup
+        serving_module._generated_at = orig_generated_at
+        serving_module._model_version = orig_model_version
+        serving_module._served_from_stage = orig_served_from_stage
+        serving_module._config = orig_config
+        serving_module._watermark_root = orig_watermark_root
+
+    def _client_with_watermark(
+        self,
+        sample_predictions: pd.DataFrame,
+        zone_lookup: dict[int, str],
+        centroid_lookup: dict[int, tuple[float, float]],
+        tmp_path: Path,
+        watermark: datetime | None,
+    ) -> TestClient:
+        """Build a TestClient with module globals pointed at tmp_path.
+
+        Mirrors the `client` fixture but lets the test control the watermark.
+        Caller is responsible for restoring globals — kept minimal via a
+        fresh TestClient per test and monkeypatch in the tests below.
+        """
+        import app.api.main as serving_module
+        from app.core.watermark import write_watermark
+
+        wm_root = tmp_path / "watermarks" / "refresh_15min"
+        serving_module._predictions_df = sample_predictions
+        serving_module._zone_lookup = zone_lookup
+        serving_module._centroid_lookup = centroid_lookup
+        serving_module._generated_at = "2021-03-01T12:00:00+00:00"
+        serving_module._model_version = "3"
+        serving_module._served_from_stage = "Production"
+        serving_module._config = {
+            "monitoring": {"predictions_path": str(tmp_path / "mon")},
+            "ingest": {"seed_start": "2021-01-18T00:00:00"},
+        }
+        serving_module._watermark_root = wm_root
+        if watermark is not None:
+            write_watermark(wm_root, watermark)
+        return TestClient(serving_module.app)
+
+    def test_heatmap_default_capped_at_watermark(
+        self,
+        sample_predictions,
+        zone_lookup,
+        centroid_lookup,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        """Watermark between the two sample hours withholds the later tick."""
+        # Arrange — watermark at 00:30 (between 00:00 and 01:00)
+        client = self._client_with_watermark(
+            sample_predictions,
+            zone_lookup,
+            centroid_lookup,
+            tmp_path,
+            datetime(2021, 3, 1, 0, 30, 0),
+        )
+
+        # Act
+        resp = client.get("/heatmap")
+
+        # Assert
+        assert resp.status_code == 200
+        assert resp.json()["hour"] == "2021-03-01T00:00:00"
+
+    def test_heatmap_watermark_before_all_predictions_returns_503(
+        self,
+        sample_predictions,
+        zone_lookup,
+        centroid_lookup,
+        tmp_path,
+    ) -> None:
+        """Watermark earlier than every prediction hour → 503."""
+        # Arrange
+        client = self._client_with_watermark(
+            sample_predictions,
+            zone_lookup,
+            centroid_lookup,
+            tmp_path,
+            datetime(2021, 1, 1, 0, 0, 0),
+        )
+
+        # Act
+        resp = client.get("/heatmap")
+
+        # Assert
+        assert resp.status_code == 503
+
+    def test_heatmap_no_watermark_returns_latest(
+        self,
+        sample_predictions,
+        zone_lookup,
+        centroid_lookup,
+        tmp_path,
+    ) -> None:
+        """No watermark file → unchanged latest-hour behavior."""
+        # Arrange — watermark=None → no control file written
+        client = self._client_with_watermark(
+            sample_predictions,
+            zone_lookup,
+            centroid_lookup,
+            tmp_path,
+            None,
+        )
+
+        # Act
+        resp = client.get("/heatmap")
+
+        # Assert
+        assert resp.status_code == 200
+        assert resp.json()["hour"] == "2021-03-01T01:00:00"
+
+    def test_heatmap_explicit_hour_bypasses_watermark(
+        self,
+        sample_predictions,
+        zone_lookup,
+        centroid_lookup,
+        tmp_path,
+    ) -> None:
+        """An explicit ?hour= is served even if it exceeds the watermark."""
+        # Arrange — watermark at 00:30 would withhold 01:00 by default
+        client = self._client_with_watermark(
+            sample_predictions,
+            zone_lookup,
+            centroid_lookup,
+            tmp_path,
+            datetime(2021, 3, 1, 0, 30, 0),
+        )
+
+        # Act
+        resp = client.get("/heatmap", params={"hour": "2021-03-01T01:00:00"})
+
+        # Assert
+        assert resp.status_code == 200
+        assert resp.json()["hour"] == "2021-03-01T01:00:00"

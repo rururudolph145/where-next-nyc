@@ -61,5 +61,5 @@ def run_feature(bronze_path: str, *, config: dict[str, Any]) -> str:
     cleaned, _ = cleaner.clean(raw, iqr_bounds=iqr_bounds)
     cleaner.save_silver(cleaned)
 
-    FeatureEngineer(config=config).run()
+    FeatureEngineer(config=config).run(for_training=False)
     return bronze_path
