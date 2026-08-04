@@ -484,12 +484,23 @@ class FeatureEngineer:
     # Orchestration
     # ------------------------------------------------------------------
 
-    def run(self, data: pd.DataFrame | None = None) -> pd.DataFrame:
+    def run(
+        self,
+        data: pd.DataFrame | None = None,
+        for_training: bool = True,
+    ) -> pd.DataFrame:
         """Execute the full Silver → Gold feature engineering pipeline.
 
         Args:
             data: Optional Silver layer DataFrame. If ``None``, reads from
                 the configured ``data.silver_path``.
+            for_training: When ``True`` (default), target columns are
+                generated and trailing rows with no future label are dropped
+                via ``dropna``.  When ``False`` (inference path), target
+                generators are skipped entirely so the trailing buckets — the
+                ones an operator most wants forecast — survive into Gold.
+                The absence of a target column is the "not-yet-scorable"
+                signal consumed by deferred scoring (``actuals_join``).
 
         Returns:
             Gold layer DataFrame.
@@ -504,17 +515,16 @@ class FeatureEngineer:
         panel = self.add_time_features(panel)
         panel = self.add_cyclical_features(panel)
         panel = self.add_lag_features(panel)
-        # Only materialize a shifted-target column when explicitly configured.
-        # Under the default ``horizon_buckets=0`` the trainer still reads the
-        # legacy ``trip_count`` column, so Gold's schema stays bit-identical
-        # for back-compat with existing training/serving paths.
-        if self.horizon_buckets > 0:
+        # Only materialize a shifted-target column when explicitly configured
+        # AND when building training gold.  Inference skips this so the
+        # trailing buckets (no future label yet) survive.
+        if for_training and self.horizon_buckets > 0:
             panel = self.add_shifted_target(panel)
         # PBI B2: extended-nowcast target = sum of next N future buckets.
         # Independent of horizon_buckets — typical config uses only one or
         # the other. When both are set, both columns are emitted and the
         # trainer picks which one via ``train.target``.
-        if self.horizon_sum_buckets > 0:
+        if for_training and self.horizon_sum_buckets > 0:
             panel = self.add_summed_horizon_target(panel)
         panel = self.add_zone_coordinates(panel)
         # Spatial smoothing must run *after* zone coordinates (needs lat/lon)
