@@ -1412,3 +1412,61 @@ class TestHeatmapWatermarkFilter:
         # Assert
         assert resp.status_code == 200
         assert resp.json()["hour"] == "2021-03-01T01:00:00"
+
+
+# ---------------------------------------------------------------------------
+# Step 6 — lifespan wires _watermark_root from config["serving"]["watermark_path"]
+# ---------------------------------------------------------------------------
+
+
+class TestLifespanWatermarkPathWiring:
+    """Step 6 — serving.watermark_path is honoured by lifespan()."""
+
+    def test_lifespan_sets_watermark_root_from_config(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """lifespan() must set _watermark_root to Path(config["serving"]["watermark_path"]).
+
+        Arrange:
+        - Provide a fake_config with a custom watermark_path.
+        - Patch _load_predictions and _load_zone_lookup to avoid filesystem I/O.
+        Act: enter the app via TestClient (triggers lifespan).
+        Assert: _watermark_root equals the configured path.
+        """
+        import app.api.main as serving_module
+
+        custom_wm_path = "custom/watermarks/refresh"
+        fake_config = {
+            "serving": {
+                "watermark_path": custom_wm_path,
+                "predictions_path": "fake/predictions.parquet",
+                "zone_shapefile_path": "fake/taxi_zones.shp",
+            },
+            "mlflow": {"model_name": "ny_taxi_demand_model"},
+        }
+
+        fake_predictions = pd.DataFrame(
+            {
+                "pulocationid": [1],
+                "hour": pd.to_datetime(["2021-03-01 00:00:00"]),
+                "predicted_trip_count": [5.0],
+                "actual_trip_count": [4.0],
+            }
+        )
+
+        monkeypatch.setattr(
+            serving_module,
+            "_load_predictions",
+            MagicMock(return_value=fake_predictions),
+        )
+        monkeypatch.setattr(
+            serving_module, "_load_zone_lookup", MagicMock(return_value={1: "Zone A"})
+        )
+        monkeypatch.setattr(
+            serving_module, "build_centroid_lookup", MagicMock(return_value={})
+        )
+
+        with patch("app.api.main.load_config", return_value=fake_config):
+            with TestClient(serving_module.app):
+                # Assert — _watermark_root reflects the configured path
+                assert serving_module._watermark_root == Path(custom_wm_path)

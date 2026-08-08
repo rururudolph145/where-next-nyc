@@ -98,11 +98,13 @@ def _load_zone_lookup(config: dict[str, Any]) -> dict[int, str]:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """Load predictions and zone lookup into memory at server start."""
-    global _predictions_df, _zone_lookup, _centroid_lookup, _generated_at, _model_name, _model_version, _served_from_stage, _config  # noqa: PLW0603
+    global _predictions_df, _zone_lookup, _centroid_lookup, _generated_at, _model_name, _model_version, _served_from_stage, _config, _watermark_root  # noqa: PLW0603
 
     config = load_config()
     _config = config
     _model_name = config.get("mlflow", {}).get("model_name", "ny_taxi_demand_model")
+    if "watermark_path" in config.get("serving", {}):
+        _watermark_root = Path(config["serving"]["watermark_path"])
     try:
         _predictions_df = _load_predictions(config)
         _zone_lookup = _load_zone_lookup(config)

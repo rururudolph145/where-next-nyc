@@ -43,7 +43,11 @@ import pandas as pd
 import pytest
 
 from app.ingestion.clean import DataCleaner
-from app.ingestion.schema import DataValidationError
+from app.ingestion.schema import (
+    DataValidationError,
+    build_bronze_schema,
+    validate_bronze_schema,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -587,3 +591,42 @@ def test_edge_empty_bronze_frame_passes_schema(tmp_path: Path) -> None:
     assert payload["rows_in"] == 0
     assert payload["rows_passing"] == 0
     assert payload["rows_failing"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Step 3 — zone_id_min/max via build_bronze_schema and validate_bronze_schema
+# ---------------------------------------------------------------------------
+
+
+def test_build_bronze_schema_accepts_locationid_within_custom_range() -> None:
+    """build_bronze_schema(1, 300) accepts PULocationID=280 that 265 would reject."""
+    # Arrange
+    df = _valid_bronze_df().copy()
+    df.loc[0, "PULocationID"] = 280.0
+    schema = build_bronze_schema(1, 300)
+
+    # Act / Assert — no SchemaErrors raised
+    schema.validate(df, lazy=True)
+
+
+def test_validate_bronze_schema_config_override_widens_zone_range() -> None:
+    """validate_bronze_schema(df, config=...) with zone_id_max=300 accepts ID=280."""
+    # Arrange
+    df = _valid_bronze_df().copy()
+    df.loc[0, "PULocationID"] = 280.0
+    config = {"ingest": {"zone_id_min": 1, "zone_id_max": 300}}
+
+    # Act / Assert — no exception with widened range
+    validate_bronze_schema(df, config=config)
+
+
+def test_validate_bronze_schema_default_still_rejects_zone_266() -> None:
+    """Default zone_id_max=265 still rejects PULocationID=266 (regression guard)."""
+    # Arrange
+    df = _valid_bronze_df().copy()
+    df.loc[0, "PULocationID"] = 266.0
+    # No config override — should use the 265 default
+
+    # Act / Assert
+    with pytest.raises(DataValidationError):
+        validate_bronze_schema(df)

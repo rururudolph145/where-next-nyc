@@ -106,6 +106,70 @@ def test_clean_transform_mode(cleaner):
     assert 100.0 not in result["fare_amount"].values
 
 
+def test_clean_iqr_multiplier_from_config_survives_wider_fence() -> None:
+    """iqr_multiplier=3.0 keeps a row that default 1.5 would drop.
+
+    Data: fares [10, 12, 14, 16, 25].
+    q1=12.0, q3=16.0, iqr=4.0 → 1.5 fence upper=22.0; 3.0 fence upper=28.0.
+    fare=25.0 is outside the 1.5 fence but inside the 3.0 fence.
+    """
+    data = pd.DataFrame(
+        {
+            "tpep_pickup_datetime": ["2023-01-01 08:00:00"] * 5,
+            "tpep_dropoff_datetime": ["2023-01-01 08:15:00"] * 5,
+            "passenger_count": [1.0] * 5,
+            "trip_distance": [1.0] * 5,
+            "fare_amount": [10.0, 12.0, 14.0, 16.0, 25.0],
+            "PULocationID": [1, 2, 3, 4, 5],
+        }
+    )
+    config = {
+        "env": "local",
+        "data": {"bronze_path": "x", "silver_path": "y"},
+        "clean": {"null_strategy": "drop", "iqr_multiplier": 3.0},
+        "inference": {"simulation": {"start_hour": "2023-06-01 00:00:00"}},
+        "model": {"store_path": "models/"},
+    }
+    cleaner = DataCleaner(config)
+
+    # Act
+    result, _ = cleaner.clean(data)
+
+    # Assert — row with fare 25.0 survives the wider 3.0 fence
+    assert 25.0 in result["fare_amount"].values
+
+
+def test_clean_iqr_multiplier_default_drops_outlier() -> None:
+    """Default iqr_multiplier=1.5 (no config key) drops a row that 3.0 would keep.
+
+    Same data as above; fare=25.0 is outside the 1.5 fence upper (22.0).
+    """
+    data = pd.DataFrame(
+        {
+            "tpep_pickup_datetime": ["2023-01-01 08:00:00"] * 5,
+            "tpep_dropoff_datetime": ["2023-01-01 08:15:00"] * 5,
+            "passenger_count": [1.0] * 5,
+            "trip_distance": [1.0] * 5,
+            "fare_amount": [10.0, 12.0, 14.0, 16.0, 25.0],
+            "PULocationID": [1, 2, 3, 4, 5],
+        }
+    )
+    config = {
+        "env": "local",
+        "data": {"bronze_path": "x", "silver_path": "y"},
+        "clean": {"null_strategy": "drop"},  # no iqr_multiplier key — uses default 1.5
+        "inference": {"simulation": {"start_hour": "2023-06-01 00:00:00"}},
+        "model": {"store_path": "models/"},
+    }
+    cleaner = DataCleaner(config)
+
+    # Act
+    result, _ = cleaner.clean(data)
+
+    # Assert — row with fare 25.0 is dropped by the default 1.5 fence (upper=22.0)
+    assert 25.0 not in result["fare_amount"].values
+
+
 # ---------------------------------------------------------------------------
 # Fixtures for schema-validation tests
 # ---------------------------------------------------------------------------

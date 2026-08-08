@@ -76,12 +76,14 @@ def _read_watermarks(**context: object) -> dict[str, object]:
 
 
 def _check_window_ready(**context: object) -> None:
-    """Skip when inference hasn't advanced ≥30d ahead of last training."""
+    """Skip when inference hasn't advanced ≥window_days ahead of last training."""
     ti = context["ti"]  # type: ignore[index]
     wm: dict[str, object] = ti.xcom_pull(task_ids="read_watermarks")  # type: ignore[attr-defined]
     refresh_wm = datetime.fromisoformat(str(wm["refresh_wm"]))
     last_training_wm = datetime.fromisoformat(str(wm["last_training_wm"]))
-    check_window_ready(refresh_wm, last_training_wm)
+    config = load_config()
+    window_days: int = config["train"].get("window_days", 30)
+    check_window_ready(refresh_wm, last_training_wm, window_days=window_days)
     logger.info(
         "check_window_ready: refresh=%s last_training=%s — continuing",
         refresh_wm,
@@ -96,7 +98,8 @@ def _compute_window(**context: object) -> dict[str, str]:
     config = load_config()
     seed_start = datetime.fromisoformat(config["ingest"]["seed_start"])
     last_training_wm = datetime.fromisoformat(str(wm["last_training_wm"]))
-    start, end = compute_window(seed_start, last_training_wm)
+    window_days: int = config["train"].get("window_days", 30)
+    start, end = compute_window(seed_start, last_training_wm, window_days=window_days)
     window = {"window_start": start.isoformat(), "window_end": end.isoformat()}
     logger.info("compute_window: %s", window)
     return window

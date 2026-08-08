@@ -419,3 +419,51 @@ class TestDagStructure:
         assert task_map["compute_window"].downstream_task_ids == {"train"}
         assert task_map["train"].downstream_task_ids == {"write_training_watermark"}
         assert task_map["write_training_watermark"].downstream_task_ids == set()
+
+
+class TestWindowDaysConfig:
+    """Step 4 — window_days wired from config."""
+
+    def test_compute_window_respects_window_days_param(self) -> None:
+        """window_days=7 overrides the 30-day default in compute_window."""
+        # Arrange
+        from orchestration.lib import training_helpers as th
+
+        seed = datetime(2021, 1, 18)
+        last = seed + timedelta(days=30)
+
+        # Act
+        _, end = th.compute_window(seed, last, window_days=7)
+
+        # Assert — window_end is last + 7d (not 30d)
+        assert end == last + timedelta(days=7)
+
+    def test_check_window_ready_passes_at_custom_window_boundary(self) -> None:
+        """check_window_ready passes when delta == window_days (custom value)."""
+        # Arrange
+        from orchestration.lib import training_helpers as th
+
+        last = datetime(2021, 2, 1)
+        refresh = last + timedelta(days=7)
+
+        # Act — should NOT raise (delta equals the window requirement)
+        th.check_window_ready(refresh, last, window_days=7)
+
+    def test_check_window_ready_skips_when_below_custom_window(self) -> None:
+        """check_window_ready raises AirflowSkipException when delta < window_days."""
+        # Arrange
+        import pytest
+
+        try:
+            from airflow.exceptions import AirflowSkipException
+        except ImportError:
+            pytest.skip("Airflow not installed in host env")
+
+        from orchestration.lib import training_helpers as th
+
+        last = datetime(2021, 2, 1)
+        refresh = last + timedelta(days=3)  # 3 < 7
+
+        # Act / Assert
+        with pytest.raises(AirflowSkipException):
+            th.check_window_ready(refresh, last, window_days=7)

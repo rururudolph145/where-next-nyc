@@ -141,9 +141,10 @@ class DataCleaner:
             q3 = bounds["q3"]
             iqr = bounds["iqr"]
 
+        mult: float = self.config["clean"].get("iqr_multiplier", 1.5)
         data = data[
-            (data["fare_amount"] >= q1 - 1.5 * iqr)
-            & (data["fare_amount"] <= q3 + 1.5 * iqr)
+            (data["fare_amount"] >= q1 - mult * iqr)
+            & (data["fare_amount"] <= q3 + mult * iqr)
         ]
 
         # Feature engineering
