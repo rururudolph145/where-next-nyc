@@ -150,7 +150,7 @@ def _feature(**context: object) -> None:
         silver_root=paths["silver"],
         gold_root=paths["gold"],
         shapefile_path=paths["shapefile"],
-        model_root=paths["iqr_root"],
+        model_root=paths["models"],
     )
     run_feature(bronze_path, config=feature_config)
     logger.info("feature: silver+gold materialized for %s", bronze_path)
@@ -170,7 +170,7 @@ def _predict(**context: object) -> str | None:
     predict_config = build_predict_config(
         config,
         gold_root=paths["gold"],
-        model_root=paths["trained"],
+        model_root=paths["models"],
         predictions_path=paths["predictions"],
     )
     output_path = run_predict(config=predict_config, since=since)
