@@ -397,12 +397,13 @@ class TestDagStructure:
         assert "monthly" in dag.tags
 
     def test_task_chain_is_linear(self, dag) -> None:  # type: ignore[no-untyped-def]
-        """Five tasks in the expected linear order."""
+        """Six tasks in the expected linear order."""
         # Arrange
         expected_tasks = {
             "read_watermarks",
             "check_window_ready",
             "compute_window",
+            "feature",
             "train",
             "write_training_watermark",
         }
@@ -416,9 +417,69 @@ class TestDagStructure:
         task_map = {t.task_id: t for t in dag.tasks}
         assert task_map["read_watermarks"].downstream_task_ids == {"check_window_ready"}
         assert task_map["check_window_ready"].downstream_task_ids == {"compute_window"}
-        assert task_map["compute_window"].downstream_task_ids == {"train"}
+        assert task_map["compute_window"].downstream_task_ids == {"feature"}
+        assert task_map["feature"].downstream_task_ids == {"train"}
         assert task_map["train"].downstream_task_ids == {"write_training_watermark"}
         assert task_map["write_training_watermark"].downstream_task_ids == set()
+
+
+class TestTrainDagFeatureTask:
+    """_feature task calls run_feature with for_training=True into a train-gold path."""
+
+    def test_feature_callable_calls_run_feature_with_for_training_true(self) -> None:
+        """_feature() passes for_training=True to run_feature."""
+        # Arrange
+        pytest.importorskip("airflow")
+        from unittest.mock import patch, MagicMock
+
+        from orchestration.dags.train_monthly_dag import _feature
+
+        ti_mock = MagicMock()
+        ti_mock.xcom_pull.return_value = (
+            "/opt/airflow/data/bronze/yellow_tripdata/bronze.parquet"
+        )
+        context = {"ti": ti_mock}
+
+        with patch(
+            "orchestration.dags.train_monthly_dag.run_feature"
+        ) as mock_run_feature:
+            mock_run_feature.return_value = ti_mock.xcom_pull.return_value
+            # Act
+            _feature(**context)
+
+        # Assert — for_training=True was passed
+        _, kwargs = mock_run_feature.call_args
+        assert kwargs.get("for_training") is True
+
+    def test_feature_callable_uses_train_gold_path(self) -> None:
+        """_feature() writes to a train-specific gold path, not inference gold."""
+        # Arrange
+        pytest.importorskip("airflow")
+        from unittest.mock import patch, MagicMock
+
+        from orchestration.dags.train_monthly_dag import _feature
+
+        ti_mock = MagicMock()
+        ti_mock.xcom_pull.return_value = (
+            "/opt/airflow/data/bronze/yellow_tripdata/bronze.parquet"
+        )
+        context = {"ti": ti_mock}
+
+        with patch(
+            "orchestration.dags.train_monthly_dag.run_feature"
+        ) as mock_run_feature:
+            mock_run_feature.return_value = ti_mock.xcom_pull.return_value
+            with patch(
+                "orchestration.dags.train_monthly_dag.build_feature_config"
+            ) as mock_bfc:
+                mock_bfc.return_value = {}
+                # Act
+                _feature(**context)
+
+        # Assert — gold_root passed to build_feature_config differs from inference gold
+        _, kwargs = mock_bfc.call_args
+        assert kwargs["gold_root"] != "/opt/airflow/data/gold/yellow_tripdata"
+        assert "train" in kwargs["gold_root"]
 
 
 class TestWindowDaysConfig:
@@ -467,3 +528,33 @@ class TestWindowDaysConfig:
         # Act / Assert
         with pytest.raises(AirflowSkipException):
             th.check_window_ready(refresh, last, window_days=7)
+
+
+class TestBuildTrainConfig:
+    """build_train_config overrides model.store_path without mutating base."""
+
+    def test_build_train_config_overrides_store_path(self) -> None:
+        """build_train_config sets model.store_path to the supplied model_root."""
+        # Arrange
+        from orchestration.lib.training_helpers import build_train_config
+
+        base = {"model": {"store_path": "data/models"}, "train": {}}
+
+        # Act
+        result = build_train_config(base, model_root="/opt/airflow/data/models")
+
+        # Assert
+        assert result["model"]["store_path"] == "/opt/airflow/data/models"
+
+    def test_build_train_config_does_not_mutate_base(self) -> None:
+        """build_train_config deep-copies — base config is unchanged."""
+        # Arrange
+        from orchestration.lib.training_helpers import build_train_config
+
+        base = {"model": {"store_path": "data/models"}, "train": {}}
+
+        # Act
+        build_train_config(base, model_root="/opt/airflow/data/models")
+
+        # Assert
+        assert base["model"]["store_path"] == "data/models"

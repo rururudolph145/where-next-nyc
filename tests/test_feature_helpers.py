@@ -295,3 +295,22 @@ class TestRunFeature:
 
         # Assert
         assert result == BRONZE_PATH
+
+    def test_for_training_true_passes_through_to_engineer(
+        self, override_config: dict[str, Any]
+    ) -> None:
+        """run_feature(for_training=True) calls FeatureEngineer.run(for_training=True)."""
+        # Arrange
+        m = mock_open(read_data=json.dumps(IQR_BOUNDS))
+        with (
+            patch("orchestration.lib.feature_helpers.DataCleaner") as mock_cleaner_cls,
+            patch("orchestration.lib.feature_helpers.FeatureEngineer") as mock_engineer,
+            patch("orchestration.lib.feature_helpers.open", m),
+        ):
+            mock_cleaner_cls.return_value.clean.return_value = ("CLEANED_DF", {})
+
+            # Act
+            run_feature(BRONZE_PATH, config=override_config, for_training=True)
+
+        # Assert
+        mock_engineer.return_value.run.assert_called_once_with(for_training=True)

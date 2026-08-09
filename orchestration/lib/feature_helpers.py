@@ -44,12 +44,21 @@ def build_feature_config(
     return config
 
 
-def run_feature(bronze_path: str, *, config: dict[str, Any]) -> str:
+def run_feature(
+    bronze_path: str,
+    *,
+    config: dict[str, Any],
+    for_training: bool = False,
+) -> str:
     """Clean bronze→silver (transform-only), then engineer silver→gold.
 
     Uses pre-fitted IQR bounds from model_root/iqr_bounds.json so the
     cleaning step never re-splits or re-fits on the cumulative bronze.
     Returns bronze_path unchanged for a stable XCom flow.
+
+    Args:
+        for_training: When True, FeatureEngineer computes the target column
+            (target_sum_t1_t2). Use False for inference gold (no label needed).
     """
     cleaner = DataCleaner(config)
     raw = cleaner.load_bronze()
@@ -61,5 +70,5 @@ def run_feature(bronze_path: str, *, config: dict[str, Any]) -> str:
     cleaned, _ = cleaner.clean(raw, iqr_bounds=iqr_bounds)
     cleaner.save_silver(cleaned)
 
-    FeatureEngineer(config=config).run(for_training=False)
+    FeatureEngineer(config=config).run(for_training=for_training)
     return bronze_path

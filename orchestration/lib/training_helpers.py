@@ -14,6 +14,7 @@ Two seams keep this unit-testable:
 
 from __future__ import annotations
 
+import copy
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -142,6 +143,20 @@ def tag_promoted_version(
     client.set_model_version_tag(
         model_name, version, "trained_at_watermark", window_end.isoformat()
     )
+
+
+def build_train_config(
+    base: dict[str, Any],
+    *,
+    model_root: str,
+) -> dict[str, Any]:
+    """Return a copy of *base* with model.store_path overridden to model_root.
+
+    Mirrors build_predict_config — deep-copies, never mutates base.
+    """
+    config = copy.deepcopy(base)
+    config["model"]["store_path"] = model_root
+    return config
 
 
 def run_train(

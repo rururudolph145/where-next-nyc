@@ -26,8 +26,7 @@ _CONFIG = {
         "zone_shapefile_path": "data/reference/taxi_zones.shp",
     },
     "model": {
-        "dag_iqr_root": "data/models",
-        "trained_path": "data/models_trained",
+        "store_path": "data/models",
     },
     "serving": {
         "predictions_path": "data/predictions/demand_predictions.parquet",
@@ -44,8 +43,7 @@ _EXPECTED = {
     "silver": "/opt/airflow/data/silver/yellow_tripdata_cleaned.parquet",
     "gold": "/opt/airflow/data/gold/yellow_tripdata",
     "shapefile": "/opt/airflow/data/reference/taxi_zones.shp",
-    "iqr_root": "/opt/airflow/data/models",
-    "trained": "/opt/airflow/data/models_trained",
+    "models": "/opt/airflow/data/models",
     "predictions": "/opt/airflow/data/predictions/demand_predictions.parquet",
     "monitoring": "/opt/airflow/data/monitoring/predictions",
     "watermark": "/opt/airflow/data/watermarks/refresh_15min",
@@ -53,10 +51,10 @@ _EXPECTED = {
 
 
 class TestContainerPaths:
-    """container_paths() reproduces today's 10 hardcoded DAG literals."""
+    """container_paths() reproduces today's 9 hardcoded DAG literals."""
 
     def test_all_paths_equal_current_dag_literals(self) -> None:
-        """container_paths(config) reproduces all 10 /opt/airflow/... strings."""
+        """container_paths(config) reproduces all 9 /opt/airflow/... strings."""
         # Act
         result = container_paths(_CONFIG)
 

@@ -26,8 +26,7 @@ _RELATIVE_GETTERS: list[tuple[str, list[str]]] = [
     ("silver", ["data", "silver_path"]),
     ("gold", ["data", "gold_path"]),
     ("shapefile", ["feature", "zone_shapefile_path"]),
-    ("iqr_root", ["model", "dag_iqr_root"]),
-    ("trained", ["model", "trained_path"]),
+    ("models", ["model", "store_path"]),
     ("predictions", ["serving", "predictions_path"]),
     ("watermark", ["serving", "watermark_path"]),
     ("monitoring", ["monitoring", "predictions_path"]),
@@ -49,8 +48,8 @@ def container_paths(
         prefix: Container mount prefix. Defaults to ``/opt/airflow``.
 
     Returns:
-        Dict with keys: raw, bronze, silver, gold, shapefile, iqr_root,
-        trained, predictions, watermark, monitoring.
+        Dict with keys: raw, bronze, silver, gold, shapefile, models,
+        predictions, watermark, monitoring. (9 keys total)
 
     Raises:
         ValueError: If any config-derived relative path starts with ``/``,
