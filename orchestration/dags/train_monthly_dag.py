@@ -90,7 +90,7 @@ def _check_window_ready(**context: object) -> None:
     refresh_wm = datetime.fromisoformat(str(wm["refresh_wm"]))
     last_training_wm = datetime.fromisoformat(str(wm["last_training_wm"]))
     config = load_config()
-    window_days: int = config["train"].get("window_days", 30)
+    window_days: int = config.train.window_days
     check_window_ready(refresh_wm, last_training_wm, window_days=window_days)
     logger.info(
         "check_window_ready: refresh=%s last_training=%s — continuing",
@@ -104,9 +104,9 @@ def _compute_window(**context: object) -> dict[str, str]:
     ti = context["ti"]  # type: ignore[index]
     wm: dict[str, object] = ti.xcom_pull(task_ids="read_watermarks")  # type: ignore[attr-defined]
     config = load_config()
-    seed_start = datetime.fromisoformat(config["ingest"]["seed_start"])
+    seed_start = datetime.fromisoformat(config.ingest.seed_start)
     last_training_wm = datetime.fromisoformat(str(wm["last_training_wm"]))
-    window_days: int = config["train"].get("window_days", 30)
+    window_days: int = config.train.window_days
     start, end = compute_window(seed_start, last_training_wm, window_days=window_days)
     window = {"window_start": start.isoformat(), "window_end": end.isoformat()}
     logger.info("compute_window: %s", window)

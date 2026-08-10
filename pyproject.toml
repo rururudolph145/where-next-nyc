@@ -33,10 +33,11 @@ dependencies = [
     "uvicorn>=0.34.0",
     "mlflow>=3.11.1",
     "pandera>=0.20",
+    "pydantic>=2",
 ]
 
 [tool.pytest.ini_options]
-pythonpath = ["orchestration/lib"]
+pythonpath = ["orchestration/lib", "tests"]
 addopts = [
     "--cov=app",
     "--cov-report=term-missing:skip-covered",
@@ -61,16 +62,14 @@ exclude_also = [
 ]
 
 [tool.mypy]
-exclude = ["orchestration/"]
+exclude = ["orchestration/dags_uid50000_bak/"]
 
 [[tool.mypy.overrides]]
 module = [
-    "boundary_helpers",
-    "feature_helpers",
-    "ingest_helpers",
-    "log_predict_helpers",
-    "predict_helpers",
-    "validate_helpers",
+    "airflow.*",
+    "airflow",
+    "pendulum",
+    "pendulum.*",
 ]
 ignore_missing_imports = true
 

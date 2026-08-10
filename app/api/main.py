@@ -23,7 +23,7 @@ from fastapi import FastAPI, HTTPException, Query
 from mlflow.tracking import MlflowClient
 
 from app.core.clock import Clock, WallClock
-from app.core.config import load_config
+from app.core.config import AppConfig, load_config
 from app.core.watermark import read_watermark
 from app.ingestion.feature import build_centroid_lookup
 
@@ -44,7 +44,7 @@ _generated_at: str = ""
 _model_name: str = "ny_taxi_demand_model"
 _model_version: str | None = None
 _served_from_stage: str | None = None
-_config: dict[str, Any] = {}
+_config: AppConfig | None = None
 _clock: Clock = WallClock()
 # Source of truth for the simulation position (PBI 25b FIX): the incremental
 # pipeline's data watermark, NOT a clock. /health reads this for simulated_now
@@ -52,11 +52,11 @@ _clock: Clock = WallClock()
 _watermark_root: Path = Path("data/watermarks/refresh_15min")
 
 
-def _load_predictions(config: dict[str, Any]) -> pd.DataFrame:
+def _load_predictions(config: AppConfig) -> pd.DataFrame:
     """Load the predictions parquet from the configured path.
 
     Args:
-        config: Parsed configuration dictionary.
+        config: Parsed AppConfig.
 
     Returns:
         Predictions DataFrame with columns pulocationid, hour,
@@ -65,7 +65,7 @@ def _load_predictions(config: dict[str, Any]) -> pd.DataFrame:
     Raises:
         FileNotFoundError: If predictions file does not exist.
     """
-    path: str = config["serving"]["predictions_path"]
+    path: str = config.serving.predictions_path
     if not os.path.exists(path):
         raise FileNotFoundError(f"Predictions file not found: {path}")
     df = pd.read_parquet(path)
@@ -74,16 +74,16 @@ def _load_predictions(config: dict[str, Any]) -> pd.DataFrame:
     return df
 
 
-def _load_zone_lookup(config: dict[str, Any]) -> dict[int, str]:
+def _load_zone_lookup(config: AppConfig) -> dict[int, str]:
     """Build a LocationID → zone_name mapping from the taxi zones shapefile.
 
     Args:
-        config: Parsed configuration dictionary.
+        config: Parsed AppConfig.
 
     Returns:
         Dictionary mapping integer zone IDs to zone name strings.
     """
-    path: str = config["serving"]["zone_shapefile_path"]
+    path: str = config.serving.zone_shapefile_path
     gdf = gpd.read_file(path)
     lookup: dict[int, str] = dict(
         zip(
@@ -100,17 +100,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """Load predictions and zone lookup into memory at server start."""
     global _predictions_df, _zone_lookup, _centroid_lookup, _generated_at, _model_name, _model_version, _served_from_stage, _config, _watermark_root  # noqa: PLW0603
 
-    config = load_config()
+    config: AppConfig = load_config()
     _config = config
-    _model_name = config.get("mlflow", {}).get("model_name", "ny_taxi_demand_model")
-    if "watermark_path" in config.get("serving", {}):
-        _watermark_root = Path(config["serving"]["watermark_path"])
+    _model_name = config.mlflow.model_name
+    if config.serving.watermark_path:
+        _watermark_root = Path(config.serving.watermark_path)
     try:
         _predictions_df = _load_predictions(config)
         _zone_lookup = _load_zone_lookup(config)
-        _centroid_lookup = build_centroid_lookup(
-            config["serving"]["zone_shapefile_path"]
-        )
+        _centroid_lookup = build_centroid_lookup(config.serving.zone_shapefile_path)
         _generated_at = _clock.now().isoformat()
         df = _predictions_df
         if not df.empty and "model_version" in df.columns:
@@ -148,8 +146,8 @@ def _current_sim_position() -> datetime:
     watermark = read_watermark(_watermark_root)
     if watermark is not None:
         return watermark
-    seed_start: str = _config["ingest"]["seed_start"]
-    return datetime.fromisoformat(seed_start)
+    assert _config is not None, "_current_sim_position called before lifespan"
+    return datetime.fromisoformat(_config.ingest.seed_start)
 
 
 app = FastAPI(title="NYC Taxi Demand Forecasting API", lifespan=lifespan)
@@ -259,9 +257,9 @@ async def get_heatmap(
                 "model_version": _model_version,
                 "served_from_stage": _served_from_stage,
             },
-            _config.get("monitoring", {}).get(
-                "predictions_path", "data/monitoring/predictions"
-            ),
+            _config.monitoring.predictions_path
+            if _config is not None
+            else "data/monitoring/predictions",
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to write prediction log: %s", exc)

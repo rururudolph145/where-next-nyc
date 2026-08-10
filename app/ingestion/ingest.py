@@ -6,12 +6,11 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from app.core.config import load_config
+from app.core.config import AppConfig, load_config
 
 # Default thread-pool size for parallel parquet reads. Parquet reads
 # release the GIL on the I/O syscall, so threads are sufficient and we
@@ -28,21 +27,22 @@ class Ingestion:
     a single Bronze parquet.
     """
 
-    def __init__(self, config: dict[str, Any] | None = None) -> None:
+    def __init__(self, config: AppConfig | None = None) -> None:
         """Initialise Ingestion with configuration.
 
         Args:
-            config: Parsed configuration dictionary.  If ``None``, loads
-                from ``config.yml`` via :func:`app.core.config.load_config`.
+            config: Parsed AppConfig. If ``None``, loads from ``config.yml``
+                via :func:`app.core.config.load_config`.
         """
-        self.config = config or load_config()
-        self.raw_path: str = self.config["data"]["raw_path"]
-        self.bronze_path: str = self.config["data"]["bronze_path"]
-        self.start_ym: str = self.config["ingest"]["start_year_month"]
-        self.end_ym: str = self.config["ingest"]["end_year_month"]
-        self.max_workers: int = self.config["ingest"].get(
-            "max_workers", _DEFAULT_MAX_WORKERS
-        )
+        loaded = load_config()
+        self.config: AppConfig = config if config is not None else loaded  # type: ignore[assignment]
+        self.raw_path: str = self.config.data.raw_path
+        self.bronze_path: str = self.config.data.bronze_path
+        self.start_ym: str = self.config.ingest.start_year_month
+        self.end_ym: str = self.config.ingest.end_year_month
+        self.max_workers: int = (
+            self.config.ingest.max_workers
+        )  # source: ingest.py:43 fallback
         self._assert_slice_matches_bucket()
 
     def _assert_slice_matches_bucket(self) -> None:
@@ -50,13 +50,15 @@ class Ingestion:
 
         A mismatch would make the DAG advance the watermark by a different
         width than the feature aggregation bucket, silently dropping or
-        double-counting demand. Only enforced when BOTH keys are present so
-        that legacy test configs (which omit them) keep their behaviour.
+        double-counting demand. Both fields are required in AppConfig so the
+        None-escape-hatch is removed — the guard always asserts.
+
+        Behavior change (intentional): previously the guard was a no-op when
+        either key was absent; now it always runs. Any config missing either
+        field would have failed AppConfig.model_validate before reaching here.
         """
-        slice_duration = self.config.get("ingest", {}).get("slice_duration")
-        bucket = self.config.get("feature", {}).get("bucket")
-        if slice_duration is None or bucket is None:
-            return
+        slice_duration = self.config.ingest.slice_duration
+        bucket = self.config.feature.bucket
         assert pd.Timedelta(slice_duration) == pd.Timedelta(bucket), (
             f"ingest.slice_duration ({slice_duration!r}) must equal "
             f"feature.bucket ({bucket!r}); the watermark advance width must "
@@ -114,7 +116,7 @@ class Ingestion:
         tags = self._iter_year_months(self.start_ym, self.end_ym)
         raw_root = Path(self.raw_path)
 
-        schema: dict[str, str] = self.config["ingest"]["bronze_schema"]
+        schema: dict[str, str] = self.config.ingest.bronze_schema
         canonical: dict[str, str] = {name.lower(): name for name in schema}
 
         def _read_one(pq_file: Path) -> pd.DataFrame:
@@ -171,7 +173,7 @@ class Ingestion:
         Returns:
             DataFrame with columns cast to the configured bronze schema.
         """
-        schema: dict[str, str] = self.config["ingest"]["bronze_schema"]
+        schema: dict[str, str] = self.config.ingest.bronze_schema
         for col, dtype in schema.items():
             if col not in df.columns:
                 continue

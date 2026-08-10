@@ -2,11 +2,10 @@
 
 import json
 import os
-from typing import Any
 
 import pandas as pd
 
-from app.core.paths import validation_log_dir
+from app.core.config import AppConfig
 from app.ingestion.schema import (
     DataValidationError,
     validate_bronze_schema,
@@ -17,17 +16,17 @@ from app.ingestion.schema import (
 class DataCleaner:
     """Cleans raw taxi trip data and promotes it from Bronze to Silver layer."""
 
-    def __init__(self, config: dict[str, Any]) -> None:
+    def __init__(self, config: AppConfig) -> None:
         """Initialize DataCleaner with pipeline configuration.
 
         Args:
-            config: Parsed contents of config.yml.
+            config: Typed AppConfig instance.
         """
         self.config = config
-        self.env: str = config["env"]
-        self.bronze_path: str = config["data"]["bronze_path"]
-        self.silver_path: str = config["data"]["silver_path"]
-        self.null_strategy: str = config["clean"]["null_strategy"]
+        self.env: str = config.env
+        self.bronze_path: str = config.data.bronze_path
+        self.silver_path: str = config.data.silver_path
+        self.null_strategy: str = config.clean.null_strategy
 
     # ------------------------------------------------------------------
     # I/O helpers
@@ -83,7 +82,7 @@ class DataCleaner:
             ValueError: If null_strategy is not one of drop, ffill, bfill.
         """
         strategy = self.null_strategy
-        subset: list[str] | None = self.config["clean"].get("null_subset")
+        subset: list[str] | None = self.config.clean.null_subset
         if subset:
             # Only keep subset columns that actually exist in the data
             subset = [c for c in subset if c in data.columns]
@@ -141,7 +140,7 @@ class DataCleaner:
             q3 = bounds["q3"]
             iqr = bounds["iqr"]
 
-        mult: float = self.config["clean"].get("iqr_multiplier", 1.5)
+        mult: float = self.config.clean.iqr_multiplier
         data = data[
             (data["fare_amount"] >= q1 - mult * iqr)
             & (data["fare_amount"] <= q3 + mult * iqr)
@@ -175,7 +174,9 @@ class DataCleaner:
         print(f"  Raw rows: {len(raw):,}")
 
         # Schema validation — write log regardless of pass/fail
-        log_dir = validation_log_dir(self.config)
+        from pathlib import Path
+
+        log_dir = Path(self.silver_path).parent / "_validation"
         failure_reasons: list[str] = []
         try:
             validate_bronze_schema(raw)
@@ -189,7 +190,7 @@ class DataCleaner:
         raw["tpep_pickup_datetime"] = pd.to_datetime(raw["tpep_pickup_datetime"])
 
         # Split by inference cutoff
-        cutoff = pd.Timestamp(self.config["inference"]["simulation"]["start_hour"])
+        cutoff = pd.Timestamp(self.config.inference.simulation.start_hour)
         train_raw = raw[raw["tpep_pickup_datetime"] < cutoff]
         inference_raw = raw[raw["tpep_pickup_datetime"] >= cutoff]
 
@@ -212,7 +213,7 @@ class DataCleaner:
         print(f"  Total cleaned rows: {len(cleaned):,}")
 
         # Persist IQR bounds for reproducibility
-        store_path: str = self.config["model"]["store_path"]
+        store_path: str = self.config.model.store_path
         os.makedirs(store_path, exist_ok=True)
         bounds_path = os.path.join(store_path, "iqr_bounds.json")
         with open(bounds_path, "w") as f:

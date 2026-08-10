@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 from mlflow.exceptions import MlflowException
 
-from app.core.config import load_config
+from app.core.config import AppConfig, load_config
 from app.core.metrics import evaluate as _evaluate
 
 logger = logging.getLogger(__name__)
@@ -26,34 +26,29 @@ logger = logging.getLogger(__name__)
 class Predictor:
     """Loads a trained model and generates batch predictions."""
 
-    def __init__(self, config: dict[str, Any] | None = None) -> None:
+    def __init__(self, config: AppConfig | None = None) -> None:
         """Initialise Predictor with configuration.
 
         Args:
-            config: Parsed configuration dictionary. If ``None``, loads
-                from ``config.yml`` via :func:`app.core.config.load_config`.
+            config: Parsed AppConfig. If ``None``, loads from ``config.yml``
+                via :func:`app.core.config.load_config`.
         """
-        self.config = config or load_config()
+        loaded = load_config()
+        self.config: AppConfig = config if config is not None else loaded  # type: ignore[assignment]
 
-        model_cfg: dict[str, Any] = self.config["model"]
-        self.store_path: str = model_cfg["store_path"]
-
-        train_cfg: dict[str, Any] = self.config["train"]
-        self.features: list[str] = train_cfg["features"]
-        self.target: str = train_cfg["target"]
-
-        self.gold_path: str = self.config["data"]["gold_path"]
-
-        inference_cfg: dict[str, Any] = self.config.get("inference", {})
-        self.output_path: str = inference_cfg.get(
-            "output_path", "data/predictions/demand_predictions.parquet"
-        )
-
-        mlflow_cfg: dict[str, Any] = self.config.get("mlflow", {})
-        self.tracking_uri: str = mlflow_cfg.get("tracking_uri", "sqlite:///mlflow.db")
-        self.registry_model_name: str = mlflow_cfg.get(
-            "model_name", "ny_taxi_demand_model"
-        )
+        self.store_path: str = self.config.model.store_path
+        self.features: list[str] = self.config.train.features
+        self.target: str = self.config.train.target
+        self.gold_path: str = self.config.data.gold_path
+        self.output_path: str = (
+            self.config.inference.output_path
+        )  # source: predictor.py:48 fallback
+        self.tracking_uri: str = (
+            self.config.mlflow.tracking_uri
+        )  # source: predictor.py:53 fallback
+        self.registry_model_name: str = (
+            self.config.mlflow.model_name
+        )  # source: predictor.py:55 fallback
 
         self.model: Any = None
 

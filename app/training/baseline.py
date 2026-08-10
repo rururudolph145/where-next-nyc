@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import pandas as pd
 
-from app.core.config import load_config
+from app.core.config import AppConfig, load_config
 
 
 class LastWeekSameHourBaseline:
@@ -28,21 +26,20 @@ class LastWeekSameHourBaseline:
         self.bucket = bucket
 
     @classmethod
-    def from_config(
-        cls, config: dict[str, Any] | None = None
-    ) -> LastWeekSameHourBaseline:
-        """Construct from a configuration dictionary.
+    def from_config(cls, config: AppConfig | None = None) -> LastWeekSameHourBaseline:
+        """Construct from an AppConfig.
 
         Args:
-            config: Parsed configuration. If ``None``, loads from ``config.yml``.
+            config: Parsed AppConfig. If ``None``, loads from ``config.yml``.
 
         Returns:
             Configured :class:`LastWeekSameHourBaseline` instance.
         """
-        cfg = config or load_config()
+        loaded = load_config()
+        cfg: AppConfig = config if config is not None else loaded  # type: ignore[assignment]
         return cls(
-            target_col=cfg["train"]["target"],
-            bucket=cfg["feature"]["bucket"],
+            target_col=cfg.train.target,
+            bucket=cfg.feature.bucket,
         )
 
     def predict(self, test_df: pd.DataFrame, gold_df: pd.DataFrame) -> pd.DataFrame:

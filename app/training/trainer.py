@@ -17,7 +17,7 @@ from lightgbm import LGBMRegressor
 from sklearn.base import RegressorMixin  # type: ignore[import-untyped]
 from sklearn.ensemble import RandomForestRegressor  # type: ignore[import-untyped]
 
-from app.core.config import load_config
+from app.core.config import AppConfig, load_config
 from app.core.metrics import compute_recall_at_k, compute_wape_lift, evaluate
 from app.training.baseline import LastWeekSameHourBaseline
 from app.training.registry_gate import apply_gate
@@ -36,39 +36,32 @@ MODELS: dict[str, type[RegressorMixin]] = {
 class Trainer:
     """Trains a demand prediction model using the Gold layer data."""
 
-    def __init__(self, config: dict[str, Any] | None = None) -> None:
+    def __init__(self, config: AppConfig | None = None) -> None:
         """Initialise Trainer with configuration.
 
         Args:
-            config: Parsed configuration dictionary. If ``None``, loads
-                from ``config.yml`` via :func:`app.core.config.load_config`.
+            config: Parsed AppConfig. If ``None``, loads from ``config.yml``
+                via :func:`app.core.config.load_config`.
         """
-        self.config = config or load_config()
+        loaded = load_config()
+        self.config: AppConfig = config if config is not None else loaded  # type: ignore[assignment]
 
-        model_cfg: dict[str, Any] = self.config["model"]
-        self.model_name: str = model_cfg["name"]
-        self.model_params: dict[str, Any] = model_cfg.get("params", {})
-        self.store_path: str = model_cfg["store_path"]
+        self.model_name: str = self.config.model.name
+        self.model_params: dict[str, Any] = self.config.model.params
+        self.store_path: str = self.config.model.store_path
         self.model: RegressorMixin = MODELS[self.model_name](**self.model_params)
 
-        train_cfg: dict[str, Any] = self.config["train"]
-        self.features: list[str] = train_cfg["features"]
-        self.target: str = train_cfg["target"]
-        self.split_ratios: list[float] = train_cfg["split_ratios"]
+        self.features: list[str] = self.config.train.features
+        self.target: str = self.config.train.target
+        self.split_ratios: list[float] = self.config.train.split_ratios
 
-        self.gold_path: str = self.config["data"]["gold_path"]
+        self.gold_path: str = self.config.data.gold_path
 
-        mlflow_cfg: dict[str, Any] = self.config.get("mlflow", {})
-        self.experiment_name: str = mlflow_cfg.get(
-            "experiment_name", "ny_taxi_demand_model"
-        )
-        self.tracking_uri: str = mlflow_cfg.get("tracking_uri", "sqlite:///mlflow.db")
-        self.registry_model_name: str = mlflow_cfg.get(
-            "model_name", "ny_taxi_demand_model"
-        )
+        self.experiment_name: str = self.config.mlflow.experiment_name
+        self.tracking_uri: str = self.config.mlflow.tracking_uri
+        self.registry_model_name: str = self.config.mlflow.model_name
 
-        gate_cfg: dict[str, Any] = self.config.get("train", {}).get("gate", {})
-        self.min_wape_lift_pct: float = float(gate_cfg.get("min_wape_lift_pct", 2.0))
+        self.min_wape_lift_pct: float = self.config.train.gate.min_wape_lift_pct
 
         mlflow.set_tracking_uri(self.tracking_uri)
 
@@ -230,9 +223,9 @@ class Trainer:
         )
 
         # Baseline evaluation on NaN-filtered test subset
-        feature_cfg: dict[str, Any] = self.config.get("feature", {})
-        bucket = str(feature_cfg.get("bucket", "h"))
-        baseline = LastWeekSameHourBaseline(target_col=self.target, bucket=bucket)
+        baseline = LastWeekSameHourBaseline(
+            target_col=self.target, bucket=self.config.feature.bucket
+        )
         aligned_df = baseline.predict(test_df, data)
 
         # Filter model predictions to the same (pulocationid, hour) index

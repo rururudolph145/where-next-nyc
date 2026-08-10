@@ -82,8 +82,8 @@ def _read_watermark(**context: object) -> dict[str, str]:
     """
     config = load_config()
     paths = container_paths(config)
-    seed_start = datetime.fromisoformat(config["ingest"]["seed_start"])
-    duration = pd.Timedelta(config["ingest"]["slice_duration"]).to_pytimedelta()
+    seed_start = datetime.fromisoformat(config.ingest.seed_start)
+    duration = pd.Timedelta(config.ingest.slice_duration).to_pytimedelta()
 
     position = read_watermark(Path(paths["watermark"])) or seed_start
     start, end = next_window(position, duration)
@@ -98,7 +98,7 @@ def _check_no_new_data(**context: object) -> None:
     window: dict[str, str] = ti.xcom_pull(task_ids="read_watermark")  # type: ignore[attr-defined]
     window_start = datetime.fromisoformat(window["window_start"])
     config = load_config()
-    dataset_max = datetime.fromisoformat(config["ingest"]["dataset_max"])
+    dataset_max = datetime.fromisoformat(config.ingest.dataset_max)
     if is_dataset_exhausted(window_start, dataset_max=dataset_max):
         logger.info(
             "check_no_new_data: window_start=%s >= dataset_max=%s -- skipping run",
@@ -116,10 +116,12 @@ def _ingest(**context: object) -> str:
     window_end = datetime.fromisoformat(window["window_end"])
     config = load_config()
     paths = container_paths(config)
-    seed_start = datetime.fromisoformat(config["ingest"]["seed_start"])
+    seed_start = datetime.fromisoformat(config.ingest.seed_start)
 
     ingest_config = build_ingest_config(
-        config, raw_root=paths["raw"], bronze_root=paths["bronze"]
+        config,
+        raw_root=paths["raw"],
+        bronze_root=paths["bronze"],
     )
     bronze_path = run_ingest(window_end, seed_start=seed_start, config=ingest_config)
     logger.info(
