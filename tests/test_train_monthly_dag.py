@@ -23,13 +23,14 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
 
-import training_helpers as th  # type: ignore[import-not-found]
+import orchestration.lib.training_helpers as th
+
+from app.core.config import AppConfig
 
 SEED_START = "2021-01-18T00:00:00"
 SEED_DT = datetime(2021, 1, 18, 0, 0, 0)
@@ -44,13 +45,10 @@ def _write_wm(root: Path, dt: datetime) -> None:
 
 
 @pytest.fixture
-def base_config() -> dict[str, Any]:
-    return {
-        "ingest": {"seed_start": SEED_START},
-        "data": {"gold_path": "data/gold/yellow_tripdata"},
-        "mlflow": {"model_name": MODEL_NAME, "tracking_uri": "sqlite:///mlflow.db"},
-        "train": {"gate": {"min_wape_lift_pct": 2.0}},
-    }
+def base_config() -> AppConfig:
+    from tests.conftest import _FULL_CONFIG_DICT
+
+    return AppConfig.model_validate(_FULL_CONFIG_DICT)
 
 
 class TestWatermarkPlumbing:
@@ -64,7 +62,7 @@ class TestWatermarkPlumbing:
         assert issubclass(th.EmptyTrainingWindowError, Exception)
 
     def test_bootstrap_falls_back_to_seed_start(
-        self, tmp_path: Path, base_config: dict[str, Any]
+        self, tmp_path: Path, base_config: AppConfig
     ) -> None:
         """No last_training file → last_training_wm resolves to seed_start."""
         # Arrange
@@ -79,7 +77,7 @@ class TestWatermarkPlumbing:
         assert result["last_training_wm"] == SEED_DT.isoformat()
 
     def test_bootstrap_flag_true_when_file_absent(
-        self, tmp_path: Path, base_config: dict[str, Any]
+        self, tmp_path: Path, base_config: AppConfig
     ) -> None:
         """is_bootstrap is True when the last_training watermark is absent."""
         # Arrange
@@ -93,7 +91,7 @@ class TestWatermarkPlumbing:
         assert result["is_bootstrap"] is True
 
     def test_bootstrap_flag_false_when_file_present(
-        self, tmp_path: Path, base_config: dict[str, Any]
+        self, tmp_path: Path, base_config: AppConfig
     ) -> None:
         """is_bootstrap is False once a last_training watermark exists."""
         # Arrange
@@ -110,7 +108,7 @@ class TestWatermarkPlumbing:
         assert result["last_training_wm"] == (SEED_DT + timedelta(days=30)).isoformat()
 
     def test_missing_refresh_watermark_raises(
-        self, tmp_path: Path, base_config: dict[str, Any]
+        self, tmp_path: Path, base_config: AppConfig
     ) -> None:
         """Absent refresh watermark is invalid: training-before-inference."""
         # Arrange / Act / Assert
@@ -136,11 +134,8 @@ class TestWatermarkPlumbing:
         last = SEED_DT
         refresh = SEED_DT + timedelta(days=30)
 
-        # Act
-        result = th.check_window_ready(refresh, last)
-
-        # Assert
-        assert result is None
+        # Act / Assert — should return without raising
+        th.check_window_ready(refresh, last)
 
     def test_check_window_ready_raises_when_refresh_behind_training(self) -> None:
         """refresh < last_training is impossible under normal op → fail loud."""
@@ -536,25 +531,31 @@ class TestBuildTrainConfig:
     def test_build_train_config_overrides_store_path(self) -> None:
         """build_train_config sets model.store_path to the supplied model_root."""
         # Arrange
+        from tests.conftest import _FULL_CONFIG_DICT
+
         from orchestration.lib.training_helpers import build_train_config
 
-        base = {"model": {"store_path": "data/models"}, "train": {}}
+        base = AppConfig.model_validate(_FULL_CONFIG_DICT)
 
         # Act
         result = build_train_config(base, model_root="/opt/airflow/data/models")
 
         # Assert
-        assert result["model"]["store_path"] == "/opt/airflow/data/models"
+        assert result.model.store_path == "/opt/airflow/data/models"
 
     def test_build_train_config_does_not_mutate_base(self) -> None:
-        """build_train_config deep-copies — base config is unchanged."""
+        """Frozen model: the returned config is a new object, not base."""
         # Arrange
+        from tests.conftest import _FULL_CONFIG_DICT
+
         from orchestration.lib.training_helpers import build_train_config
 
-        base = {"model": {"store_path": "data/models"}, "train": {}}
+        base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+        original_store_path = base.model.store_path
 
         # Act
-        build_train_config(base, model_root="/opt/airflow/data/models")
+        result = build_train_config(base, model_root="/opt/airflow/data/models")
 
         # Assert
-        assert base["model"]["store_path"] == "data/models"
+        assert result is not base
+        assert base.model.store_path == original_store_path

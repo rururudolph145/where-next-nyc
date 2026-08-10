@@ -20,7 +20,7 @@ Two seams keep it unit-testable without a real shapefile or a 340MB bronze:
 
 AC coverage:
   - build_feature_config overrides the four isolated paths
-  - build_feature_config does not mutate the base config (deep copy)
+  - build_feature_config does not mutate the base config (frozen model → new object)
   - build_feature_config preserves unrelated keys
   - run_feature reads IQR bounds from model.store_path/iqr_bounds.json
   - run_feature cleans transform-only: clean(iqr_bounds=...) is called and
@@ -33,13 +33,13 @@ AC coverage:
 
 from __future__ import annotations
 
-import copy
 import json
 from typing import Any
 from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
 
+from app.core.config import AppConfig
 from orchestration.lib.feature_helpers import (
     build_feature_config,
     run_feature,
@@ -59,31 +59,15 @@ IQR_BOUNDS = {"trip_distance": [0.0, 25.0], "fare_amount": [0.0, 100.0]}
 
 
 @pytest.fixture
-def base_config() -> dict[str, Any]:
-    """Minimal config mirroring the shape both classes read."""
-    return {
-        "env": "experiment",
-        "ingest": {"slice_duration": "15min"},
-        "clean": {"null_strategy": "drop"},
-        "feature": {
-            "bucket": "15min",
-            "lags": [1, 2],
-            "horizon_sum_buckets": 2,
-            "n_neighbors": 5,
-            "zone_shapefile_path": "data/reference/taxi_zones.shp",
-        },
-        "data": {
-            "bronze_path": "data/bronze/yellow_tripdata/bronze.parquet",
-            "silver_path": "data/silver/yellow_tripdata_cleaned.parquet",
-            "gold_path": "data/gold/yellow_tripdata",
-        },
-        "model": {"store_path": "models/"},
-        "inference": {"simulation": {"start_hour": "2021-03-01 00:00:00"}},
-    }
+def base_config() -> AppConfig:
+    """AppConfig mirroring the shape both classes read."""
+    from tests.conftest import _FULL_CONFIG_DICT
+
+    return AppConfig.model_validate(_FULL_CONFIG_DICT)
 
 
 @pytest.fixture
-def override_config(base_config: dict[str, Any]) -> dict[str, Any]:
+def override_config(base_config: AppConfig) -> AppConfig:
     """A config already redirected to the isolated roots."""
     return build_feature_config(
         base_config,
@@ -102,7 +86,7 @@ def override_config(base_config: dict[str, Any]) -> dict[str, Any]:
 class TestBuildFeatureConfig:
     """build_feature_config injects the isolated paths (the seam)."""
 
-    def test_overrides_the_four_paths(self, base_config: dict[str, Any]) -> None:
+    def test_overrides_the_four_paths(self, base_config: AppConfig) -> None:
         """silver/gold/shapefile/model paths point at the isolated roots."""
         # Act
         result = build_feature_config(
@@ -114,18 +98,15 @@ class TestBuildFeatureConfig:
         )
 
         # Assert
-        assert result["data"]["silver_path"] == SILVER_ROOT
-        assert result["data"]["gold_path"] == GOLD_ROOT
-        assert result["feature"]["zone_shapefile_path"] == SHAPEFILE
-        assert result["model"]["store_path"] == MODEL_ROOT
+        assert result.data.silver_path == SILVER_ROOT
+        assert result.data.gold_path == GOLD_ROOT
+        assert result.feature.zone_shapefile_path == SHAPEFILE
+        assert result.model.store_path == MODEL_ROOT
 
-    def test_does_not_mutate_base(self, base_config: dict[str, Any]) -> None:
-        """The base config is deep-copied, never mutated in place."""
-        # Arrange
-        snapshot = copy.deepcopy(base_config)
-
+    def test_does_not_mutate_base(self, base_config: AppConfig) -> None:
+        """Frozen model: the returned config is a new object, not base_config."""
         # Act
-        build_feature_config(
+        result = build_feature_config(
             base_config,
             silver_root=SILVER_ROOT,
             gold_root=GOLD_ROOT,
@@ -134,9 +115,9 @@ class TestBuildFeatureConfig:
         )
 
         # Assert
-        assert base_config == snapshot
+        assert result is not base_config
 
-    def test_preserves_unrelated_keys(self, base_config: dict[str, Any]) -> None:
+    def test_preserves_unrelated_keys(self, base_config: AppConfig) -> None:
         """Only the redirected keys change; everything else passes through."""
         # Act
         result = build_feature_config(
@@ -148,12 +129,12 @@ class TestBuildFeatureConfig:
         )
 
         # Assert
-        assert result["data"]["bronze_path"] == base_config["data"]["bronze_path"]
-        assert result["clean"] == base_config["clean"]
-        assert result["feature"]["lags"] == base_config["feature"]["lags"]
+        assert result.data.bronze_path == base_config.data.bronze_path
+        assert result.clean == base_config.clean
+        assert result.feature.lags == base_config.feature.lags
         assert (
-            result["feature"]["horizon_sum_buckets"]
-            == base_config["feature"]["horizon_sum_buckets"]
+            result.feature.horizon_sum_buckets
+            == base_config.feature.horizon_sum_buckets
         )
 
 
@@ -166,7 +147,7 @@ class TestRunFeature:
     """run_feature wires DataCleaner (transform-only) → FeatureEngineer."""
 
     def test_reads_iqr_bounds_from_model_store_path(
-        self, override_config: dict[str, Any]
+        self, override_config: AppConfig
     ) -> None:
         """IQR bounds are read from ``model.store_path/iqr_bounds.json``."""
         # Arrange
@@ -185,7 +166,7 @@ class TestRunFeature:
         assert opened_path == f"{MODEL_ROOT}/iqr_bounds.json"
 
     def test_cleans_transform_only_and_never_calls_run(
-        self, override_config: dict[str, Any]
+        self, override_config: AppConfig
     ) -> None:
         """Anti-regression: clean() runs with pre-fitted bounds; run() never fires.
 
@@ -214,9 +195,7 @@ class TestRunFeature:
         )
         cleaner.run.assert_not_called()
 
-    def test_saves_cleaned_frame_to_silver(
-        self, override_config: dict[str, Any]
-    ) -> None:
+    def test_saves_cleaned_frame_to_silver(self, override_config: AppConfig) -> None:
         """The frame returned by clean() is handed to save_silver()."""
         # Arrange
         m = mock_open(read_data=json.dumps(IQR_BOUNDS))
@@ -235,7 +214,7 @@ class TestRunFeature:
         cleaner.save_silver.assert_called_once_with("CLEANED_DF")
 
     def test_constructs_engineer_with_injected_config(
-        self, override_config: dict[str, Any]
+        self, override_config: AppConfig
     ) -> None:
         """FeatureEngineer is built with the override config and run() is called."""
         # Arrange
@@ -254,7 +233,7 @@ class TestRunFeature:
         mock_engineer.return_value.run.assert_called_once_with(for_training=False)
 
     def test_cleaner_saves_before_engineer_runs(
-        self, override_config: dict[str, Any]
+        self, override_config: AppConfig
     ) -> None:
         """Silver must exist before gold: save_silver() precedes engineer.run()."""
         # Arrange
@@ -281,7 +260,7 @@ class TestRunFeature:
         engineer_run = call_names.index("FeatureEngineer().run")
         assert cleaner_save < engineer_run
 
-    def test_returns_bronze_path(self, override_config: dict[str, Any]) -> None:
+    def test_returns_bronze_path(self, override_config: AppConfig) -> None:
         """A stable XCom contract: run_feature hands the bronze path forward."""
         # Arrange
         m = mock_open(read_data=json.dumps(IQR_BOUNDS))
@@ -298,7 +277,7 @@ class TestRunFeature:
         assert result == BRONZE_PATH
 
     def test_for_training_true_passes_through_to_engineer(
-        self, override_config: dict[str, Any]
+        self, override_config: AppConfig
     ) -> None:
         """run_feature(for_training=True) calls FeatureEngineer.run(for_training=True)."""
         # Arrange
@@ -337,7 +316,7 @@ class TestRunFeatureTrain:
         }
 
     def test_fits_bounds_by_calling_cleaner_clean_without_iqr_bounds(
-        self, override_config: dict[str, Any]
+        self, override_config: AppConfig
     ) -> None:
         """DataCleaner.clean() is called without iqr_bounds so bounds are fitted fresh."""
         # Arrange
@@ -358,7 +337,7 @@ class TestRunFeatureTrain:
         cleaner.clean.assert_called_once_with(cleaner.load_bronze.return_value)
 
     def test_saves_fitted_bounds_to_model_store_path(
-        self, override_config: dict[str, Any]
+        self, override_config: AppConfig
     ) -> None:
         """Fitted IQR bounds are written to model.store_path/iqr_bounds.json."""
         # Arrange
@@ -384,7 +363,7 @@ class TestRunFeatureTrain:
         )
 
     def test_runs_engineer_with_for_training_true(
-        self, override_config: dict[str, Any]
+        self, override_config: AppConfig
     ) -> None:
         """FeatureEngineer.run(for_training=True) is called after cleaning."""
         # Arrange
@@ -405,7 +384,7 @@ class TestRunFeatureTrain:
         mock_engineer.assert_called_once_with(config=override_config)
         mock_engineer.return_value.run.assert_called_once_with(for_training=True)
 
-    def test_returns_bronze_path(self, override_config: dict[str, Any]) -> None:
+    def test_returns_bronze_path(self, override_config: AppConfig) -> None:
         """Stable XCom contract: bronze path is returned unchanged."""
         # Arrange
         with (

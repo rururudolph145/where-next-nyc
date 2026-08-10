@@ -83,7 +83,7 @@ class TestDatasetMaxConfigParsing:
         config = load_config()
 
         # Act
-        dataset_max = datetime.fromisoformat(config["ingest"]["dataset_max"])
+        dataset_max = datetime.fromisoformat(config.ingest.dataset_max)
 
         # Assert
         assert dataset_max.second == 57, (

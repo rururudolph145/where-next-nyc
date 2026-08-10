@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from app.core.config import AppConfig
 from app.inference.predictor import Predictor
 from app.training.trainer import Trainer
 
@@ -33,34 +34,43 @@ FEATURES = [
     "trip_count_lag_168",
 ]
 
-MINIMAL_CONFIG: dict[str, Any] = {
-    "env": "local",
-    "data": {"gold_path": "data/gold/yellow_tripdata"},
-    "train": {
-        "features": FEATURES,
-        "target": "trip_count",
-        "split_ratios": [0.8, 0.1, 0.1],
-    },
-    "model": {
-        "name": "LGBMRegressor",
-        "params": {
-            "n_estimators": 10,
-            "learning_rate": 0.1,
-            "num_leaves": 8,
-            "random_state": 42,
-            "verbosity": -1,
-        },
-        "store_path": "models/",
-    },
-    "inference": {
-        "output_path": "data/predictions/demand_predictions.parquet",
-    },
-    "mlflow": {
-        "experiment_name": "test_experiment",
-        "tracking_uri": "mlruns",
-        "model_name": "ny_taxi_demand_model",
-    },
-}
+
+def _predictor_config(
+    *,
+    store_path: str = "models/",
+    output_path: str = "data/predictions/demand_predictions.parquet",
+    tracking_uri: str = "mlruns",
+) -> AppConfig:
+    """Build an AppConfig for Predictor tests."""
+    from tests.conftest import _FULL_CONFIG_DICT
+
+    base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+    return base.model_copy(
+        update={
+            "train": base.train.model_copy(
+                update={"features": FEATURES, "target": "trip_count"}
+            ),
+            "model": base.model.model_copy(
+                update={
+                    "params": {
+                        "n_estimators": 10,
+                        "learning_rate": 0.1,
+                        "num_leaves": 8,
+                        "random_state": 42,
+                        "verbosity": -1,
+                    },
+                    "store_path": store_path,
+                }
+            ),
+            "inference": base.inference.model_copy(update={"output_path": output_path}),
+            "mlflow": base.mlflow.model_copy(
+                update={
+                    "experiment_name": "test_experiment",
+                    "tracking_uri": tracking_uri,
+                }
+            ),
+        }
+    )
 
 
 def _make_gold_df(n_rows: int = 1000) -> pd.DataFrame:
@@ -85,20 +95,11 @@ def gold_df() -> pd.DataFrame:
 @pytest.fixture()
 def trained_model_path(tmp_path: Any, gold_df: pd.DataFrame) -> str:
     """Train a model and save it to tmp_path, returning the store path."""
-    config = {**MINIMAL_CONFIG}
-    config = {
-        **config,
-        "model": {
-            **config["model"],
-            "store_path": str(tmp_path / "models"),
-        },
-        "mlflow": {
-            **config["mlflow"],
-            "tracking_uri": str(tmp_path / "mlruns"),
-        },
-    }
-
-    trainer = Trainer(config)
+    trainer_cfg = _predictor_config(
+        store_path=str(tmp_path / "models"),
+        tracking_uri=str(tmp_path / "mlruns"),
+    )
+    trainer = Trainer(trainer_cfg)
     trainer.run(data=gold_df)
     return str(tmp_path / "models")
 
@@ -106,14 +107,13 @@ def trained_model_path(tmp_path: Any, gold_df: pd.DataFrame) -> str:
 @pytest.fixture()
 def predictor(trained_model_path: str, tmp_path: Any) -> Predictor:
     """Return a Predictor with a trained model available."""
-    config = {
-        **MINIMAL_CONFIG,
-        "model": {**MINIMAL_CONFIG["model"], "store_path": trained_model_path},
-        "inference": {
-            "output_path": str(tmp_path / "predictions" / "demand_predictions.parquet"),
-        },
-    }
-    return Predictor(config)
+    return Predictor(
+        _predictor_config(
+            store_path=trained_model_path,
+            output_path=str(tmp_path / "predictions" / "demand_predictions.parquet"),
+            tracking_uri=str(tmp_path / "mlruns"),
+        )
+    )
 
 
 # -- Test: load_model -------------------------------------------------------
@@ -132,14 +132,7 @@ class TestLoadModel:
 
     def test_errors_on_missing_file(self, tmp_path: Any) -> None:
         """Raises FileNotFoundError when model file does not exist."""
-        config = {
-            **MINIMAL_CONFIG,
-            "model": {
-                **MINIMAL_CONFIG["model"],
-                "store_path": str(tmp_path / "nonexistent"),
-            },
-        }
-        pred = Predictor(config)
+        pred = Predictor(_predictor_config(store_path=str(tmp_path / "nonexistent")))
         with pytest.raises(FileNotFoundError):
             pred.load_model()
 
@@ -643,19 +636,14 @@ class TestPredictorRegistryLoad:
     """PBI 37 Step 5 — Predictor.load_model() consults MLflow @champion first."""
 
     def _make_predictor(self, tmp_path: Any) -> Predictor:
-        config = {
-            **MINIMAL_CONFIG,
-            "model": {
-                **MINIMAL_CONFIG["model"],
-                "store_path": str(tmp_path / "models"),
-            },
-            "inference": {
-                "output_path": str(
+        return Predictor(
+            _predictor_config(
+                store_path=str(tmp_path / "models"),
+                output_path=str(
                     tmp_path / "predictions" / "demand_predictions.parquet"
                 ),
-            },
-        }
-        return Predictor(config)
+            )
+        )
 
     def test_registry_primary_loads_via_champion_alias(self, tmp_path: Any) -> None:
         """mlflow.sklearn.load_model called with @champion URI; disk not read (PBI 37 Step 5 RED)."""

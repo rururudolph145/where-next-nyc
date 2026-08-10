@@ -12,30 +12,11 @@ from __future__ import annotations
 
 import pytest
 
+from app.core.config import AppConfig
 from orchestration.lib.container_paths import container_paths
+from tests.conftest import _FULL_CONFIG_DICT
 
-
-_CONFIG = {
-    "data": {
-        "raw_path": "data/raw/yellow_tripdata",
-        "bronze_path": "data/bronze/yellow_tripdata/bronze.parquet",
-        "silver_path": "data/silver/yellow_tripdata_cleaned.parquet",
-        "gold_path": "data/gold/yellow_tripdata",
-    },
-    "feature": {
-        "zone_shapefile_path": "data/reference/taxi_zones.shp",
-    },
-    "model": {
-        "store_path": "data/models",
-    },
-    "serving": {
-        "predictions_path": "data/predictions/demand_predictions.parquet",
-        "watermark_path": "data/watermarks/refresh_15min",
-    },
-    "monitoring": {
-        "predictions_path": "data/monitoring/predictions",
-    },
-}
+_CONFIG = AppConfig.model_validate(_FULL_CONFIG_DICT)
 
 _EXPECTED = {
     "raw": "/opt/airflow/data/raw/yellow_tripdata",
@@ -90,11 +71,10 @@ class TestContainerPaths:
     @pytest.mark.integration
     def test_train_infer_model_paths_agree(self) -> None:
         """build_train_config and build_predict_config yield equal model.store_path (PBI 37 Step 7)."""
-        from app.core.config import load_config
         from orchestration.lib.predict_helpers import build_predict_config
         from orchestration.lib.training_helpers import build_train_config
 
-        base_cfg = load_config()
+        base_cfg = _CONFIG
         paths = container_paths(base_cfg)
         model_root = paths["models"]
 
@@ -106,7 +86,7 @@ class TestContainerPaths:
             predictions_path=paths["predictions"],
         )
 
-        assert train_cfg["model"]["store_path"] == predict_cfg["model"]["store_path"]
+        assert train_cfg.model.store_path == predict_cfg.model.store_path
 
     def test_leading_slash_in_config_path_raises_or_warns(self) -> None:
         """A leading slash in a config path would silently drop the prefix.
@@ -114,13 +94,11 @@ class TestContainerPaths:
         This test documents the foot-gun: pathlib silently replaces the prefix
         when the relative path starts with '/'. We verify the helper rejects it.
         """
-        bad_config = {
-            **_CONFIG,
-            "data": {
-                **_CONFIG["data"],
-                "raw_path": "/absolute/path",  # starts with /
-            },
-        }
+        bad_config = _CONFIG.model_copy(
+            update={
+                "data": _CONFIG.data.model_copy(update={"raw_path": "/absolute/path"})
+            }
+        )
 
         # Assert — leading slash raises ValueError
         with pytest.raises(ValueError, match="leading slash"):

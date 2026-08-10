@@ -32,15 +32,14 @@ AC coverage (from PLAN_EXP03a §Implementation Steps 1-3):
 
 from __future__ import annotations
 
-import copy
 from datetime import datetime, timezone
-from typing import Any
 from unittest.mock import patch
 
 import pandas as pd
 import pytest
 
 from app.core.clock import SimulatedClock
+from app.core.config import AppConfig
 from app.ingestion.schema import DataValidationError
 from orchestration.lib.validate_helpers import (
     build_validate_config,
@@ -56,24 +55,15 @@ SILVER_ROOT = "/opt/airflow/data_exp/silver/yellow_tripdata_cleaned.parquet"
 
 
 @pytest.fixture
-def base_config() -> dict[str, Any]:
-    """Minimal config mirroring the shape ``validation_log_dir`` reads."""
-    return {
-        "ingest": {
-            "slice_duration": "15min",
-            "bronze_schema": {"tpep_pickup_datetime": "datetime64[us]"},
-        },
-        "feature": {"bucket": "15min"},
-        "data": {
-            "raw_path": "data/raw/yellow_tripdata",
-            "bronze_path": "data/bronze/yellow_tripdata/bronze.parquet",
-            "silver_path": "data/silver/yellow_tripdata_cleaned.parquet",
-        },
-    }
+def base_config() -> AppConfig:
+    """AppConfig mirroring the shape ``validation_log_dir`` reads."""
+    from tests.conftest import _FULL_CONFIG_DICT
+
+    return AppConfig.model_validate(_FULL_CONFIG_DICT)
 
 
 @pytest.fixture
-def override_config(base_config: dict[str, Any]) -> dict[str, Any]:
+def override_config(base_config: AppConfig) -> AppConfig:
     """A config already pointed at the experiment silver root."""
     return build_validate_config(base_config, silver_root=SILVER_ROOT)
 
@@ -86,35 +76,32 @@ def override_config(base_config: dict[str, Any]) -> dict[str, Any]:
 class TestBuildValidateConfig:
     """build_validate_config injects the isolated silver path (the seam)."""
 
-    def test_overrides_silver_path(self, base_config: dict[str, Any]) -> None:
+    def test_overrides_silver_path(self, base_config: AppConfig) -> None:
         """data.silver_path points at the injected experiment silver root."""
         # Act
         result = build_validate_config(base_config, silver_root=SILVER_ROOT)
 
         # Assert
-        assert result["data"]["silver_path"] == SILVER_ROOT
+        assert result.data.silver_path == SILVER_ROOT
 
-    def test_does_not_mutate_base(self, base_config: dict[str, Any]) -> None:
-        """The base config is deep-copied, never mutated in place."""
-        # Arrange
-        snapshot = copy.deepcopy(base_config)
-
+    def test_does_not_mutate_base(self, base_config: AppConfig) -> None:
+        """Frozen model: the returned config is a new object, not base_config."""
         # Act
-        build_validate_config(base_config, silver_root=SILVER_ROOT)
+        result = build_validate_config(base_config, silver_root=SILVER_ROOT)
 
         # Assert
-        assert base_config == snapshot
+        assert result is not base_config
 
-    def test_preserves_unrelated_keys(self, base_config: dict[str, Any]) -> None:
+    def test_preserves_unrelated_keys(self, base_config: AppConfig) -> None:
         """Only data.silver_path changes; everything else passes through."""
         # Act
         result = build_validate_config(base_config, silver_root=SILVER_ROOT)
 
         # Assert
-        assert result["data"]["raw_path"] == base_config["data"]["raw_path"]
-        assert result["data"]["bronze_path"] == base_config["data"]["bronze_path"]
-        assert result["ingest"] == base_config["ingest"]
-        assert result["feature"] == base_config["feature"]
+        assert result.data.raw_path == base_config.data.raw_path
+        assert result.data.bronze_path == base_config.data.bronze_path
+        assert result.ingest == base_config.ingest
+        assert result.feature == base_config.feature
 
 
 # ---------------------------------------------------------------------------
@@ -125,9 +112,7 @@ class TestBuildValidateConfig:
 class TestRunValidateHappyPath:
     """run_validate loads bronze, validates it, and logs a clean pass."""
 
-    def test_reads_bronze_from_given_path(
-        self, override_config: dict[str, Any]
-    ) -> None:
+    def test_reads_bronze_from_given_path(self, override_config: AppConfig) -> None:
         """pd.read_parquet is called with the bronze_path arg unchanged."""
         # Arrange
         df = pd.DataFrame({"PULocationID": [1.0]})
@@ -146,7 +131,7 @@ class TestRunValidateHappyPath:
         mock_read.assert_called_once_with(BRONZE_PATH)
 
     def test_calls_validate_bronze_schema_with_dataframe(
-        self, override_config: dict[str, Any]
+        self, override_config: AppConfig
     ) -> None:
         """The DataFrame returned by read_parquet is what gets validated."""
         # Arrange
@@ -170,7 +155,7 @@ class TestRunValidateHappyPath:
         assert received_df is df
 
     def test_writes_log_with_empty_failure_reasons(
-        self, override_config: dict[str, Any]
+        self, override_config: AppConfig
     ) -> None:
         """Happy-path log carries failure_reasons=[] (rows_failing==0)."""
         # Arrange
@@ -196,9 +181,7 @@ class TestRunValidateHappyPath:
         # log_dir resolves under the overridden silver root
         assert str(args[0]).endswith("/silver/_validation")
 
-    def test_returns_bronze_path_on_success(
-        self, override_config: dict[str, Any]
-    ) -> None:
+    def test_returns_bronze_path_on_success(self, override_config: AppConfig) -> None:
         """A stable XCom contract: run_validate hands the bronze path forward."""
         # Arrange
         df = pd.DataFrame({"PULocationID": [1.0]})
@@ -226,7 +209,7 @@ class TestRunValidateFailurePath:
     """Malformed bronze → RuntimeError, but the log is written first."""
 
     def test_reraises_data_validation_error_as_runtime_error(
-        self, override_config: dict[str, Any]
+        self, override_config: AppConfig
     ) -> None:
         """DataValidationError becomes RuntimeError so Airflow marks it failed."""
         # Arrange
@@ -250,7 +233,7 @@ class TestRunValidateFailurePath:
         assert "PULocationID out of range" in str(exc_info.value)
 
     def test_writes_log_with_failure_reasons_before_reraising(
-        self, override_config: dict[str, Any]
+        self, override_config: AppConfig
     ) -> None:
         """The finally-block log write fires even when validate raises."""
         # Arrange
@@ -279,7 +262,7 @@ class TestRunValidateFailurePath:
         assert args[2] == reasons  # failure_reasons positional arg
 
     def test_clock_passed_through_to_log_writer(
-        self, override_config: dict[str, Any]
+        self, override_config: AppConfig
     ) -> None:
         """A caller-supplied Clock reaches write_validation_log unchanged."""
         # Arrange

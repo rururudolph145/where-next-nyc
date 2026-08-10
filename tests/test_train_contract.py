@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pandas as pd
+
+from app.core.config import AppConfig
 
 
 # ---------------------------------------------------------------------------
@@ -19,13 +20,14 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 
 
-def _minimal_config(model_dir: Path) -> dict[str, Any]:
+def _minimal_config(model_dir: Path) -> AppConfig:
     """Minimal config with store_path pointing at tmp_path."""
-    from app.core.config import load_config
+    from tests.conftest import _FULL_CONFIG_DICT
 
-    cfg = load_config()
-    cfg["model"]["store_path"] = str(model_dir)
-    return cfg
+    base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+    return base.model_copy(
+        update={"model": base.model.model_copy(update={"store_path": str(model_dir)})}
+    )
 
 
 def _tiny_gold_df() -> pd.DataFrame:
@@ -113,8 +115,10 @@ class TestTrainInferenceContract:
         )
         trainer.save_model()
 
-        # Act
-        predictor = Predictor(config)
+        # Act — Predictor is already AppConfig-typed; build one from the dict shim
+        from app.core.config import AppConfig
+
+        predictor = Predictor(AppConfig.model_validate(config))
         predictor.load_model()
 
         # Assert — model loaded without error
@@ -131,7 +135,7 @@ class TestTrainInferenceContract:
         """
         # Arrange — confirm the path DataCleaner would use matches store_path
         config = _minimal_config(tmp_path)
-        store_path = config["model"]["store_path"]
+        store_path = config.model.store_path
         expected_iqr_path = Path(store_path) / "iqr_bounds.json"
 
         # Act — simulate what DataCleaner.run() does (write bounds to store_path)

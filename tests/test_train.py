@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from app.core.config import AppConfig
 from app.core.metrics import evaluate as core_evaluate
 from app.training.trainer import Trainer
 
@@ -34,60 +35,55 @@ FEATURES = [
     "trip_count_lag_168",
 ]
 
-MINIMAL_CONFIG: dict[str, Any] = {
-    "env": "local",
-    "data": {"gold_path": "data/gold/yellow_tripdata"},
-    "feature": {"bucket": "h"},
-    "train": {
-        "features": FEATURES,
-        "target": "trip_count",
-        "split_ratios": [0.8, 0.1, 0.1],
-    },
-    "model": {
-        "name": "LGBMRegressor",
-        "params": {
-            "n_estimators": 10,
-            "learning_rate": 0.1,
-            "num_leaves": 8,
-            "random_state": 42,
-            "verbosity": -1,
-        },
-        "store_path": "models/",
-    },
-    "mlflow": {
-        "experiment_name": "test_experiment",
-        "tracking_uri": "mlruns",
-    },
-}
 
-# Config with registry + gate keys (PBI 20)
-REGISTRY_CONFIG: dict[str, Any] = {
-    "env": "local",
-    "data": {"gold_path": "data/gold/yellow_tripdata"},
-    "feature": {"bucket": "h"},
-    "train": {
-        "features": FEATURES,
-        "target": "trip_count",
-        "split_ratios": [0.8, 0.1, 0.1],
-        "gate": {"min_wape_lift_pct": 2.0},
-    },
-    "model": {
-        "name": "LGBMRegressor",
-        "params": {
+def _trainer_config(
+    *,
+    store_path: str = "models/",
+    tracking_uri: str = "mlruns",
+    model_name: str = "LGBMRegressor",
+    model_params: dict[str, Any] | None = None,
+) -> AppConfig:
+    """Build an AppConfig for Trainer tests."""
+    from tests.conftest import _FULL_CONFIG_DICT
+
+    if model_params is None:
+        model_params = {
             "n_estimators": 10,
             "learning_rate": 0.1,
             "num_leaves": 8,
             "random_state": 42,
             "verbosity": -1,
-        },
-        "store_path": "models/",
-    },
-    "mlflow": {
-        "experiment_name": "test_experiment",
-        "tracking_uri": "sqlite:///mlflow.db",
-        "model_name": "ny_taxi_demand_model",
-    },
-}
+        }
+    base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+    return base.model_copy(
+        update={
+            "train": base.train.model_copy(
+                update={"features": FEATURES, "target": "trip_count"}
+            ),
+            "model": base.model.model_copy(
+                update={
+                    "name": model_name,
+                    "params": model_params,
+                    "store_path": store_path,
+                }
+            ),
+            "mlflow": base.mlflow.model_copy(
+                update={
+                    "experiment_name": "test_experiment",
+                    "tracking_uri": tracking_uri,
+                }
+            ),
+        }
+    )
+
+
+def _registry_config(
+    *,
+    store_path: str = "models/",
+    tracking_uri: str = "sqlite:///mlflow.db",
+) -> AppConfig:
+    """Build an AppConfig matching old REGISTRY_CONFIG for gate tests."""
+    return _trainer_config(store_path=store_path, tracking_uri=tracking_uri)
 
 
 def _make_gold_df(n_rows: int = 1000) -> pd.DataFrame:
@@ -106,7 +102,7 @@ def _make_gold_df(n_rows: int = 1000) -> pd.DataFrame:
 @pytest.fixture
 def trainer() -> Trainer:
     """Return a Trainer with minimal test config."""
-    return Trainer(config=MINIMAL_CONFIG)
+    return Trainer(config=_trainer_config())
 
 
 @pytest.fixture
@@ -450,7 +446,7 @@ class TestRegistryGate:
     ) -> None:
         """mlflow.register_model called with correct run URI and model_name (AC-6, AC-7)."""
         # Arrange
-        trainer = Trainer(config=REGISTRY_CONFIG)
+        trainer = Trainer(config=_registry_config())
         trainer.store_path = str(tmp_path / "models")
         mock_mlflow = _make_mock_mlflow(run_id="abc123", registered_version="1")
 
@@ -469,7 +465,7 @@ class TestRegistryGate:
     ) -> None:
         """@champion alias set; save_model called on first-run auto-promote (AC-8)."""
         # Arrange
-        trainer = Trainer(config=REGISTRY_CONFIG)
+        trainer = Trainer(config=_registry_config())
         trainer.store_path = str(tmp_path / "models")
         mock_mlflow = _make_mock_mlflow(registered_version="1", production_versions=[])
         mock_client = mock_mlflow.tracking.MlflowClient.return_value
@@ -492,7 +488,7 @@ class TestRegistryGate:
         """Lift == threshold → @champion alias set to challenger; no archive call (AC-9, AC-10)."""
         # Arrange: champion exists; gate sees lift == min_wape_lift_pct (2.0)
         champion = _make_champion(version="0", wape_tag="10.0")
-        trainer = Trainer(config=REGISTRY_CONFIG)
+        trainer = Trainer(config=_registry_config())
         trainer.store_path = str(tmp_path / "models")
         mock_mlflow = _make_mock_mlflow(
             registered_version="1", production_versions=[champion]
@@ -521,7 +517,7 @@ class TestRegistryGate:
     ) -> None:
         """set_model_version_tag called with key 'model_test_wape' and float string (user decision 1)."""
         # Arrange
-        trainer = Trainer(config=REGISTRY_CONFIG)
+        trainer = Trainer(config=_registry_config())
         trainer.store_path = str(tmp_path / "models")
         mock_mlflow = _make_mock_mlflow(registered_version="1", production_versions=[])
         mock_client = mock_mlflow.tracking.MlflowClient.return_value
@@ -543,7 +539,7 @@ class TestRegistryGate:
     ) -> None:
         """mlflow.set_tag('gate_result', 'promoted') called on promotion (AC-16)."""
         # Arrange
-        trainer = Trainer(config=REGISTRY_CONFIG)
+        trainer = Trainer(config=_registry_config())
         trainer.store_path = str(tmp_path / "models")
         mock_mlflow = _make_mock_mlflow(registered_version="1", production_versions=[])
 
@@ -564,7 +560,7 @@ class TestRegistryGate:
         """Lift < threshold → no stage transition; save_model NOT called (AC-11)."""
         # Arrange: champion exists; gate sees lift 1.0 (below threshold of 2.0)
         champion = _make_champion(version="0", wape_tag="10.0")
-        trainer = Trainer(config=REGISTRY_CONFIG)
+        trainer = Trainer(config=_registry_config())
         trainer.store_path = str(tmp_path / "models")
         mock_mlflow = _make_mock_mlflow(
             registered_version="1", production_versions=[champion]
@@ -589,7 +585,7 @@ class TestRegistryGate:
         """gate_result=rejected and gate_rejection_reason both set on rejection (AC-12)."""
         # Arrange
         champion = _make_champion(version="0", wape_tag="10.0")
-        trainer = Trainer(config=REGISTRY_CONFIG)
+        trainer = Trainer(config=_registry_config())
         trainer.store_path = str(tmp_path / "models")
         mock_mlflow = _make_mock_mlflow(
             registered_version="1", production_versions=[champion]
@@ -614,7 +610,7 @@ class TestRegistryGate:
         """Champion has no model_test_wape tag → rejection reason = champion_wape_unavailable."""
         # Arrange
         champion = _make_champion(version="0", wape_tag=None)
-        trainer = Trainer(config=REGISTRY_CONFIG)
+        trainer = Trainer(config=_registry_config())
         trainer.store_path = str(tmp_path / "models")
         mock_mlflow = _make_mock_mlflow(
             registered_version="1", production_versions=[champion]
@@ -644,7 +640,7 @@ class TestRegistryGate:
         tiny_df = pd.DataFrame(data)
 
         champion = _make_champion(version="0", wape_tag="10.0")
-        trainer = Trainer(config=REGISTRY_CONFIG)
+        trainer = Trainer(config=_registry_config())
         trainer.store_path = str(tmp_path / "models")
         mock_mlflow = _make_mock_mlflow(
             registered_version="1", production_versions=[champion]
@@ -675,7 +671,7 @@ class TestRegistryGate:
         data["trip_count"] = rng.randint(1, 20, n)
         tiny_df = pd.DataFrame(data)
 
-        trainer = Trainer(config=REGISTRY_CONFIG)
+        trainer = Trainer(config=_registry_config())
         trainer.store_path = str(tmp_path / "models")
         mock_mlflow = _make_mock_mlflow(registered_version="1", production_versions=[])
 
@@ -701,7 +697,7 @@ class TestRegistryGate:
         """Lift exactly equal to min_wape_lift_pct is treated as pass (>= not >) (AC-9 boundary)."""
         # Arrange: champion exists; gate sees lift == 2.0 (exactly threshold)
         champion = _make_champion(version="0", wape_tag="10.0")
-        trainer = Trainer(config=REGISTRY_CONFIG)
+        trainer = Trainer(config=_registry_config())
         trainer.store_path = str(tmp_path / "models")
         mock_mlflow = _make_mock_mlflow(
             registered_version="1", production_versions=[champion]
@@ -727,7 +723,7 @@ class TestRegistryGate:
         # Arrange
         with patch("app.training.trainer.mlflow") as mock_mlflow:
             # Act: set_tracking_uri is called in __init__
-            Trainer(config=REGISTRY_CONFIG)
+            Trainer(config=_registry_config())
 
         # Assert: called with the configured URI, not a hardcoded path
         mock_mlflow.set_tracking_uri.assert_called_once_with("sqlite:///mlflow.db")
@@ -735,17 +731,37 @@ class TestRegistryGate:
     def test_gate_falls_back_to_default_model_name_when_key_missing(
         self, gold_df: pd.DataFrame, tmp_path: Any
     ) -> None:
-        """mlflow.model_name absent → register_model called with 'ny_taxi_demand_model' (AC-2)."""
-        # Arrange: config without mlflow.model_name
-        cfg_no_name: dict[str, Any] = {
-            **REGISTRY_CONFIG,
-            "mlflow": {
-                "experiment_name": "test_experiment",
-                "tracking_uri": "sqlite:///mlflow.db",
-                # model_name intentionally absent
-            },
-        }
-        trainer = Trainer(config=cfg_no_name)
+        """mlflow.model_name field default is 'ny_taxi_demand_model' (AC-2)."""
+        # Arrange: config using default model_name from MlflowConfig
+        from tests.conftest import _FULL_CONFIG_DICT
+
+        base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+        cfg = base.model_copy(
+            update={
+                "train": base.train.model_copy(
+                    update={"features": FEATURES, "target": "trip_count"}
+                ),
+                "model": base.model.model_copy(
+                    update={
+                        "params": {
+                            "n_estimators": 10,
+                            "learning_rate": 0.1,
+                            "num_leaves": 8,
+                            "random_state": 42,
+                            "verbosity": -1,
+                        }
+                    }
+                ),
+                "mlflow": base.mlflow.model_copy(
+                    update={
+                        "experiment_name": "test_experiment",
+                        "tracking_uri": "sqlite:///mlflow.db",
+                        # model_name uses Field default: "ny_taxi_demand_model"
+                    }
+                ),
+            }
+        )
+        trainer = Trainer(config=cfg)
         trainer.store_path = str(tmp_path / "models")
         mock_mlflow = _make_mock_mlflow(registered_version="1", production_versions=[])
 
@@ -760,18 +776,9 @@ class TestRegistryGate:
     def test_gate_falls_back_to_default_min_lift_when_key_missing(
         self, gold_df: pd.DataFrame, tmp_path: Any
     ) -> None:
-        """train.gate absent → min_wape_lift_pct defaults to 2.0 (AC-3)."""
-        # Arrange: config without train.gate
-        cfg_no_gate: dict[str, Any] = {
-            **REGISTRY_CONFIG,
-            "train": {
-                "features": FEATURES,
-                "target": "trip_count",
-                "split_ratios": [0.8, 0.1, 0.1],
-                # gate intentionally absent
-            },
-        }
-        trainer = Trainer(config=cfg_no_gate)
+        """TrainGateConfig.min_wape_lift_pct field default is 2.0 (AC-3)."""
+        # Arrange: config using gate with default min_wape_lift_pct
+        trainer = Trainer(config=_registry_config())
 
         # Assert: default 2.0 was read
         assert trainer.min_wape_lift_pct == 2.0
@@ -799,7 +806,7 @@ class TestRegistryGate:
         """set_model_version_tag called with 'wape_lift_pct' and float string on promotion (AC #11)."""
         # Arrange: champion exists so apply_gate is called; patch lift to pass gate.
         champion = _make_champion(version="0", wape_tag="10.0")
-        trainer = Trainer(config=REGISTRY_CONFIG)
+        trainer = Trainer(config=_registry_config())
         trainer.store_path = str(tmp_path / "models")
         mock_mlflow = _make_mock_mlflow(
             registered_version="1", production_versions=[champion]
@@ -838,7 +845,7 @@ class TestRegistryGate:
         data["trip_count"] = rng.randint(1, 20, n)
         tiny_df = pd.DataFrame(data)
 
-        trainer = Trainer(config=REGISTRY_CONFIG)
+        trainer = Trainer(config=_registry_config())
         trainer.store_path = str(tmp_path / "models")
         mock_mlflow = _make_mock_mlflow(registered_version="1", production_versions=[])
         mock_client = mock_mlflow.tracking.MlflowClient.return_value
@@ -867,7 +874,7 @@ class TestRegistryGate:
         """
         # Arrange: champion exists; both compute_wape_lift copies return inf.
         champion = _make_champion(version="0", wape_tag="10.0")
-        trainer = Trainer(config=REGISTRY_CONFIG)
+        trainer = Trainer(config=_registry_config())
         trainer.store_path = str(tmp_path / "models")
         mock_mlflow = _make_mock_mlflow(
             registered_version="1", production_versions=[champion]
@@ -902,7 +909,7 @@ class TestRegistryGate:
     ) -> None:
         """Promote path: set_registered_model_alias called once; transition never called (PBI 37 Step 1)."""
         # Arrange: no incumbent → first-run auto-promote
-        trainer = Trainer(config=REGISTRY_CONFIG)
+        trainer = Trainer(config=_registry_config())
         trainer.store_path = str(tmp_path / "models")
         mock_mlflow = _make_mock_mlflow(registered_version="2", production_versions=[])
         mock_client = mock_mlflow.tracking.MlflowClient.return_value
@@ -923,7 +930,7 @@ class TestRegistryGate:
     ) -> None:
         """First-run: alias absent (MlflowException) → auto-promote via set_registered_model_alias (PBI 37 Step 1)."""
         # Arrange: get_model_version_by_alias raises → no incumbent
-        trainer = Trainer(config=REGISTRY_CONFIG)
+        trainer = Trainer(config=_registry_config())
         trainer.store_path = str(tmp_path / "models")
         mock_mlflow = _make_mock_mlflow(registered_version="1", production_versions=[])
         mock_client = mock_mlflow.tracking.MlflowClient.return_value
@@ -944,7 +951,7 @@ class TestRegistryGate:
         """Reject path: set_registered_model_alias NOT called; existing alias untouched (PBI 37 Step 1)."""
         # Arrange: champion exists; challenger lift below threshold
         champion = _make_champion(version="0", wape_tag="10.0")
-        trainer = Trainer(config=REGISTRY_CONFIG)
+        trainer = Trainer(config=_registry_config())
         trainer.store_path = str(tmp_path / "models")
         mock_mlflow = _make_mock_mlflow(
             registered_version="1", production_versions=[champion]
@@ -979,7 +986,7 @@ class TestRegistryGate:
         data["trip_count"] = rng.randint(1, 20, n)
         tiny_df = pd.DataFrame(data)
 
-        trainer = Trainer(config=REGISTRY_CONFIG)
+        trainer = Trainer(config=_registry_config())
         trainer.store_path = str(tmp_path / "models")
         mock_mlflow = _make_mock_mlflow(registered_version="1", production_versions=[])
         mock_client = mock_mlflow.tracking.MlflowClient.return_value
@@ -1007,7 +1014,7 @@ class TestRegistryGate:
         the contractual dependency on the sqlite URI supporting registry calls.
         """
         # Arrange
-        trainer = Trainer(config=REGISTRY_CONFIG)
+        trainer = Trainer(config=_registry_config())
         trainer.store_path = str(tmp_path / "models")
         mock_mlflow = _make_mock_mlflow(registered_version="1", production_versions=[])
 
@@ -1066,14 +1073,10 @@ class TestSklearnFlavour:
 
     def test_trainer_with_rf_instantiates_without_error(self) -> None:
         """Trainer(config=RF_CONFIG) instantiates an RF without touching train code (PBI 37 Step 3)."""
-        rf_config: dict[str, Any] = {
-            **MINIMAL_CONFIG,
-            "model": {
-                "name": "RandomForestRegressor",
-                "params": {"n_estimators": 5, "random_state": 42},
-                "store_path": "models/",
-            },
-        }
+        rf_config = _trainer_config(
+            model_name="RandomForestRegressor",
+            model_params={"n_estimators": 5, "random_state": 42},
+        )
         with patch("app.training.trainer.mlflow"):
             trainer = Trainer(config=rf_config)
 
