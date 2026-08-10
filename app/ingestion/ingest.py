@@ -263,19 +263,3 @@ class Ingestion:
             print(f"  Window [{window_start}, {window_end}) → {len(df):,} rows")
         print(f"  Total raw rows: {len(df):,}")
         return self.save_bronze(df)
-
-    # ------------------------------------------------------------------
-    # Legacy helper kept for downstream compatibility
-    # ------------------------------------------------------------------
-
-    def load_data(self) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """Load the train and test parquet files specified in config.
-
-        Returns:
-            A ``(train, test)`` tuple of DataFrames.
-        """
-        train_path: str = self.config["data"]["train_path"]
-        test_path: str = self.config["data"]["test_path"]
-        train = pd.read_parquet(train_path)
-        test = pd.read_parquet(test_path)
-        return train, test

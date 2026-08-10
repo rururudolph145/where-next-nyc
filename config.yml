@@ -89,10 +89,6 @@ train:
   target: target_sum_t1_t2   # PBI B2: 30-min lookahead = sum of next two 15-min bins
 
 model:
-  # Behavior-preserving ONLY — reproduce today's exact (broken) paths.
-  # The contract fix that reconciles these is the separate next-step PBI.
-  dag_iqr_root: data/models          # feature DAG iqr_bounds.json dir (was MODEL_ROOT)
-  trained_path: data/models_trained  # inference-read dir (was PREDICT_MODEL_ROOT)
   name: LGBMRegressor
   params:
     n_estimators: 500
@@ -101,7 +97,7 @@ model:
     num_leaves: 31
     random_state: 42
     verbosity: -1
-  store_path: models/
+  store_path: data/models
 
 inference:
   output_path: data/predictions/demand_predictions.parquet
