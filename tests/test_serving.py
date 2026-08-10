@@ -13,7 +13,8 @@ import pytest
 from fastapi.testclient import TestClient
 from mlflow.exceptions import MlflowException
 
-from tests.conftest import make_mock_version
+from app.core.config import AppConfig
+from tests.conftest import _FULL_CONFIG_DICT, make_mock_version
 
 
 @pytest.fixture()
@@ -97,9 +98,16 @@ def client(
     serving_module._model_version = "3"
     serving_module._served_from_stage = "Production"
     # Redirect log writes to tmp_path so no real disk I/O hits data/ tree.
-    serving_module._config = {
-        "monitoring": {"predictions_path": str(tmp_path / "monitoring_predictions")}
-    }
+    _tmp_config = AppConfig.model_validate(_FULL_CONFIG_DICT).model_copy(
+        update={
+            "monitoring": AppConfig.model_validate(
+                _FULL_CONFIG_DICT
+            ).monitoring.model_copy(
+                update={"predictions_path": str(tmp_path / "monitoring_predictions")}
+            )
+        }
+    )
+    serving_module._config = _tmp_config
     # Point watermark root at an empty tmp dir so read_watermark returns None
     # and the no-hour branch falls back to latest-hour (no watermark cap).
     serving_module._watermark_root = tmp_path / "watermarks" / "refresh_15min"
@@ -742,12 +750,14 @@ class TestLifespanCentroidWiring:
         mock_build_centroid = MagicMock(return_value=expected_centroids)
         mock_load_predictions = MagicMock(return_value=fake_predictions)
         mock_load_zone_lookup = MagicMock(return_value={1: "Newark Airport"})
-        fake_config = {
-            "serving": {
-                "predictions_path": "fake/predictions.parquet",
-                "zone_shapefile_path": "fake/taxi_zones.shp",
+        base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+        fake_config: AppConfig = base.model_copy(
+            update={
+                "serving": base.serving.model_copy(
+                    update={"zone_shapefile_path": "fake/taxi_zones.shp"}
+                )
             }
-        }
+        )
 
         monkeypatch.setattr(
             serving_module, "build_centroid_lookup", mock_build_centroid
@@ -766,16 +776,7 @@ class TestLifespanCentroidWiring:
 # PBI 27 — GET /health endpoint tests
 # ---------------------------------------------------------------------------
 
-_FAKE_CONFIG = {
-    # PBI 25b FIX: /health derives the simulation position from the watermark,
-    # falling back to ingest.seed_start when no watermark file exists.
-    "ingest": {"seed_start": "2021-01-18T00:00:00"},
-    "serving": {
-        "predictions_path": "fake/predictions.parquet",
-        "zone_shapefile_path": "fake/taxi_zones.shp",
-    },
-    "mlflow": {"model_name": "ny_taxi_demand_model"},
-}
+_FAKE_CONFIG: AppConfig = AppConfig.model_validate(_FULL_CONFIG_DICT)
 
 
 class TestHealthEndpoint:
@@ -1384,10 +1385,14 @@ class TestHeatmapWatermarkFilter:
         serving_module._generated_at = "2021-03-01T12:00:00+00:00"
         serving_module._model_version = "3"
         serving_module._served_from_stage = "Production"
-        serving_module._config = {
-            "monitoring": {"predictions_path": str(tmp_path / "mon")},
-            "ingest": {"seed_start": "2021-01-18T00:00:00"},
-        }
+        _base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+        serving_module._config = _base.model_copy(
+            update={
+                "monitoring": _base.monitoring.model_copy(
+                    update={"predictions_path": str(tmp_path / "mon")}
+                )
+            }
+        )
         serving_module._watermark_root = wm_root
         if watermark is not None:
             write_watermark(wm_root, watermark)
@@ -1512,14 +1517,14 @@ class TestLifespanWatermarkPathWiring:
         import app.api.main as serving_module
 
         custom_wm_path = "custom/watermarks/refresh"
-        fake_config = {
-            "serving": {
-                "watermark_path": custom_wm_path,
-                "predictions_path": "fake/predictions.parquet",
-                "zone_shapefile_path": "fake/taxi_zones.shp",
-            },
-            "mlflow": {"model_name": "ny_taxi_demand_model"},
-        }
+        _base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+        fake_config: AppConfig = _base.model_copy(
+            update={
+                "serving": _base.serving.model_copy(
+                    update={"watermark_path": custom_wm_path}
+                )
+            }
+        )
 
         fake_predictions = pd.DataFrame(
             {

@@ -42,6 +42,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from app.core.config import AppConfig
 from app.training.trainer import Trainer
 
 
@@ -133,33 +134,41 @@ _FEATURES = [
 ]
 
 
-def _trainer_config(tmp_path: Path) -> dict[str, Any]:
-    """Minimal Trainer config pointing at tmp_path Gold/model/mlruns dirs."""
-    return {
-        "env": "local",
-        "data": {"gold_path": str(tmp_path / "gold")},
-        "feature": {"bucket": "h"},
-        "train": {
-            "features": _FEATURES,
-            "target": "trip_count",
-            "split_ratios": [0.6, 0.2, 0.2],
-        },
-        "model": {
-            "name": "LGBMRegressor",
-            "params": {
-                "n_estimators": 5,
-                "learning_rate": 0.1,
-                "num_leaves": 4,
-                "random_state": 42,
-                "verbosity": -1,
-            },
-            "store_path": str(tmp_path / "models"),
-        },
-        "mlflow": {
-            "experiment_name": "test_pbi18_acceptance",
-            "tracking_uri": str(tmp_path / "mlruns"),
-        },
-    }
+def _trainer_config(tmp_path: Path) -> AppConfig:
+    """Minimal Trainer AppConfig pointing at tmp_path Gold/model/mlruns dirs."""
+    from tests.conftest import _FULL_CONFIG_DICT
+
+    base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+    return base.model_copy(
+        update={
+            "data": base.data.model_copy(update={"gold_path": str(tmp_path / "gold")}),
+            "train": base.train.model_copy(
+                update={
+                    "features": _FEATURES,
+                    "target": "trip_count",
+                    "split_ratios": [0.6, 0.2, 0.2],
+                }
+            ),
+            "model": base.model.model_copy(
+                update={
+                    "params": {
+                        "n_estimators": 5,
+                        "learning_rate": 0.1,
+                        "num_leaves": 4,
+                        "random_state": 42,
+                        "verbosity": -1,
+                    },
+                    "store_path": str(tmp_path / "models"),
+                }
+            ),
+            "mlflow": base.mlflow.model_copy(
+                update={
+                    "experiment_name": "test_pbi18_acceptance",
+                    "tracking_uri": str(tmp_path / "mlruns"),
+                }
+            ),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -290,9 +299,20 @@ class TestAC2WapeLiftFormula:
         gold_dir, gold_df = _make_4week_gold(
             tmp_path, trip_count_fn=nearly_constant_trips
         )
-        config = _trainer_config(tmp_path)
+        base_config = _trainer_config(tmp_path)
         # Tiny model — cannot learn the weekly variation
-        config["model"]["params"]["n_estimators"] = 1
+        config = base_config.model_copy(
+            update={
+                "model": base_config.model.model_copy(
+                    update={
+                        "params": {
+                            **base_config.model.params,
+                            "n_estimators": 1,
+                        }
+                    }
+                )
+            }
+        )
         trainer = Trainer(config=config)
 
         # Act

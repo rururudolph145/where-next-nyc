@@ -51,24 +51,30 @@ from fastapi.testclient import TestClient
 
 from mlflow.exceptions import MlflowException
 
+from app.core.config import AppConfig
 from app.training.trainer import Trainer
-from tests.conftest import make_mock_version
+from tests.conftest import _FULL_CONFIG_DICT, make_mock_version
 
 
 # ---------------------------------------------------------------------------
 # Shared fixture helpers — reuse patterns from existing test_serving.py
 # ---------------------------------------------------------------------------
 
-_FAKE_SERVING_CONFIG: dict[str, Any] = {
-    # PBI 25b FIX: /health derives the simulation position from the watermark,
-    # falling back to ingest.seed_start when no watermark file exists.
-    "ingest": {"seed_start": "2021-01-18T00:00:00"},
-    "serving": {
-        "predictions_path": "fake/predictions.parquet",
-        "zone_shapefile_path": "fake/taxi_zones.shp",
-    },
-    "mlflow": {"model_name": "ny_taxi_demand_model"},
-}
+_BASE = AppConfig.model_validate(_FULL_CONFIG_DICT)
+_FAKE_SERVING_CONFIG: AppConfig = _BASE.model_copy(
+    update={
+        "ingest": _BASE.ingest.model_copy(update={"seed_start": "2021-01-18T00:00:00"}),
+        "serving": _BASE.serving.model_copy(
+            update={
+                "predictions_path": "fake/predictions.parquet",
+                "zone_shapefile_path": "fake/taxi_zones.shp",
+            }
+        ),
+        "mlflow": _BASE.mlflow.model_copy(
+            update={"model_name": "ny_taxi_demand_model"}
+        ),
+    }
+)
 
 
 def _make_predictions_df(hour_str: str = "2021-03-01 00:00:00") -> pd.DataFrame:
@@ -175,35 +181,39 @@ def _make_4week_gold(tmp_path: Path) -> tuple[Path, pd.DataFrame]:
     return gold_dir, gold_df
 
 
-def _registry_config(tmp_path: Path) -> dict[str, Any]:
-    """Full Trainer config with PBI-20 registry keys; all paths inside tmp_path."""
-    return {
-        "env": "local",
-        "data": {"gold_path": str(tmp_path / "gold")},
-        "feature": {"bucket": "h"},
-        "train": {
-            "features": _TRAINER_FEATURES,
-            "target": "trip_count",
-            "split_ratios": [0.8, 0.1, 0.1],
-            "gate": {"min_wape_lift_pct": 2.0},
-        },
-        "model": {
-            "name": "LGBMRegressor",
-            "params": {
-                "n_estimators": 5,
-                "learning_rate": 0.1,
-                "num_leaves": 4,
-                "random_state": 42,
-                "verbosity": -1,
-            },
-            "store_path": str(tmp_path / "models"),
-        },
-        "mlflow": {
-            "experiment_name": "test_pbi27_acceptance",
-            "tracking_uri": "sqlite:///mlflow.db",
-            "model_name": "ny_taxi_demand_model",
-        },
-    }
+def _registry_config(tmp_path: Path) -> AppConfig:
+    """Full Trainer AppConfig with PBI-20 registry keys; all paths inside tmp_path."""
+    base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+    return base.model_copy(
+        update={
+            "data": base.data.model_copy(update={"gold_path": str(tmp_path / "gold")}),
+            "train": base.train.model_copy(
+                update={
+                    "features": _TRAINER_FEATURES,
+                    "target": "trip_count",
+                    "split_ratios": [0.8, 0.1, 0.1],
+                }
+            ),
+            "model": base.model.model_copy(
+                update={
+                    "params": {
+                        "n_estimators": 5,
+                        "learning_rate": 0.1,
+                        "num_leaves": 4,
+                        "random_state": 42,
+                        "verbosity": -1,
+                    },
+                    "store_path": str(tmp_path / "models"),
+                }
+            ),
+            "mlflow": base.mlflow.model_copy(
+                update={
+                    "experiment_name": "test_pbi27_acceptance",
+                    "tracking_uri": "sqlite:///mlflow.db",
+                }
+            ),
+        }
+    )
 
 
 def _build_mlflow_mock(
