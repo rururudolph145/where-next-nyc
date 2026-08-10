@@ -41,6 +41,9 @@ import pandas as pd
 import pytest
 import yaml
 
+from mlflow.exceptions import MlflowException
+
+from app.core.config import AppConfig
 from app.training.trainer import Trainer
 
 
@@ -148,35 +151,41 @@ def _make_no_overlap_gold(tmp_path: Path) -> tuple[Path, pd.DataFrame]:
 # ---------------------------------------------------------------------------
 
 
-def _registry_config(tmp_path: Path) -> dict[str, Any]:
-    """Return a full Trainer config with PBI-20 keys, all paths in tmp_path."""
-    return {
-        "env": "local",
-        "data": {"gold_path": str(tmp_path / "gold")},
-        "feature": {"bucket": "h"},
-        "train": {
-            "features": _FEATURES,
-            "target": "trip_count",
-            "split_ratios": [0.8, 0.1, 0.1],
-            "gate": {"min_wape_lift_pct": 2.0},
-        },
-        "model": {
-            "name": "LGBMRegressor",
-            "params": {
-                "n_estimators": 5,
-                "learning_rate": 0.1,
-                "num_leaves": 4,
-                "random_state": 42,
-                "verbosity": -1,
-            },
-            "store_path": str(tmp_path / "models"),
-        },
-        "mlflow": {
-            "experiment_name": "test_pbi20_acceptance",
-            "tracking_uri": "sqlite:///mlflow.db",
-            "model_name": "ny_taxi_demand_model",
-        },
-    }
+def _registry_config(tmp_path: Path) -> AppConfig:
+    """Return a full Trainer AppConfig with PBI-20 keys, all paths in tmp_path."""
+    from tests.conftest import _FULL_CONFIG_DICT
+
+    base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+    return base.model_copy(
+        update={
+            "data": base.data.model_copy(update={"gold_path": str(tmp_path / "gold")}),
+            "train": base.train.model_copy(
+                update={
+                    "features": _FEATURES,
+                    "target": "trip_count",
+                    "split_ratios": [0.8, 0.1, 0.1],
+                }
+            ),
+            "model": base.model.model_copy(
+                update={
+                    "params": {
+                        "n_estimators": 5,
+                        "learning_rate": 0.1,
+                        "num_leaves": 4,
+                        "random_state": 42,
+                        "verbosity": -1,
+                    },
+                    "store_path": str(tmp_path / "models"),
+                }
+            ),
+            "mlflow": base.mlflow.model_copy(
+                update={
+                    "experiment_name": "test_pbi20_acceptance",
+                    "tracking_uri": "sqlite:///mlflow.db",
+                }
+            ),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -212,9 +221,12 @@ def _build_mlflow_mock(
 
     # MlflowClient instance returned via mlflow.tracking.MlflowClient()
     mock_client = MagicMock()
-    mock_client.get_latest_versions.return_value = (
-        production_versions if production_versions is not None else []
-    )
+    if production_versions:
+        mock_client.get_model_version_by_alias.return_value = production_versions[0]
+    else:
+        mock_client.get_model_version_by_alias.side_effect = MlflowException(
+            "Alias champion not found"
+        )
     mock_mlflow.tracking.MlflowClient.return_value = mock_client
 
     return mock_mlflow

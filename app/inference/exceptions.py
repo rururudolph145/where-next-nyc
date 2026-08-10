@@ -16,7 +16,7 @@ class NoApprovedModelError(Exception):
         message = (
             f"No approved model found for '{model_name}'. "
             f"Checked stages: [{stages_str}]. "
-            "Register a Production or Archived version before running the simulator."
+            "Register a Production or Archived version before running the predictor."
         )
         super().__init__(message)
         self.model_name = model_name

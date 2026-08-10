@@ -1,7 +1,7 @@
 """Canonical evaluation metrics for NYC Taxi demand forecasting.
 
-All evaluation logic is centralised here so that Trainer, Predictor, and
-HourlySimulator share a single implementation.
+All evaluation logic is centralised here so that Trainer and Predictor
+share a single implementation.
 """
 
 from __future__ import annotations

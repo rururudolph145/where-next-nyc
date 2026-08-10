@@ -2,6 +2,7 @@
 
 Exports:
     DataValidationError: raised when the bronze DataFrame fails schema checks.
+    build_bronze_schema: factory that returns a schema with configurable zone range.
     validate_bronze_schema: pure validator — raises or returns silently.
     write_validation_log: writes a timestamped JSON log to *log_dir*.
 """
@@ -23,20 +24,35 @@ from app.core.clock import Clock, WallClock
 # Schema definition
 # ---------------------------------------------------------------------------
 
-_BRONZE_SCHEMA = pa.DataFrameSchema(
-    columns={
-        "tpep_pickup_datetime": pa.Column(pa.DateTime, nullable=True),
-        "tpep_dropoff_datetime": pa.Column(pa.DateTime, nullable=True),
-        "PULocationID": pa.Column(
-            pa.Float,
-            checks=pa.Check.in_range(1, 265),
-            nullable=True,
-        ),
-        "passenger_count": pa.Column(pa.Float, nullable=True),
-        "trip_distance": pa.Column(pa.Float, nullable=True),
-    },
-    strict=False,  # extra columns are allowed
-)
+_DEFAULT_ZONE_MIN = 1
+_DEFAULT_ZONE_MAX = 265
+
+
+def build_bronze_schema(zone_min: int, zone_max: int) -> pa.DataFrameSchema:
+    """Return a Bronze DataFrameSchema with the given PULocationID range.
+
+    Args:
+        zone_min: Inclusive lower bound for PULocationID.
+        zone_max: Inclusive upper bound for PULocationID.
+
+    Returns:
+        A configured Pandera DataFrameSchema.
+    """
+    return pa.DataFrameSchema(
+        columns={
+            "tpep_pickup_datetime": pa.Column(pa.DateTime, nullable=True),
+            "tpep_dropoff_datetime": pa.Column(pa.DateTime, nullable=True),
+            "PULocationID": pa.Column(
+                pa.Float,
+                checks=pa.Check.in_range(zone_min, zone_max),
+                nullable=True,
+            ),
+            "passenger_count": pa.Column(pa.Float, nullable=True),
+            "trip_distance": pa.Column(pa.Float, nullable=True),
+        },
+        strict=False,  # extra columns are allowed
+    )
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -55,7 +71,9 @@ class DataValidationError(Exception):
         super().__init__("; ".join(failure_reasons))
 
 
-def validate_bronze_schema(df: pd.DataFrame) -> None:
+def validate_bronze_schema(
+    df: pd.DataFrame, config: dict[str, Any] | None = None
+) -> None:
     """Validate *df* against the expected Bronze schema.
 
     Runs with ``lazy=True`` so all violations are collected before raising.
@@ -63,13 +81,23 @@ def validate_bronze_schema(df: pd.DataFrame) -> None:
 
     Args:
         df: Raw DataFrame loaded from the Bronze layer.
+        config: Optional config dict with ``ingest.zone_id_min`` /
+            ``ingest.zone_id_max`` keys. When ``None`` the module-level
+            defaults (1, 265) are used — no disk read at call time.
 
     Raises:
         DataValidationError: If any required column is missing, has the wrong
             dtype, or contains out-of-range values.
     """
+    if config is not None:
+        zone_min = int(config["ingest"]["zone_id_min"])
+        zone_max = int(config["ingest"]["zone_id_max"])
+    else:
+        zone_min = _DEFAULT_ZONE_MIN
+        zone_max = _DEFAULT_ZONE_MAX
+    schema = build_bronze_schema(zone_min, zone_max)
     try:
-        _BRONZE_SCHEMA.validate(df, lazy=True)
+        schema.validate(df, lazy=True)
     except SchemaErrors as exc:
         reasons = [str(err) for err in exc.schema_errors]
         raise DataValidationError(reasons) from exc

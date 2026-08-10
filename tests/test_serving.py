@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -10,8 +11,10 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
+from mlflow.exceptions import MlflowException
 
-from tests.conftest import make_mock_version
+from app.core.config import AppConfig
+from tests.conftest import _FULL_CONFIG_DICT, make_mock_version
 
 
 @pytest.fixture()
@@ -95,9 +98,19 @@ def client(
     serving_module._model_version = "3"
     serving_module._served_from_stage = "Production"
     # Redirect log writes to tmp_path so no real disk I/O hits data/ tree.
-    serving_module._config = {
-        "monitoring": {"predictions_path": str(tmp_path / "monitoring_predictions")}
-    }
+    _tmp_config = AppConfig.model_validate(_FULL_CONFIG_DICT).model_copy(
+        update={
+            "monitoring": AppConfig.model_validate(
+                _FULL_CONFIG_DICT
+            ).monitoring.model_copy(
+                update={"predictions_path": str(tmp_path / "monitoring_predictions")}
+            )
+        }
+    )
+    serving_module._config = _tmp_config
+    # Point watermark root at an empty tmp dir so read_watermark returns None
+    # and the no-hour branch falls back to latest-hour (no watermark cap).
+    serving_module._watermark_root = tmp_path / "watermarks" / "refresh_15min"
 
     yield TestClient(serving_module.app)
 
@@ -547,6 +560,7 @@ class TestHeatmapAcceptance:
         centroid_lookup: dict[int, tuple[float, float]],
         zone_lookup: dict[int, str],
         monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         """AC #7: a zone absent from _centroid_lookup must have latitude=null,
         longitude=null, and zone_name="Unknown" in the response.
@@ -573,6 +587,7 @@ class TestHeatmapAcceptance:
         monkeypatch.setattr(
             serving_module, "_generated_at", "2021-03-01T12:00:00+00:00"
         )
+        monkeypatch.setattr(serving_module, "_watermark_root", tmp_path / "wm")
 
         local_client = TestClient(serving_module.app)
         resp = local_client.get("/heatmap")
@@ -735,12 +750,14 @@ class TestLifespanCentroidWiring:
         mock_build_centroid = MagicMock(return_value=expected_centroids)
         mock_load_predictions = MagicMock(return_value=fake_predictions)
         mock_load_zone_lookup = MagicMock(return_value={1: "Newark Airport"})
-        fake_config = {
-            "serving": {
-                "predictions_path": "fake/predictions.parquet",
-                "zone_shapefile_path": "fake/taxi_zones.shp",
+        base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+        fake_config: AppConfig = base.model_copy(
+            update={
+                "serving": base.serving.model_copy(
+                    update={"zone_shapefile_path": "fake/taxi_zones.shp"}
+                )
             }
-        }
+        )
 
         monkeypatch.setattr(
             serving_module, "build_centroid_lookup", mock_build_centroid
@@ -759,16 +776,7 @@ class TestLifespanCentroidWiring:
 # PBI 27 — GET /health endpoint tests
 # ---------------------------------------------------------------------------
 
-_FAKE_CONFIG = {
-    # PBI 25b FIX: /health derives the simulation position from the watermark,
-    # falling back to ingest.seed_start when no watermark file exists.
-    "ingest": {"seed_start": "2021-01-18T00:00:00"},
-    "serving": {
-        "predictions_path": "fake/predictions.parquet",
-        "zone_shapefile_path": "fake/taxi_zones.shp",
-    },
-    "mlflow": {"model_name": "ny_taxi_demand_model"},
-}
+_FAKE_CONFIG: AppConfig = AppConfig.model_validate(_FULL_CONFIG_DICT)
 
 
 class TestHealthEndpoint:
@@ -812,7 +820,7 @@ class TestHealthEndpoint:
 
         mock_version = make_mock_version(version="3")
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = [mock_version]
+        mock_client_instance.get_model_version_by_alias.return_value = mock_version
 
         with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
             with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
@@ -852,8 +860,12 @@ class TestHealthEndpoint:
         )
         monkeypatch.setattr(serving_module, "_predictions_df", predictions)
 
+        from mlflow.exceptions import MlflowException
+
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = []
+        mock_client_instance.get_model_version_by_alias.side_effect = MlflowException(
+            "Alias champion not found"
+        )
 
         with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
             with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
@@ -944,7 +956,9 @@ class TestHealthEndpoint:
         monkeypatch.setattr(serving_module, "_predictions_df", empty_df)
 
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = []
+        mock_client_instance.get_model_version_by_alias.side_effect = MlflowException(
+            "Alias champion not found"
+        )
 
         with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
             with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
@@ -978,7 +992,9 @@ class TestHealthEndpoint:
         monkeypatch.setattr(serving_module, "_predictions_df", predictions)
 
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = []
+        mock_client_instance.get_model_version_by_alias.side_effect = MlflowException(
+            "Alias champion not found"
+        )
 
         with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
             with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
@@ -1017,7 +1033,7 @@ class TestModelInfoEndpoint:
             tags={"model_test_wape": "0.1823", "wape_lift_pct": "12.4"},
         )
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = [mock_version]
+        mock_client_instance.get_model_version_by_alias.return_value = mock_version
 
         with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
             with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
@@ -1046,7 +1062,9 @@ class TestModelInfoEndpoint:
         import app.api.main as serving_module
 
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = []
+        mock_client_instance.get_model_version_by_alias.side_effect = MlflowException(
+            "Alias champion not found"
+        )
 
         with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
             with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
@@ -1079,7 +1097,7 @@ class TestModelInfoEndpoint:
             tags={},  # no tags
         )
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = [mock_version]
+        mock_client_instance.get_model_version_by_alias.return_value = mock_version
 
         with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
             with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
@@ -1091,6 +1109,71 @@ class TestModelInfoEndpoint:
         assert body["status"] == "ok"
         assert body["model_test_wape"] is None
         assert body["wape_lift_pct"] is None
+
+
+# ---------------------------------------------------------------------------
+# PBI 37 Step 6 — /health and /model-info use alias API (RED → GREEN)
+# ---------------------------------------------------------------------------
+
+
+class TestHealthAliasAPI:
+    """PBI 37 Step 6: /health and /model-info use get_model_version_by_alias."""
+
+    def test_health_calls_alias_not_stage_api(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GET /health: get_model_version_by_alias called; get_latest_versions NOT called (PBI 37 Step 6 RED)."""
+        import app.api.main as serving_module
+
+        monkeypatch.delenv("DEMO_MODE", raising=False)
+        predictions = pd.DataFrame(
+            {
+                "pulocationid": [1],
+                "hour": pd.to_datetime(["2021-03-01 00:00:00"]),
+                "predicted_trip_count": [10.0],
+                "actual_trip_count": [9.0],
+            }
+        )
+        monkeypatch.setattr(serving_module, "_predictions_df", predictions)
+
+        mock_version = make_mock_version(version="5")
+        mock_client_instance = MagicMock()
+        mock_client_instance.get_model_version_by_alias.return_value = mock_version
+
+        with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
+            with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
+                local_client = TestClient(serving_module.app)
+                resp = local_client.get("/health")
+
+        assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+        assert body["model_version"] == "5"
+        mock_client_instance.get_model_version_by_alias.assert_called_once()
+        mock_client_instance.get_latest_versions.assert_not_called()
+
+    def test_model_info_calls_alias_not_stage_api(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GET /model-info: get_model_version_by_alias called; get_latest_versions NOT called (PBI 37 Step 6 RED)."""
+        import app.api.main as serving_module
+
+        mock_version = make_mock_version(
+            version="5", tags={"model_test_wape": "12.5", "wape_lift_pct": "3.1"}
+        )
+        mock_client_instance = MagicMock()
+        mock_client_instance.get_model_version_by_alias.return_value = mock_version
+
+        with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
+            with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
+                local_client = TestClient(serving_module.app)
+                resp = local_client.get("/model-info")
+
+        assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+        assert body["status"] == "ok"
+        assert body["model_version"] == "5"
+        mock_client_instance.get_model_version_by_alias.assert_called_once()
+        mock_client_instance.get_latest_versions.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1158,7 +1241,7 @@ class TestHeatmapModelProvenance:
         assert body["served_from_stage"] == "Production"
 
     def test_get_heatmap_provenance_null_when_legacy_parquet(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """GET /heatmap returns null provenance fields for pre-PBI-21 parquets.
 
@@ -1188,6 +1271,7 @@ class TestHeatmapModelProvenance:
         )
         monkeypatch.setattr(serving_module, "_model_version", None)
         monkeypatch.setattr(serving_module, "_served_from_stage", None)
+        monkeypatch.setattr(serving_module, "_watermark_root", tmp_path / "wm")
 
         local_client = TestClient(serving_module.app)
         resp = local_client.get("/heatmap")
@@ -1249,3 +1333,221 @@ class TestPredictionLogHook:
         assert resp.status_code == 200
         body: dict[str, Any] = resp.json()
         assert "predictions" in body
+
+
+class TestHeatmapWatermarkFilter:
+    """GET /heatmap caps the default hour to the watermark when one exists."""
+
+    @pytest.fixture(autouse=True)
+    def _restore_globals(self) -> Generator[None, None, None]:
+        """Snapshot and restore all module globals mutated by this class."""
+        import app.api.main as serving_module
+
+        orig_predictions = serving_module._predictions_df
+        orig_zone_lookup = serving_module._zone_lookup
+        orig_centroid_lookup = serving_module._centroid_lookup
+        orig_generated_at = serving_module._generated_at
+        orig_model_version = serving_module._model_version
+        orig_served_from_stage = serving_module._served_from_stage
+        orig_config = serving_module._config
+        orig_watermark_root = serving_module._watermark_root
+        yield
+        serving_module._predictions_df = orig_predictions
+        serving_module._zone_lookup = orig_zone_lookup
+        serving_module._centroid_lookup = orig_centroid_lookup
+        serving_module._generated_at = orig_generated_at
+        serving_module._model_version = orig_model_version
+        serving_module._served_from_stage = orig_served_from_stage
+        serving_module._config = orig_config
+        serving_module._watermark_root = orig_watermark_root
+
+    def _client_with_watermark(
+        self,
+        sample_predictions: pd.DataFrame,
+        zone_lookup: dict[int, str],
+        centroid_lookup: dict[int, tuple[float, float]],
+        tmp_path: Path,
+        watermark: datetime | None,
+    ) -> TestClient:
+        """Build a TestClient with module globals pointed at tmp_path.
+
+        Mirrors the `client` fixture but lets the test control the watermark.
+        Caller is responsible for restoring globals — kept minimal via a
+        fresh TestClient per test and monkeypatch in the tests below.
+        """
+        import app.api.main as serving_module
+        from app.core.watermark import write_watermark
+
+        wm_root = tmp_path / "watermarks" / "refresh_15min"
+        serving_module._predictions_df = sample_predictions
+        serving_module._zone_lookup = zone_lookup
+        serving_module._centroid_lookup = centroid_lookup
+        serving_module._generated_at = "2021-03-01T12:00:00+00:00"
+        serving_module._model_version = "3"
+        serving_module._served_from_stage = "Production"
+        _base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+        serving_module._config = _base.model_copy(
+            update={
+                "monitoring": _base.monitoring.model_copy(
+                    update={"predictions_path": str(tmp_path / "mon")}
+                )
+            }
+        )
+        serving_module._watermark_root = wm_root
+        if watermark is not None:
+            write_watermark(wm_root, watermark)
+        return TestClient(serving_module.app)
+
+    def test_heatmap_default_capped_at_watermark(
+        self,
+        sample_predictions,
+        zone_lookup,
+        centroid_lookup,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        """Watermark between the two sample hours withholds the later tick."""
+        # Arrange — watermark at 00:30 (between 00:00 and 01:00)
+        client = self._client_with_watermark(
+            sample_predictions,
+            zone_lookup,
+            centroid_lookup,
+            tmp_path,
+            datetime(2021, 3, 1, 0, 30, 0),
+        )
+
+        # Act
+        resp = client.get("/heatmap")
+
+        # Assert
+        assert resp.status_code == 200
+        assert resp.json()["hour"] == "2021-03-01T00:00:00"
+
+    def test_heatmap_watermark_before_all_predictions_returns_503(
+        self,
+        sample_predictions,
+        zone_lookup,
+        centroid_lookup,
+        tmp_path,
+    ) -> None:
+        """Watermark earlier than every prediction hour → 503."""
+        # Arrange
+        client = self._client_with_watermark(
+            sample_predictions,
+            zone_lookup,
+            centroid_lookup,
+            tmp_path,
+            datetime(2021, 1, 1, 0, 0, 0),
+        )
+
+        # Act
+        resp = client.get("/heatmap")
+
+        # Assert
+        assert resp.status_code == 503
+
+    def test_heatmap_no_watermark_returns_latest(
+        self,
+        sample_predictions,
+        zone_lookup,
+        centroid_lookup,
+        tmp_path,
+    ) -> None:
+        """No watermark file → unchanged latest-hour behavior."""
+        # Arrange — watermark=None → no control file written
+        client = self._client_with_watermark(
+            sample_predictions,
+            zone_lookup,
+            centroid_lookup,
+            tmp_path,
+            None,
+        )
+
+        # Act
+        resp = client.get("/heatmap")
+
+        # Assert
+        assert resp.status_code == 200
+        assert resp.json()["hour"] == "2021-03-01T01:00:00"
+
+    def test_heatmap_explicit_hour_bypasses_watermark(
+        self,
+        sample_predictions,
+        zone_lookup,
+        centroid_lookup,
+        tmp_path,
+    ) -> None:
+        """An explicit ?hour= is served even if it exceeds the watermark."""
+        # Arrange — watermark at 00:30 would withhold 01:00 by default
+        client = self._client_with_watermark(
+            sample_predictions,
+            zone_lookup,
+            centroid_lookup,
+            tmp_path,
+            datetime(2021, 3, 1, 0, 30, 0),
+        )
+
+        # Act
+        resp = client.get("/heatmap", params={"hour": "2021-03-01T01:00:00"})
+
+        # Assert
+        assert resp.status_code == 200
+        assert resp.json()["hour"] == "2021-03-01T01:00:00"
+
+
+# ---------------------------------------------------------------------------
+# Step 6 — lifespan wires _watermark_root from config["serving"]["watermark_path"]
+# ---------------------------------------------------------------------------
+
+
+class TestLifespanWatermarkPathWiring:
+    """Step 6 — serving.watermark_path is honoured by lifespan()."""
+
+    def test_lifespan_sets_watermark_root_from_config(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """lifespan() must set _watermark_root to Path(config["serving"]["watermark_path"]).
+
+        Arrange:
+        - Provide a fake_config with a custom watermark_path.
+        - Patch _load_predictions and _load_zone_lookup to avoid filesystem I/O.
+        Act: enter the app via TestClient (triggers lifespan).
+        Assert: _watermark_root equals the configured path.
+        """
+        import app.api.main as serving_module
+
+        custom_wm_path = "custom/watermarks/refresh"
+        _base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+        fake_config: AppConfig = _base.model_copy(
+            update={
+                "serving": _base.serving.model_copy(
+                    update={"watermark_path": custom_wm_path}
+                )
+            }
+        )
+
+        fake_predictions = pd.DataFrame(
+            {
+                "pulocationid": [1],
+                "hour": pd.to_datetime(["2021-03-01 00:00:00"]),
+                "predicted_trip_count": [5.0],
+                "actual_trip_count": [4.0],
+            }
+        )
+
+        monkeypatch.setattr(
+            serving_module,
+            "_load_predictions",
+            MagicMock(return_value=fake_predictions),
+        )
+        monkeypatch.setattr(
+            serving_module, "_load_zone_lookup", MagicMock(return_value={1: "Zone A"})
+        )
+        monkeypatch.setattr(
+            serving_module, "build_centroid_lookup", MagicMock(return_value={})
+        )
+
+        with patch("app.api.main.load_config", return_value=fake_config):
+            with TestClient(serving_module.app):
+                # Assert — _watermark_root reflects the configured path
+                assert serving_module._watermark_root == Path(custom_wm_path)

@@ -10,6 +10,28 @@ Usage (CLI)::
     uv run python -m app.monitoring.actuals_join \\
         --start-date 2024-11-01 \\
         --end-date   2024-11-30
+
+Design note — deferred wiring (see PBI-MON-01)
+-----------------------------------------------
+The 15-minute inference DAG intentionally writes ``actual_trip_count = NaN``
+in the prediction history.  At prediction time the DAG feeds an
+inference-only Gold slice (no ``trip_count`` label) to the predictor, so the
+actual is structurally absent even though Gold already contains the value for
+the previous bucket.
+
+This job is the intended backfill: it reads Gold directly and left-joins on
+``(pulocationid, bucket_time == hour)`` to fill those NaNs for all buckets
+where ``bucket_time <= Gold max hour``.
+
+It is **not** wired into the 15-minute DAG by design — actuals backfill is a
+monitoring/evaluation concern that runs on a separate (e.g. daily) cadence.
+Wiring it into the inference DAG would couple model serving with monitoring
+and do a full Gold read every 15 minutes unnecessarily.
+
+TODO (PBI-MON-01): implement a daily ``actuals_backfill_dag`` that calls
+``join_actuals`` for the prior calendar day and writes results to
+``data/monitoring/joined/``.  This output is also the input for the closed
+training-loop retraining trigger (deferred mode-3 work).
 """
 
 from __future__ import annotations
@@ -158,16 +180,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 if __name__ == "__main__":
+    from app.core.config import AppConfig
+
     args = _parse_args()
-    config = load_config()
-    monitoring = config.get("monitoring", {})
+    _cfg: AppConfig = load_config()  # type: ignore[assignment]
     out = join_actuals(
         start_date=args.start_date,
         end_date=args.end_date,
-        predictions_root=monitoring.get(
-            "predictions_path", "data/monitoring/predictions"
-        ),
-        gold_path=config["data"]["gold_path"],
-        output_root=monitoring.get("joined_path", "data/monitoring/joined"),
+        predictions_root=_cfg.monitoring.predictions_path,
+        gold_path=_cfg.data.gold_path,
+        output_root=_cfg.monitoring.joined_path,
     )
     print(f"Joined output written to: {out}")

@@ -21,6 +21,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
+from app.core.config import AppConfig
 from app.core.watermark import read_watermark
 
 logger = logging.getLogger(__name__)
@@ -42,7 +43,7 @@ class EmptyTrainingWindowError(Exception):
 
 
 def resolve_watermarks(
-    config: dict[str, Any],
+    config: AppConfig,
     refresh_root: Path,
     last_training_root: Path,
 ) -> dict[str, Any]:
@@ -63,7 +64,7 @@ def resolve_watermarks(
     last_wm: datetime = (
         last_wm_raw
         if last_wm_raw is not None
-        else datetime.fromisoformat(config["ingest"]["seed_start"])
+        else datetime.fromisoformat(config.ingest.seed_start)
     )
 
     return {
@@ -141,6 +142,20 @@ def tag_promoted_version(
     """Write the trained_at_watermark tag on the promoted model version."""
     client.set_model_version_tag(
         model_name, version, "trained_at_watermark", window_end.isoformat()
+    )
+
+
+def build_train_config(
+    base: AppConfig,
+    *,
+    model_root: str,
+) -> AppConfig:
+    """Return a new AppConfig with model.store_path overridden to model_root.
+
+    Mirrors build_predict_config — model_copy, never mutates base.
+    """
+    return base.model_copy(
+        update={"model": base.model.model_copy(update={"store_path": model_root})}
     )
 
 

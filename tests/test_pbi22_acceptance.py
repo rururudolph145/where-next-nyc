@@ -19,6 +19,7 @@ import importlib
 import re
 import subprocess
 import sys
+import tempfile
 from collections.abc import Generator
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -157,6 +158,7 @@ def api_client() -> Generator[TestClient, None, None]:
         "_generated_at": serving_module._generated_at,
         "_model_version": serving_module._model_version,
         "_served_from_stage": serving_module._served_from_stage,
+        "_watermark_root": serving_module._watermark_root,
     }
 
     serving_module._predictions_df = _SAMPLE_PREDICTIONS
@@ -165,6 +167,8 @@ def api_client() -> Generator[TestClient, None, None]:
     serving_module._generated_at = "2021-03-01T12:00:00+00:00"
     serving_module._model_version = "3"
     serving_module._served_from_stage = "Production"
+    # Point at a nonexistent dir so read_watermark returns None (no watermark cap).
+    serving_module._watermark_root = Path(tempfile.mkdtemp()) / "wm"
 
     with patch("app.api.main.prediction_log.log_predictions"):
         yield TestClient(serving_module.app)
@@ -398,11 +402,13 @@ class TestPBI22Story:
         orig_zone = serving_module._zone_lookup
         orig_centroid = serving_module._centroid_lookup
         orig_gen = serving_module._generated_at
+        orig_wm_root = serving_module._watermark_root
 
         serving_module._predictions_df = _SAMPLE_PREDICTIONS
         serving_module._zone_lookup = _ZONE_LOOKUP
         serving_module._centroid_lookup = _CENTROID_LOOKUP
         serving_module._generated_at = "2021-03-01T12:00:00+00:00"
+        serving_module._watermark_root = Path(tempfile.mkdtemp()) / "wm"
 
         try:
             with patch.object(
@@ -417,6 +423,7 @@ class TestPBI22Story:
             serving_module._zone_lookup = orig_zone
             serving_module._centroid_lookup = orig_centroid
             serving_module._generated_at = orig_gen
+            serving_module._watermark_root = orig_wm_root
 
         assert resp.status_code == 200
         body: dict[str, Any] = resp.json()

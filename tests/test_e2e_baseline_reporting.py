@@ -42,6 +42,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from app.core.config import AppConfig
 from app.training.trainer import Trainer
 
 
@@ -133,33 +134,41 @@ _FEATURES = [
 ]
 
 
-def _trainer_config(tmp_path: Path) -> dict[str, Any]:
-    """Minimal Trainer config pointing at tmp_path Gold/model/mlruns dirs."""
-    return {
-        "env": "local",
-        "data": {"gold_path": str(tmp_path / "gold")},
-        "feature": {"bucket": "h"},
-        "train": {
-            "features": _FEATURES,
-            "target": "trip_count",
-            "split_ratios": [0.6, 0.2, 0.2],
-        },
-        "model": {
-            "name": "LGBMRegressor",
-            "params": {
-                "n_estimators": 5,
-                "learning_rate": 0.1,
-                "num_leaves": 4,
-                "random_state": 42,
-                "verbosity": -1,
-            },
-            "store_path": str(tmp_path / "models"),
-        },
-        "mlflow": {
-            "experiment_name": "test_pbi18_acceptance",
-            "tracking_uri": str(tmp_path / "mlruns"),
-        },
-    }
+def _trainer_config(tmp_path: Path) -> AppConfig:
+    """Minimal Trainer AppConfig pointing at tmp_path Gold/model/mlruns dirs."""
+    from tests.conftest import _FULL_CONFIG_DICT
+
+    base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+    return base.model_copy(
+        update={
+            "data": base.data.model_copy(update={"gold_path": str(tmp_path / "gold")}),
+            "train": base.train.model_copy(
+                update={
+                    "features": _FEATURES,
+                    "target": "trip_count",
+                    "split_ratios": [0.6, 0.2, 0.2],
+                }
+            ),
+            "model": base.model.model_copy(
+                update={
+                    "params": {
+                        "n_estimators": 5,
+                        "learning_rate": 0.1,
+                        "num_leaves": 4,
+                        "random_state": 42,
+                        "verbosity": -1,
+                    },
+                    "store_path": str(tmp_path / "models"),
+                }
+            ),
+            "mlflow": base.mlflow.model_copy(
+                update={
+                    "experiment_name": "test_pbi18_acceptance",
+                    "tracking_uri": str(tmp_path / "mlruns"),
+                }
+            ),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -290,9 +299,20 @@ class TestAC2WapeLiftFormula:
         gold_dir, gold_df = _make_4week_gold(
             tmp_path, trip_count_fn=nearly_constant_trips
         )
-        config = _trainer_config(tmp_path)
+        base_config = _trainer_config(tmp_path)
         # Tiny model — cannot learn the weekly variation
-        config["model"]["params"]["n_estimators"] = 1
+        config = base_config.model_copy(
+            update={
+                "model": base_config.model.model_copy(
+                    update={
+                        "params": {
+                            **base_config.model.params,
+                            "n_estimators": 1,
+                        }
+                    }
+                )
+            }
+        )
         trainer = Trainer(config=config)
 
         # Act
@@ -523,11 +543,10 @@ class TestAC6MetricsConsolidation:
     """
 
     def test_ac6_all_three_delegates_share_core_evaluate_results(self) -> None:
-        """Trainer.evaluate, Predictor.evaluate, and HourlySimulator.compute_metrics
-        all produce the same dict as app.core.metrics.evaluate for identical input."""
+        """Trainer.evaluate and Predictor.evaluate both produce the same dict
+        as app.core.metrics.evaluate for identical input."""
         from app.core.metrics import evaluate as core_evaluate
         from app.inference.predictor import Predictor
-        from app.inference.simulator import HourlySimulator
         from app.training.trainer import Trainer as _Trainer
 
         y_true_series = pd.Series([10.0, 20.0, 30.0, 0.0])
@@ -537,28 +556,21 @@ class TestAC6MetricsConsolidation:
         core_result = core_evaluate(y_true_series, y_pred_arr)
         trainer_result = _Trainer.evaluate(y_true_series, y_pred_arr)
         predictor_result = Predictor.evaluate(y_true_series, y_pred_arr)
-        simulator_result = HourlySimulator.compute_metrics(
-            y_true_series.to_numpy(), y_pred_arr
-        )
 
-        # Assert — all four must be identical dicts
+        # Assert — all three must be identical dicts
         assert trainer_result == core_result, (
             "Trainer.evaluate diverged from core evaluate"
         )
         assert predictor_result == core_result, (
             "Predictor.evaluate diverged from core evaluate"
         )
-        assert simulator_result == core_result, (
-            "HourlySimulator.compute_metrics diverged from core evaluate"
-        )
 
     def test_ac6_no_duplicate_evaluate_implementations(self) -> None:
-        """Confirm that Trainer, Predictor, and HourlySimulator do NOT define
-        their own metric arithmetic — they delegate to app.core.metrics."""
+        """Confirm that Trainer and Predictor do NOT define their own metric
+        arithmetic — they delegate to app.core.metrics."""
         import inspect
 
         from app.inference.predictor import Predictor
-        from app.inference.simulator import HourlySimulator
         from app.training.trainer import Trainer as _Trainer
 
         # Inspect source of each wrapper; none should contain 'np.mean' or 'np.abs'
@@ -566,7 +578,6 @@ class TestAC6MetricsConsolidation:
         for cls, method_name in [
             (_Trainer, "evaluate"),
             (Predictor, "evaluate"),
-            (HourlySimulator, "compute_metrics"),
         ]:
             src = inspect.getsource(getattr(cls, method_name))
             assert "np.mean" not in src, (

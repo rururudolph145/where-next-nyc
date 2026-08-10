@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 from sklearn.neighbors import BallTree  # type: ignore[import-untyped]
 
-from app.core.config import load_config
+from app.core.config import AppConfig, load_config
 
 
 def build_centroid_lookup(shapefile_path: str) -> dict[int, tuple[float, float]]:
@@ -48,51 +48,28 @@ def build_centroid_lookup(shapefile_path: str) -> dict[int, tuple[float, float]]
 class FeatureEngineer:
     """Builds the Gold layer feature set from Silver layer trip data."""
 
-    def __init__(self, config: dict[str, Any] | None = None) -> None:
+    def __init__(self, config: AppConfig | None = None) -> None:
         """Initialise FeatureEngineer with configuration.
 
         Args:
-            config: Parsed configuration dictionary. If ``None``, loads
-                from ``config.yml`` via :func:`app.core.config.load_config`.
+            config: Parsed AppConfig. If ``None``, loads from ``config.yml``
+                via :func:`app.core.config.load_config`.
         """
-        self.config = config or load_config()
-        # Aggregation bucket width (pandas offset alias). Defaults to "h"
-        # so existing configs without the key keep their hourly behavior.
-        # PBI A1 introduces this knob; PBI A2/A3 build on top of it for
-        # 15-min refresh and shifted-horizon forecasting.
-        self.bucket: str = self.config["feature"].get("bucket", "h")
-        # ``feature.lags`` is the canonical key (values are bucket offsets,
-        # not hours). PBI A2 generalizes the unit; the legacy
-        # ``feature.lag_hours`` key is accepted as a back-compat alias so
-        # existing configs and notebooks keep working. When both are
-        # present, ``lags`` wins. ``self.lag_hours`` mirrors ``self.lags``
-        # so downstream code that still reads the old attribute name
-        # continues to work.
-        feature_cfg = self.config["feature"]
-        if "lags" in feature_cfg:
-            self.lags: list[int] = feature_cfg["lags"]
-        else:
-            self.lags = feature_cfg["lag_hours"]
+        loaded = load_config()
+        self.config: AppConfig = config if config is not None else loaded  # type: ignore[assignment]
+        feature_cfg = self.config.feature
+        # Aggregation bucket width (pandas offset alias).
+        self.bucket: str = feature_cfg.bucket
+        # ``feature.lags`` / ``feature.lag_hours`` alias resolved by Pydantic
+        # AliasChoices at model_validate time — always available as .lags.
+        self.lags: list[int] = feature_cfg.lags
         self.lag_hours: list[int] = self.lags
-        # Forecast horizon expressed in *buckets*. Default 0 = predict the
-        # current bucket (legacy ``trip_count``). Set to 2 under bucket="15min"
-        # for the t+30 design (see docs/design_t30_15min_refresh.html §4.2).
-        # PBI A3 introduces the knob; downstream consumers (trainer, simulator,
-        # heatmap API) point at the resulting ``target_t{N}`` column.
-        self.horizon_buckets: int = feature_cfg.get("horizon_buckets", 0)
-        # PBI B2: number of *future* buckets to sum into a single target column.
-        # Under bucket="15min" with horizon_sum_buckets=2 this builds the
-        # 30-min lookahead target = shift(-1) + shift(-2) of trip_count, i.e.
-        # the "extended nowcast" design. 0 disables the feature so B1 stays
-        # the default once horizon_sum_buckets is omitted from config.
-        self.horizon_sum_buckets: int = feature_cfg.get("horizon_sum_buckets", 0)
-        # Number of nearest neighbours used by ``add_neighbor_lag_smoothing``
-        # (PBI B1). Default 0 disables the smoothing path so legacy configs
-        # without the key keep their pre-B1 Gold schema.
-        self.n_neighbors: int = feature_cfg.get("n_neighbors", 0)
-        self.zone_shapefile_path: str = self.config["feature"]["zone_shapefile_path"]
-        self.silver_path: str = self.config["data"]["silver_path"]
-        self.gold_path: str = self.config["data"]["gold_path"]
+        self.horizon_buckets: int = feature_cfg.horizon_buckets
+        self.horizon_sum_buckets: int = feature_cfg.horizon_sum_buckets
+        self.n_neighbors: int = feature_cfg.n_neighbors
+        self.zone_shapefile_path: str = feature_cfg.zone_shapefile_path
+        self.silver_path: str = self.config.data.silver_path
+        self.gold_path: str = self.config.data.gold_path
 
     # ------------------------------------------------------------------
     # Hourly demand aggregation
@@ -484,12 +461,23 @@ class FeatureEngineer:
     # Orchestration
     # ------------------------------------------------------------------
 
-    def run(self, data: pd.DataFrame | None = None) -> pd.DataFrame:
+    def run(
+        self,
+        data: pd.DataFrame | None = None,
+        for_training: bool = True,
+    ) -> pd.DataFrame:
         """Execute the full Silver → Gold feature engineering pipeline.
 
         Args:
             data: Optional Silver layer DataFrame. If ``None``, reads from
                 the configured ``data.silver_path``.
+            for_training: When ``True`` (default), target columns are
+                generated and trailing rows with no future label are dropped
+                via ``dropna``.  When ``False`` (inference path), target
+                generators are skipped entirely so the trailing buckets — the
+                ones an operator most wants forecast — survive into Gold.
+                The absence of a target column is the "not-yet-scorable"
+                signal consumed by deferred scoring (``actuals_join``).
 
         Returns:
             Gold layer DataFrame.
@@ -504,17 +492,16 @@ class FeatureEngineer:
         panel = self.add_time_features(panel)
         panel = self.add_cyclical_features(panel)
         panel = self.add_lag_features(panel)
-        # Only materialize a shifted-target column when explicitly configured.
-        # Under the default ``horizon_buckets=0`` the trainer still reads the
-        # legacy ``trip_count`` column, so Gold's schema stays bit-identical
-        # for back-compat with existing training/serving paths.
-        if self.horizon_buckets > 0:
+        # Only materialize a shifted-target column when explicitly configured
+        # AND when building training gold.  Inference skips this so the
+        # trailing buckets (no future label yet) survive.
+        if for_training and self.horizon_buckets > 0:
             panel = self.add_shifted_target(panel)
         # PBI B2: extended-nowcast target = sum of next N future buckets.
         # Independent of horizon_buckets — typical config uses only one or
         # the other. When both are set, both columns are emitted and the
         # trainer picks which one via ``train.target``.
-        if self.horizon_sum_buckets > 0:
+        if for_training and self.horizon_sum_buckets > 0:
             panel = self.add_summed_horizon_target(panel)
         panel = self.add_zone_coordinates(panel)
         # Spatial smoothing must run *after* zone coordinates (needs lat/lon)

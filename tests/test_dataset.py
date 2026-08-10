@@ -1,21 +1,18 @@
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
 import pytest
 from unittest.mock import mock_open, patch
 
+from app.core.config import AppConfig
 from app.ingestion.ingest import Ingestion
 
 
 @pytest.fixture
-def config_data():
-    return {
-        "data": {
-            "train_path": "data/train.parquet",
-            "test_path": "data/test.parquet",
-        }
-    }
+def config_data() -> AppConfig:
+    from tests.conftest import _FULL_CONFIG_DICT
+
+    return AppConfig.model_validate(_FULL_CONFIG_DICT)
 
 
 @pytest.fixture
@@ -113,17 +110,26 @@ def test_bronze_is_temporally_sorted(
     PBI 14 (parallel reads) must preserve this property.
     """
     bronze_path = tmp_path / "bronze" / "yellow_tripdata" / "bronze.parquet"
-    config: dict[str, Any] = {
-        "data": {
-            "raw_path": str(ordered_raw_tree),
-            "bronze_path": str(bronze_path),
-        },
-        "ingest": {
-            "start_year_month": "2021-01",
-            "end_year_month": "2021-02",
-            "bronze_schema": bronze_schema,
-        },
-    }
+    from tests.conftest import _FULL_CONFIG_DICT
+
+    base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+    config = base.model_copy(
+        update={
+            "data": base.data.model_copy(
+                update={
+                    "raw_path": str(ordered_raw_tree),
+                    "bronze_path": str(bronze_path),
+                }
+            ),
+            "ingest": base.ingest.model_copy(
+                update={
+                    "start_year_month": "2021-01",
+                    "end_year_month": "2021-02",
+                    "bronze_schema": bronze_schema,
+                }
+            ),
+        }
+    )
 
     Ingestion(config=config).run()
 
@@ -184,17 +190,26 @@ def test_load_raw_parallel_equivalence(
     after concat to satisfy this contract.
     """
     bronze_path = tmp_path / "bronze" / "yellow_tripdata" / "bronze.parquet"
-    config: dict[str, Any] = {
-        "data": {
-            "raw_path": str(out_of_order_raw_tree),
-            "bronze_path": str(bronze_path),
-        },
-        "ingest": {
-            "start_year_month": "2021-01",
-            "end_year_month": "2021-01",
-            "bronze_schema": bronze_schema,
-        },
-    }
+    from tests.conftest import _FULL_CONFIG_DICT
+
+    base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+    config = base.model_copy(
+        update={
+            "data": base.data.model_copy(
+                update={
+                    "raw_path": str(out_of_order_raw_tree),
+                    "bronze_path": str(bronze_path),
+                }
+            ),
+            "ingest": base.ingest.model_copy(
+                update={
+                    "start_year_month": "2021-01",
+                    "end_year_month": "2021-01",
+                    "bronze_schema": bronze_schema,
+                }
+            ),
+        }
+    )
 
     Ingestion(config=config).run()
     bronze_df = pd.read_parquet(bronze_path)

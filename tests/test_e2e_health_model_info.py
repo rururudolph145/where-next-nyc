@@ -49,24 +49,32 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
+from mlflow.exceptions import MlflowException
+
+from app.core.config import AppConfig
 from app.training.trainer import Trainer
-from tests.conftest import make_mock_version
+from tests.conftest import _FULL_CONFIG_DICT, make_mock_version
 
 
 # ---------------------------------------------------------------------------
 # Shared fixture helpers — reuse patterns from existing test_serving.py
 # ---------------------------------------------------------------------------
 
-_FAKE_SERVING_CONFIG: dict[str, Any] = {
-    # PBI 25b FIX: /health derives the simulation position from the watermark,
-    # falling back to ingest.seed_start when no watermark file exists.
-    "ingest": {"seed_start": "2021-01-18T00:00:00"},
-    "serving": {
-        "predictions_path": "fake/predictions.parquet",
-        "zone_shapefile_path": "fake/taxi_zones.shp",
-    },
-    "mlflow": {"model_name": "ny_taxi_demand_model"},
-}
+_BASE = AppConfig.model_validate(_FULL_CONFIG_DICT)
+_FAKE_SERVING_CONFIG: AppConfig = _BASE.model_copy(
+    update={
+        "ingest": _BASE.ingest.model_copy(update={"seed_start": "2021-01-18T00:00:00"}),
+        "serving": _BASE.serving.model_copy(
+            update={
+                "predictions_path": "fake/predictions.parquet",
+                "zone_shapefile_path": "fake/taxi_zones.shp",
+            }
+        ),
+        "mlflow": _BASE.mlflow.model_copy(
+            update={"model_name": "ny_taxi_demand_model"}
+        ),
+    }
+)
 
 
 def _make_predictions_df(hour_str: str = "2021-03-01 00:00:00") -> pd.DataFrame:
@@ -173,35 +181,39 @@ def _make_4week_gold(tmp_path: Path) -> tuple[Path, pd.DataFrame]:
     return gold_dir, gold_df
 
 
-def _registry_config(tmp_path: Path) -> dict[str, Any]:
-    """Full Trainer config with PBI-20 registry keys; all paths inside tmp_path."""
-    return {
-        "env": "local",
-        "data": {"gold_path": str(tmp_path / "gold")},
-        "feature": {"bucket": "h"},
-        "train": {
-            "features": _TRAINER_FEATURES,
-            "target": "trip_count",
-            "split_ratios": [0.8, 0.1, 0.1],
-            "gate": {"min_wape_lift_pct": 2.0},
-        },
-        "model": {
-            "name": "LGBMRegressor",
-            "params": {
-                "n_estimators": 5,
-                "learning_rate": 0.1,
-                "num_leaves": 4,
-                "random_state": 42,
-                "verbosity": -1,
-            },
-            "store_path": str(tmp_path / "models"),
-        },
-        "mlflow": {
-            "experiment_name": "test_pbi27_acceptance",
-            "tracking_uri": "sqlite:///mlflow.db",
-            "model_name": "ny_taxi_demand_model",
-        },
-    }
+def _registry_config(tmp_path: Path) -> AppConfig:
+    """Full Trainer AppConfig with PBI-20 registry keys; all paths inside tmp_path."""
+    base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+    return base.model_copy(
+        update={
+            "data": base.data.model_copy(update={"gold_path": str(tmp_path / "gold")}),
+            "train": base.train.model_copy(
+                update={
+                    "features": _TRAINER_FEATURES,
+                    "target": "trip_count",
+                    "split_ratios": [0.8, 0.1, 0.1],
+                }
+            ),
+            "model": base.model.model_copy(
+                update={
+                    "params": {
+                        "n_estimators": 5,
+                        "learning_rate": 0.1,
+                        "num_leaves": 4,
+                        "random_state": 42,
+                        "verbosity": -1,
+                    },
+                    "store_path": str(tmp_path / "models"),
+                }
+            ),
+            "mlflow": base.mlflow.model_copy(
+                update={
+                    "experiment_name": "test_pbi27_acceptance",
+                    "tracking_uri": "sqlite:///mlflow.db",
+                }
+            ),
+        }
+    )
 
 
 def _build_mlflow_mock(
@@ -222,9 +234,12 @@ def _build_mlflow_mock(
     mock_mlflow.register_model.return_value = mock_version
 
     mock_client = MagicMock()
-    mock_client.get_latest_versions.return_value = (
-        production_versions if production_versions is not None else []
-    )
+    if production_versions:
+        mock_client.get_model_version_by_alias.return_value = production_versions[0]
+    else:
+        mock_client.get_model_version_by_alias.side_effect = MlflowException(
+            "Alias champion not found"
+        )
     mock_mlflow.tracking.MlflowClient.return_value = mock_client
 
     return mock_mlflow
@@ -269,7 +284,7 @@ class TestHealthHappyPath:
             creation_timestamp_ms=1_710_058_921_000,
         )
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = [mock_version]
+        mock_client_instance.get_model_version_by_alias.return_value = mock_version
 
         # Act
         with patch("app.api.main.load_config", return_value=_FAKE_SERVING_CONFIG):
@@ -315,7 +330,9 @@ class TestHealthLagClamping:
         monkeypatch.setattr(serving_module, "_predictions_df", predictions)
 
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = []
+        mock_client_instance.get_model_version_by_alias.side_effect = MlflowException(
+            "Alias champion not found"
+        )
 
         # Act
         with patch("app.api.main.load_config", return_value=_FAKE_SERVING_CONFIG):
@@ -353,7 +370,9 @@ class TestHealthEmptyPredictions:
         monkeypatch.setattr(serving_module, "_predictions_df", empty_df)
 
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = []
+        mock_client_instance.get_model_version_by_alias.side_effect = MlflowException(
+            "Alias champion not found"
+        )
 
         # Act
         with patch("app.api.main.load_config", return_value=_FAKE_SERVING_CONFIG):
@@ -394,7 +413,9 @@ class TestHealthDegraded:
         monkeypatch.setattr(serving_module, "_predictions_df", predictions)
 
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = []
+        mock_client_instance.get_model_version_by_alias.side_effect = MlflowException(
+            "Alias champion not found"
+        )
 
         # Act
         with patch("app.api.main.load_config", return_value=_FAKE_SERVING_CONFIG):
@@ -505,7 +526,7 @@ class TestModelInfoHappyPath:
             tags={"model_test_wape": "0.1823", "wape_lift_pct": "12.4"},
         )
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = [mock_version]
+        mock_client_instance.get_model_version_by_alias.return_value = mock_version
 
         # Act
         with patch("app.api.main.load_config", return_value=_FAKE_SERVING_CONFIG):
@@ -541,7 +562,7 @@ class TestModelInfoHappyPath:
         # Arrange
         mock_version = make_mock_version(version="2", stage="Production", tags={})
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = [mock_version]
+        mock_client_instance.get_model_version_by_alias.return_value = mock_version
 
         # Act
         with patch("app.api.main.load_config", return_value=_FAKE_SERVING_CONFIG):
@@ -568,12 +589,12 @@ class TestModelInfoProductionOnly:
     def test_ac7_model_info_reads_production_stage_only(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """AC-7: get_latest_versions is called with stages=['Production']; Staging/None ignored.
+        """AC-7: get_model_version_by_alias is called with "champion"; Staging/None ignored.
 
-        Arrange: MlflowClient.get_latest_versions returns a Production version.
+        Arrange: MlflowClient.get_model_version_by_alias returns a version.
         Act: GET /model-info.
-        Assert: the call to get_latest_versions passed stages=['Production'] (not all stages),
-                and the response reflects the Production version.
+        Assert: the call to get_model_version_by_alias used alias "champion",
+                and the response reflects that version.
         """
         import app.api.main as serving_module
 
@@ -584,7 +605,7 @@ class TestModelInfoProductionOnly:
             tags={"model_test_wape": "0.20"},
         )
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = [mock_version]
+        mock_client_instance.get_model_version_by_alias.return_value = mock_version
 
         # Act
         with patch("app.api.main.load_config", return_value=_FAKE_SERVING_CONFIG):
@@ -592,17 +613,16 @@ class TestModelInfoProductionOnly:
                 local_client = TestClient(serving_module.app)
                 resp = local_client.get("/model-info")
 
-        # Assert: production version surfaced
+        # Assert: champion version surfaced
         assert resp.status_code == 200
         body = resp.json()
         assert body["model_version"] == "5"
         assert body["stage"] == "Production"
-        # Assert: the client queried exactly the Production stage
-        call_kwargs = mock_client_instance.get_latest_versions.call_args
-        assert call_kwargs is not None
-        _, kwargs = call_kwargs
-        assert "Production" in kwargs.get(
-            "stages", call_kwargs.args[1] if len(call_kwargs.args) > 1 else []
+        # Assert: the client queried the @champion alias
+        call_args = mock_client_instance.get_model_version_by_alias.call_args
+        assert call_args is not None
+        assert (
+            "champion" in call_args.args or call_args.kwargs.get("alias") == "champion"
         )
 
 
@@ -629,7 +649,9 @@ class TestModelInfoNoProduction:
 
         # Arrange
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = []
+        mock_client_instance.get_model_version_by_alias.side_effect = MlflowException(
+            "Alias champion not found"
+        )
 
         # Act
         with patch("app.api.main.load_config", return_value=_FAKE_SERVING_CONFIG):
@@ -691,7 +713,7 @@ class TestHeatmapSimulatedFlag:
     """AC-9: /heatmap top-level envelope includes simulated flag (PBI 25b: dynamic)."""
 
     def test_ac9_heatmap_envelope_contains_simulated_flag(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """AC-9: 'simulated' key is present in the /heatmap response envelope.
 
@@ -733,6 +755,7 @@ class TestHeatmapSimulatedFlag:
         monkeypatch.setattr(
             serving_module, "_generated_at", "2021-03-01T12:00:00+00:00"
         )
+        monkeypatch.setattr(serving_module, "_watermark_root", tmp_path / "wm")
 
         # Act
         local_client = TestClient(serving_module.app)
@@ -755,7 +778,9 @@ class TestHeatmapBackwardsCompatibility:
     """AC-10: all prior /heatmap criteria still hold after PBI-27 changes."""
 
     @pytest.fixture(autouse=True)
-    def _setup_module_state(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def _setup_module_state(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         import app.api.main as serving_module
 
         monkeypatch.setattr(
@@ -792,6 +817,7 @@ class TestHeatmapBackwardsCompatibility:
         monkeypatch.setattr(
             serving_module, "_generated_at", "2021-03-01T12:00:00+00:00"
         )
+        monkeypatch.setattr(serving_module, "_watermark_root", tmp_path / "wm")
 
     def test_ac10_heatmap_existing_criteria_still_pass(
         self, monkeypatch: pytest.MonkeyPatch

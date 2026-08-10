@@ -42,7 +42,8 @@ site/
 mlruns/
 
 # Model artifacts
-models/*.pkl
+models/
+data/models_trained/
 
 # Data
 data/raw/
@@ -102,9 +103,15 @@ data/mlflow.db
 
 # Backup files
 *.bak
+*.bak[0-9]
+*.bak_*
 **/*.bak
+**/*.bak[0-9]
+**/*.bak_*
 *_bak/
 **/*_bak/
+*.bak*/
+**/*.bak*/
 
 # Stale/backup orchestration directories
 orchestration/dags_old/
@@ -122,6 +129,7 @@ wiki/
 almanac/
 docs/
 orchestration_experiment/
+/orchestration_experiment/
 models/
 
 # Top-level scratch files
@@ -131,4 +139,6 @@ user_story_map.html
 *.zip
 *.Zone.Identifier
 *:Zone.Identifier
+*.png.jpg
+*.jpg.png
 store sales project/

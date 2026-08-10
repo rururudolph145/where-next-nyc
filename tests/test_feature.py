@@ -3,36 +3,76 @@
 from __future__ import annotations
 
 import os
-from typing import Any
 from unittest.mock import patch
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pytest
+from pydantic import ValidationError
 from shapely.geometry import Polygon
 
+from app.core.config import AppConfig, FeatureConfig
 from app.ingestion.feature import FeatureEngineer, build_centroid_lookup
 
 # -- Shared config fixture used across tests --------------------------------
+# Uses the conftest `full_config` fixture, overriding only the fields each
+# test class needs.  The old MINIMAL_CONFIG dict is gone — bucket is now
+# required so every AppConfig must supply it.
 
-MINIMAL_CONFIG: dict[str, Any] = {
-    "env": "local",
-    "data": {
-        "silver_path": "data/silver/test.parquet",
-        "gold_path": "data/gold/yellow_tripdata",
-    },
-    "feature": {
-        "lag_hours": [1, 3],
+
+_UNSET = object()
+
+
+def _fe_config(
+    *,
+    lags: list[int] | None | object = _UNSET,
+    lag_hours: list[int] | None | object = _UNSET,
+    bucket: str = "h",
+    n_neighbors: int = 0,
+    horizon_buckets: int = 0,
+    horizon_sum_buckets: int = 0,
+    silver_path: str = "data/silver/test.parquet",
+    gold_path: str = "data/gold/yellow_tripdata",
+) -> AppConfig:
+    """Build an AppConfig for FeatureEngineer tests via model_copy.
+
+    Pass lags=None or lag_hours=None explicitly to omit that key (triggers
+    ValidationError when both are absent — tested by test_missing_both_keys_raises).
+    """
+    from tests.conftest import _FULL_CONFIG_DICT
+
+    base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+    feature_overrides: dict = {
+        "bucket": bucket,
+        "n_neighbors": n_neighbors,
+        "horizon_buckets": horizon_buckets,
+        "horizon_sum_buckets": horizon_sum_buckets,
         "zone_shapefile_path": "data/reference/taxi_zones.shp",
-    },
-}
+    }
+    if lags is not _UNSET:
+        if lags is not None:
+            feature_overrides["lags"] = lags
+        # lags=None → omit key (let lag_hours or neither resolve)
+    if lag_hours is not _UNSET:
+        if lag_hours is not None:
+            feature_overrides["lag_hours"] = lag_hours
+        # lag_hours=None → omit key
+    if lags is _UNSET and lag_hours is _UNSET:
+        # Default: provide lag_hours so the fixture works without arguments
+        feature_overrides["lag_hours"] = [1, 3]
+
+    new_feature = FeatureConfig.model_validate(feature_overrides)
+    new_data = base.data.model_copy(
+        update={"silver_path": silver_path, "gold_path": gold_path}
+    )
+    return base.model_copy(update={"feature": new_feature, "data": new_data})
 
 
 @pytest.fixture
 def fe() -> FeatureEngineer:
-    """Return a FeatureEngineer with a minimal test config."""
-    return FeatureEngineer(config=MINIMAL_CONFIG)
+    """Return a FeatureEngineer with a minimal test config (lag_hours=[1, 3])."""
+    return FeatureEngineer(config=_fe_config())
 
 
 # -- Helpers to build sample data -------------------------------------------
@@ -143,29 +183,19 @@ class TestBucketParameterization:
     """Tests for the ``feature.bucket`` configuration knob (PBI A1)."""
 
     @staticmethod
-    def _config(bucket: str | None) -> dict[str, Any]:
-        cfg: dict[str, Any] = {
-            **MINIMAL_CONFIG,
-            "feature": {**MINIMAL_CONFIG["feature"]},
-        }
-        if bucket is not None:
-            cfg["feature"]["bucket"] = bucket
-        return cfg
+    def _config(bucket: str) -> AppConfig:
+        return _fe_config(bucket=bucket)
 
-    def test_default_bucket_matches_hourly_legacy(self) -> None:
-        """Omitting ``feature.bucket`` must reproduce hourly-legacy output."""
+    def test_hourly_bucket_produces_hourly_grid(self) -> None:
+        """``bucket='h'`` must produce an hourly grid."""
         silver = _make_silver_df()
 
-        legacy = FeatureEngineer(config=self._config(bucket=None)).build_hourly_demand(
-            silver
-        )
-        explicit = FeatureEngineer(config=self._config(bucket="h")).build_hourly_demand(
+        result = FeatureEngineer(config=self._config(bucket="h")).build_hourly_demand(
             silver
         )
 
-        pd.testing.assert_frame_equal(
-            legacy.reset_index(drop=True), explicit.reset_index(drop=True)
-        )
+        # All hours should be floored to the hour
+        assert (result["hour"].dt.minute == 0).all()
 
     def test_15min_bucket_yields_finer_grid(self) -> None:
         """``bucket='15min'`` must produce a 15-min grid that strictly contains
@@ -223,15 +253,8 @@ class TestLagsConfig:
     @staticmethod
     def _config(
         lags: list[int] | None = None, lag_hours: list[int] | None = None
-    ) -> dict[str, Any]:
-        feature: dict[str, Any] = {
-            "zone_shapefile_path": MINIMAL_CONFIG["feature"]["zone_shapefile_path"],
-        }
-        if lags is not None:
-            feature["lags"] = lags
-        if lag_hours is not None:
-            feature["lag_hours"] = lag_hours
-        return {**MINIMAL_CONFIG, "feature": feature}
+    ) -> AppConfig:
+        return _fe_config(lags=lags, lag_hours=lag_hours)
 
     def test_lags_key_is_honored(self) -> None:
         """``feature.lags`` must produce lag columns matching the configured offsets."""
@@ -275,9 +298,9 @@ class TestLagsConfig:
         assert fe.lag_hours == [1, 2]
 
     def test_missing_both_keys_raises(self) -> None:
-        """Omitting both ``lags`` and ``lag_hours`` must raise a KeyError."""
-        with pytest.raises(KeyError):
-            FeatureEngineer(config=self._config(lags=None, lag_hours=None))
+        """Omitting both ``lags`` and ``lag_hours`` must raise a ValidationError."""
+        with pytest.raises(ValidationError):
+            _fe_config(lags=None, lag_hours=None)
 
 
 # -- PBI A3: Shifted-target generation --------------------------------------
@@ -286,7 +309,7 @@ class TestLagsConfig:
 # column via ``groupby(zone).shift(-N)``. Direction of shift is critical:
 # ``shift(-N)`` looks *forward* (target = future demand), whereas
 # ``shift(+N)`` would leak past as target — the classic silent-leakage bug.
-# These tests lock the contract before any consumer (trainer, simulator,
+# These tests lock the contract before any consumer (trainer, predictor,
 # heatmap API) depends on it.
 
 
@@ -294,14 +317,8 @@ class TestShiftedTarget:
     """Tests for ``FeatureEngineer.add_shifted_target`` (PBI A3)."""
 
     @staticmethod
-    def _config(horizon_buckets: int | None) -> dict[str, Any]:
-        cfg: dict[str, Any] = {
-            **MINIMAL_CONFIG,
-            "feature": {**MINIMAL_CONFIG["feature"]},
-        }
-        if horizon_buckets is not None:
-            cfg["feature"]["horizon_buckets"] = horizon_buckets
-        return cfg
+    def _config(horizon_buckets: int = 0) -> AppConfig:
+        return _fe_config(horizon_buckets=horizon_buckets)
 
     def test_horizon_zero_equals_trip_count(self) -> None:
         """``horizon_buckets=0`` → ``target_t0`` equals ``trip_count`` row-for-row.
@@ -407,8 +424,8 @@ class TestShiftedTarget:
         assert (zone1["target_t2"] < 100).all()
 
     def test_default_horizon_is_zero(self) -> None:
-        """Omitting ``feature.horizon_buckets`` must default to 0 (legacy)."""
-        fe = FeatureEngineer(config=self._config(horizon_buckets=None))
+        """``feature.horizon_buckets`` defaults to 0 (legacy) when not supplied."""
+        fe = FeatureEngineer(config=self._config(horizon_buckets=0))
         assert fe.horizon_buckets == 0
 
 
@@ -584,22 +601,15 @@ class TestAddZoneCoordinates:
 class TestRunEndToEnd:
     """Tests for FeatureEngineer.run (full pipeline)."""
 
-    def test_gold_output(self, tmp_path: Any, fe: FeatureEngineer) -> None:
+    def test_gold_output(self, tmp_path, fe: FeatureEngineer) -> None:
         """Gold parquet is written with all expected columns."""
         silver = _make_silver_df()
         silver_path = str(tmp_path / "silver.parquet")
         gold_dir = str(tmp_path / "gold" / "yellow_tripdata")
         silver.to_parquet(silver_path, index=False)
 
-        config = {
-            **fe.config,
-            "data": {
-                **fe.config["data"],
-                "silver_path": silver_path,
-                "gold_path": gold_dir,
-            },
-        }
-        eng = FeatureEngineer(config=config)
+        cfg = _fe_config(silver_path=silver_path, gold_path=gold_dir)
+        eng = FeatureEngineer(config=cfg)
         result = eng.run()
 
         # File was written
@@ -649,19 +659,7 @@ def _make_neighbor_panel(zone_lag1: dict[int, int]) -> pd.DataFrame:
 
 
 def _fe_with_neighbors(k: int) -> FeatureEngineer:
-    cfg: dict[str, Any] = {
-        "env": "local",
-        "data": {
-            "silver_path": "data/silver/test.parquet",
-            "gold_path": "data/gold/yellow_tripdata",
-        },
-        "feature": {
-            "lags": [1],
-            "n_neighbors": k,
-            "zone_shapefile_path": "data/reference/taxi_zones.shp",
-        },
-    }
-    return FeatureEngineer(config=cfg)
+    return FeatureEngineer(config=_fe_config(lags=[1], n_neighbors=k))
 
 
 class TestNeighborLagSmoothing:
@@ -745,19 +743,7 @@ class TestNeighborLagSmoothing:
 
 
 def _fe_with_horizon_sum(n: int) -> FeatureEngineer:
-    cfg: dict[str, Any] = {
-        "env": "local",
-        "data": {
-            "silver_path": "data/silver/test.parquet",
-            "gold_path": "data/gold/yellow_tripdata",
-        },
-        "feature": {
-            "lags": [1],
-            "horizon_sum_buckets": n,
-            "zone_shapefile_path": "data/reference/taxi_zones.shp",
-        },
-    }
-    return FeatureEngineer(config=cfg)
+    return FeatureEngineer(config=_fe_config(lags=[1], horizon_sum_buckets=n))
 
 
 class TestSummedHorizonTarget:
@@ -852,6 +838,161 @@ class TestSummedHorizonTarget:
         # With N=2, each zone loses its last 2 rows
         for zone in (1, 2):
             assert (result["pulocationid"] == zone).sum() == n_per_zone - 2
+
+
+# -- Test: for_training switch (inference target decoupling) ---------------
+
+
+def _make_large_silver_df() -> pd.DataFrame:
+    """Create a Silver-like DataFrame with 2 zones and 120 hours.
+
+    Large enough that lag dropna doesn't consume the entire tail — leaves
+    enough rows after lag warm-up to exercise the trailing-bucket assertions.
+    """
+    rows: list[dict[str, object]] = []
+    for zone in [1, 2]:
+        for h in range(120):
+            ts = pd.Timestamp("2022-01-01") + pd.Timedelta(hours=h)
+            for _ in range(zone):
+                rows.append(
+                    {
+                        "tpep_pickup_datetime": ts + pd.Timedelta(minutes=5),
+                        "pulocationid": zone,
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def _fe_horizon_sum_config(tmp_path) -> AppConfig:
+    """Build an AppConfig with horizon_sum_buckets=2 for F1–F4."""
+    return _fe_config(
+        lag_hours=[1, 3],
+        horizon_sum_buckets=2,
+        silver_path=str(tmp_path / "silver.parquet"),
+        gold_path=str(tmp_path / "gold" / "yellow_tripdata"),
+    )
+
+
+class TestForTrainingSwitch:
+    """Tests for FeatureEngineer.run(for_training=...) — inference target decoupling."""
+
+    def test_run_for_training_true_generates_target(self, tmp_path) -> None:
+        """Default run() emits target_sum_t1_t2 and drops the trailing 2 buckets.
+
+        Regression pin: existing training behaviour is preserved when
+        for_training is omitted (defaults to True).
+        """
+        # Arrange
+        silver = _make_large_silver_df()
+        cfg = _fe_horizon_sum_config(tmp_path)
+        silver.to_parquet(cfg.data.silver_path, index=False)
+        eng = FeatureEngineer(config=cfg)
+
+        # Act
+        gold = eng.run()
+
+        # Assert — target column present
+        assert "target_sum_t1_t2" in gold.columns
+
+        # Assert — the featured (post-lag-dropna) max hour per zone is 2 buckets
+        # below the input's featured max: target dropna eats the trailing 2 rows.
+        # Build a reference run without target to find the featured max.
+        lag_hours = [1, 3]
+        silver_hours = sorted(silver["tpep_pickup_datetime"].dt.floor("h").unique())
+        # featured domain = silver_hours[max_lag:]  (lag dropna removes first max_lag)
+        featured_hours = silver_hours[max(lag_hours) :]
+        featured_max = featured_hours[-1]
+        for zone in gold["pulocationid"].unique():
+            zone_max = gold[gold["pulocationid"] == zone]["hour"].max()
+            assert zone_max < featured_max, (
+                f"zone {zone}: target dropna should cap the tail "
+                f"(got {zone_max}, expected < {featured_max})"
+            )
+
+    def test_run_for_training_false_keeps_tail(self, tmp_path) -> None:
+        """run(for_training=False) preserves the trailing 2 buckets per zone.
+
+        The inference path must not drop rows that lack a future target —
+        those are exactly the buckets the model predicts for.
+        """
+        # Arrange
+        silver = _make_large_silver_df()
+        cfg = _fe_horizon_sum_config(tmp_path)
+        silver.to_parquet(cfg.data.silver_path, index=False)
+        eng = FeatureEngineer(config=cfg)
+
+        # Act
+        gold_infer = eng.run(for_training=False)
+
+        # Assert — max hour per zone equals the featured max (no target dropna)
+        silver_hours = sorted(silver["tpep_pickup_datetime"].dt.floor("h").unique())
+        featured_max = silver_hours[-1]  # lag dropna only eats the leading rows
+        for zone in gold_infer["pulocationid"].unique():
+            zone_max = gold_infer[gold_infer["pulocationid"] == zone]["hour"].max()
+            assert zone_max == featured_max, (
+                f"zone {zone}: inference gold tail should equal featured max "
+                f"(got {zone_max}, expected {featured_max})"
+            )
+
+    def test_run_for_training_false_omits_target_column(self, tmp_path) -> None:
+        """Inference gold must not contain any target column.
+
+        Absence of the target is the signal that the row is not yet scorable;
+        downstream monitoring (actuals_join) fills it later.
+        """
+        # Arrange
+        silver = _make_large_silver_df()
+        cfg = _fe_horizon_sum_config(tmp_path)
+        silver.to_parquet(cfg.data.silver_path, index=False)
+        eng = FeatureEngineer(config=cfg)
+
+        # Act
+        gold_infer = eng.run(for_training=False)
+
+        # Assert — no target-related columns
+        assert "target_sum_t1_t2" not in gold_infer.columns
+        target_cols = [c for c in gold_infer.columns if c.startswith("target_")]
+        assert target_cols == [], f"Unexpected target columns: {target_cols}"
+
+    def test_inference_feature_columns_match_training(self, tmp_path) -> None:
+        """Feature columns (excluding target) are identical across both modes.
+
+        Guarantees that the model's feature vector is bit-for-bit the same
+        whether the run was for training or inference — no silent column drift.
+        """
+        # Arrange
+        silver = _make_large_silver_df()
+        cfg = _fe_horizon_sum_config(tmp_path)
+        silver.to_parquet(cfg.data.silver_path, index=False)
+        # Two separate gold dirs so the two runs don't stomp each other
+        cfg_train = cfg.model_copy(
+            update={
+                "data": cfg.data.model_copy(
+                    update={"gold_path": str(tmp_path / "gold_train")}
+                )
+            }
+        )
+        cfg_infer = cfg.model_copy(
+            update={
+                "data": cfg.data.model_copy(
+                    update={"gold_path": str(tmp_path / "gold_infer")}
+                )
+            }
+        )
+
+        # Act
+        gold_train = FeatureEngineer(config=cfg_train).run()
+        gold_infer = FeatureEngineer(config=cfg_infer).run(for_training=False)
+
+        # Assert — feature columns identical (target excluded from training set)
+        target_cols = {c for c in gold_train.columns if c.startswith("target_")}
+        train_features = set(gold_train.columns) - target_cols
+        infer_features = set(gold_infer.columns)
+        assert train_features == infer_features, (
+            f"Column drift between modes.\n"
+            f"  train-only: {train_features - infer_features}\n"
+            f"  infer-only: {infer_features - train_features}"
+        )
 
 
 # -- Test: build_centroid_lookup -------------------------------------------

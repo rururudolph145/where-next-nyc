@@ -27,6 +27,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from app.core.config import AppConfig
 from app.ingestion.feature import FeatureEngineer
 from app.training.trainer import Trainer
 
@@ -106,79 +107,109 @@ def _patch_zone_coordinates(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _legacy_config(tmp_path: Any) -> dict[str, Any]:
+def _legacy_config(tmp_path: Any) -> AppConfig:
     """Config for the current/legacy pipeline (bucket=h, horizon=0)."""
-    return {
-        "env": "local",
-        "data": {
-            "silver_path": str(tmp_path / "silver.parquet"),
-            "gold_path": str(tmp_path / "gold"),
-        },
-        "feature": {
-            "bucket": "h",
-            "lags": [1, 2, 3, 24],
-            "horizon_buckets": 0,
-            "zone_shapefile_path": "unused-when-patched",
-        },
-        "model": {
-            "name": "LGBMRegressor",
-            "params": {
-                "n_estimators": 20,
-                "learning_rate": 0.1,
-                "num_leaves": 7,
-                "random_state": 42,
-                "verbosity": -1,
-            },
-            "store_path": str(tmp_path / "models"),
-        },
-        "train": {
-            "split_ratios": [0.8, 0.1, 0.1],
-            "features": [
-                "hour_of_day_sin",
-                "hour_of_day_cos",
-                "day_of_week_sin",
-                "day_of_week_cos",
-                "month_sin",
-                "month_cos",
-                "pickup_longitude",
-                "pickup_latitude",
-                "trip_count_lag_1",
-                "trip_count_lag_2",
-                "trip_count_lag_3",
-                "trip_count_lag_24",
-            ],
-            "target": "trip_count",
-        },
-        "mlflow": {
-            "experiment_name": "e2e_synthetic",
-            "tracking_uri": str(tmp_path / "mlruns"),
-        },
-    }
+    from tests.conftest import _FULL_CONFIG_DICT
+
+    base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+    from app.core.config import FeatureConfig, TrainConfig, TrainGateConfig
+
+    return base.model_copy(
+        update={
+            "data": base.data.model_copy(
+                update={
+                    "silver_path": str(tmp_path / "silver.parquet"),
+                    "gold_path": str(tmp_path / "gold"),
+                }
+            ),
+            "feature": FeatureConfig.model_validate(
+                {
+                    "bucket": "h",
+                    "lags": [1, 2, 3, 24],
+                    "horizon_buckets": 0,
+                    "zone_shapefile_path": "unused-when-patched",
+                }
+            ),
+            "model": base.model.model_copy(
+                update={
+                    "params": {
+                        "n_estimators": 20,
+                        "learning_rate": 0.1,
+                        "num_leaves": 7,
+                        "random_state": 42,
+                        "verbosity": -1,
+                    },
+                    "store_path": str(tmp_path / "models"),
+                }
+            ),
+            "train": TrainConfig(
+                window_days=base.train.window_days,
+                gate=TrainGateConfig(),
+                split_ratios=[0.8, 0.1, 0.1],
+                features=[
+                    "hour_of_day_sin",
+                    "hour_of_day_cos",
+                    "day_of_week_sin",
+                    "day_of_week_cos",
+                    "month_sin",
+                    "month_cos",
+                    "pickup_longitude",
+                    "pickup_latitude",
+                    "trip_count_lag_1",
+                    "trip_count_lag_2",
+                    "trip_count_lag_3",
+                    "trip_count_lag_24",
+                ],
+                target="trip_count",
+            ),
+            "mlflow": base.mlflow.model_copy(
+                update={
+                    "experiment_name": "e2e_synthetic",
+                    "tracking_uri": str(tmp_path / "mlruns"),
+                }
+            ),
+        }
+    )
 
 
-def _b1_config(tmp_path: Any) -> dict[str, Any]:
+def _b1_config(tmp_path: Any) -> AppConfig:
     """Config for the B1 nowcast pipeline (bucket=30min + neighbor smoothing)."""
-    cfg = _legacy_config(tmp_path)
-    cfg["feature"]["bucket"] = "30min"
-    # Lag schedule rescaled to 30-min buckets: 30min, 1h, 2h, 1d
-    cfg["feature"]["lags"] = [1, 2, 4, 48]
-    cfg["feature"]["n_neighbors"] = 2  # only 3 zones in the fixture; k=2 is the max
-    cfg["train"]["features"] = [
-        "hour_of_day_sin",
-        "hour_of_day_cos",
-        "day_of_week_sin",
-        "day_of_week_cos",
-        "month_sin",
-        "month_cos",
-        "pickup_longitude",
-        "pickup_latitude",
-        "trip_count_lag_1",
-        "trip_count_lag_2",
-        "trip_count_lag_4",
-        "trip_count_lag_48",
-        "trip_count_lag_1_neighbor_mean",
-    ]
-    return cfg
+    from app.core.config import FeatureConfig, TrainConfig, TrainGateConfig
+
+    base = _legacy_config(tmp_path)
+    return base.model_copy(
+        update={
+            "feature": FeatureConfig.model_validate(
+                {
+                    "bucket": "30min",
+                    "lags": [1, 2, 4, 48],
+                    "n_neighbors": 2,
+                    "zone_shapefile_path": "unused-when-patched",
+                }
+            ),
+            "train": TrainConfig(
+                window_days=base.train.window_days,
+                gate=TrainGateConfig(),
+                split_ratios=base.train.split_ratios,
+                features=[
+                    "hour_of_day_sin",
+                    "hour_of_day_cos",
+                    "day_of_week_sin",
+                    "day_of_week_cos",
+                    "month_sin",
+                    "month_cos",
+                    "pickup_longitude",
+                    "pickup_latitude",
+                    "trip_count_lag_1",
+                    "trip_count_lag_2",
+                    "trip_count_lag_4",
+                    "trip_count_lag_48",
+                    "trip_count_lag_1_neighbor_mean",
+                ],
+                target="trip_count",
+            ),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -186,16 +217,14 @@ def _b1_config(tmp_path: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _run_feature_engineering(
-    config: dict[str, Any], silver: pd.DataFrame
-) -> pd.DataFrame:
+def _run_feature_engineering(config: AppConfig, silver: pd.DataFrame) -> pd.DataFrame:
     """Run Silver → Gold without writing to disk (we ignore the parquet emit)."""
     fe = FeatureEngineer(config=config)
     # FeatureEngineer.run writes to gold_path; that path is tmp here so it's harmless.
     return fe.run(data=silver)
 
 
-def _train_no_mlflow(config: dict[str, Any], gold: pd.DataFrame) -> dict[str, Any]:
+def _train_no_mlflow(config: AppConfig, gold: pd.DataFrame) -> dict[str, Any]:
     """Train without MLflow logging — avoids global tracking URI side effects.
 
     Mirrors the structure of ``Trainer.run`` but skips the MLflow block so the
@@ -279,37 +308,51 @@ def test_b1_pipeline_smoke(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> No
 # ---------------------------------------------------------------------------
 
 
-def _b2_config(tmp_path: Any) -> dict[str, Any]:
+def _b2_config(tmp_path: Any) -> AppConfig:
     """Config for the B2 extended-nowcast pipeline.
 
     15-min bucket + horizon_sum_buckets=2 → target = demand over the next
     30 min as a sum of two future 15-min bins. Keeps B1's neighbour
     smoothing.
     """
-    cfg = _legacy_config(tmp_path)
-    cfg["feature"]["bucket"] = "15min"
-    # Lag schedule in 15-min buckets: 15min, 30min, 1h, 2h, 1d
-    cfg["feature"]["lags"] = [1, 2, 4, 8, 96]
-    cfg["feature"]["horizon_sum_buckets"] = 2  # 2 × 15min = 30min lookahead
-    cfg["feature"]["n_neighbors"] = 2
-    cfg["train"]["features"] = [
-        "hour_of_day_sin",
-        "hour_of_day_cos",
-        "day_of_week_sin",
-        "day_of_week_cos",
-        "month_sin",
-        "month_cos",
-        "pickup_longitude",
-        "pickup_latitude",
-        "trip_count_lag_1",
-        "trip_count_lag_2",
-        "trip_count_lag_4",
-        "trip_count_lag_8",
-        "trip_count_lag_96",
-        "trip_count_lag_1_neighbor_mean",
-    ]
-    cfg["train"]["target"] = "target_sum_t1_t2"
-    return cfg
+    from app.core.config import FeatureConfig, TrainConfig, TrainGateConfig
+
+    base = _legacy_config(tmp_path)
+    return base.model_copy(
+        update={
+            "feature": FeatureConfig.model_validate(
+                {
+                    "bucket": "15min",
+                    "lags": [1, 2, 4, 8, 96],
+                    "horizon_sum_buckets": 2,
+                    "n_neighbors": 2,
+                    "zone_shapefile_path": "unused-when-patched",
+                }
+            ),
+            "train": TrainConfig(
+                window_days=base.train.window_days,
+                gate=TrainGateConfig(),
+                split_ratios=base.train.split_ratios,
+                features=[
+                    "hour_of_day_sin",
+                    "hour_of_day_cos",
+                    "day_of_week_sin",
+                    "day_of_week_cos",
+                    "month_sin",
+                    "month_cos",
+                    "pickup_longitude",
+                    "pickup_latitude",
+                    "trip_count_lag_1",
+                    "trip_count_lag_2",
+                    "trip_count_lag_4",
+                    "trip_count_lag_8",
+                    "trip_count_lag_96",
+                    "trip_count_lag_1_neighbor_mean",
+                ],
+                target="target_sum_t1_t2",
+            ),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -371,8 +414,8 @@ def test_no_target_leakage(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> No
     silver = _make_synthetic_silver(n_days=10)
     gold = _run_feature_engineering(config, silver)
 
-    target = config["train"]["target"]
-    features = config["train"]["features"]
+    target = config.train.target
+    features = config.train.features
 
     # (a) Target name must not appear in the feature list
     assert target not in features, (
@@ -385,9 +428,9 @@ def test_no_target_leakage(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> No
     for feat in features:
         if feat not in gold.columns:
             continue
-        if not np.issubdtype(gold[feat].dtype, np.number):
+        if not np.issubdtype(gold[feat].dtype, np.number):  # type: ignore[arg-type]
             continue
-        if not np.issubdtype(gold[target].dtype, np.number):
+        if not np.issubdtype(gold[target].dtype, np.number):  # type: ignore[arg-type]
             continue
         # Compare elementwise; require at least one row of disagreement
         # (rules out f === target leak; tolerates incidental matches).
