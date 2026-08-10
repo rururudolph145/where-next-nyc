@@ -37,7 +37,10 @@ from mlflow.tracking import MlflowClient  # type: ignore[import-not-found]
 
 try:
     from orchestration.lib.container_paths import container_paths
-    from orchestration.lib.feature_helpers import build_feature_config, run_feature
+    from orchestration.lib.feature_helpers import (
+        build_feature_config,
+        run_feature_train,
+    )
     from orchestration.lib.training_helpers import (
         build_train_config,
         check_window_ready,
@@ -47,7 +50,7 @@ try:
     )
 except ImportError:
     from container_paths import container_paths  # type: ignore[import-not-found,no-redef]
-    from feature_helpers import build_feature_config, run_feature  # type: ignore[import-not-found,no-redef]
+    from feature_helpers import build_feature_config, run_feature_train  # type: ignore[import-not-found,no-redef]
     from training_helpers import (  # type: ignore[import-not-found,no-redef]
         build_train_config,
         check_window_ready,
@@ -126,7 +129,7 @@ def _feature(**context: object) -> None:
         shapefile_path=paths["shapefile"],
         model_root=paths["models"],
     )
-    run_feature(paths["bronze"], config=feature_config, for_training=True)
+    run_feature_train(paths["bronze"], config=feature_config)
     logger.info("feature(train): gold written to %s", train_gold_root)
 
 

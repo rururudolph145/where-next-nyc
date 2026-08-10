@@ -11,8 +11,11 @@ import os
 from typing import Any
 
 import joblib  # type: ignore[import-untyped]
+import mlflow
+import mlflow.sklearn
 import numpy as np
 import pandas as pd
+from mlflow.exceptions import MlflowException
 
 from app.core.config import load_config
 from app.core.metrics import evaluate as _evaluate
@@ -46,6 +49,12 @@ class Predictor:
             "output_path", "data/predictions/demand_predictions.parquet"
         )
 
+        mlflow_cfg: dict[str, Any] = self.config.get("mlflow", {})
+        self.tracking_uri: str = mlflow_cfg.get("tracking_uri", "sqlite:///mlflow.db")
+        self.registry_model_name: str = mlflow_cfg.get(
+            "model_name", "ny_taxi_demand_model"
+        )
+
         self.model: Any = None
 
     # ------------------------------------------------------------------
@@ -53,17 +62,37 @@ class Predictor:
     # ------------------------------------------------------------------
 
     def load_model(self) -> Any:
-        """Load the trained model from the configured store path.
+        """Load the trained model — registry primary, disk fallback.
+
+        Tries the @champion alias in the MLflow registry first.  Falls back to
+        ``<store_path>/model.pkl`` only when the registry raises
+        ``MlflowException`` (alias absent, registry unreachable, etc.).
+        A bare ``Exception`` from FS or attribute errors is NOT caught here so
+        genuine bugs surface immediately.
 
         Returns:
             The deserialized model object.
 
         Raises:
-            FileNotFoundError: If the model file does not exist.
+            FileNotFoundError: If the registry is unavailable AND the model
+                file does not exist at the fallback disk path.
         """
+        mlflow.set_tracking_uri(self.tracking_uri)
+        champion_uri = f"models:/{self.registry_model_name}@champion"
+        try:
+            self.model = mlflow.sklearn.load_model(champion_uri)
+            return self.model
+        except MlflowException:
+            logger.warning(
+                "Registry @champion unavailable; falling back to disk: %s",
+                self.store_path,
+            )
+
         model_path = os.path.join(self.store_path, "model.pkl")
         if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model not found at {model_path}")
+            raise FileNotFoundError(
+                f"Model not found at registry ({champion_uri}) or disk ({model_path})"
+            )
         self.model = joblib.load(model_path)
         return self.model
 

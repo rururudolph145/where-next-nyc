@@ -43,6 +43,7 @@ import pytest
 from orchestration.lib.feature_helpers import (
     build_feature_config,
     run_feature,
+    run_feature_train,
 )
 
 # ---------------------------------------------------------------------------
@@ -314,3 +315,111 @@ class TestRunFeature:
 
         # Assert
         mock_engineer.return_value.run.assert_called_once_with(for_training=True)
+
+
+# ---------------------------------------------------------------------------
+# TestRunFeatureTrain
+# ---------------------------------------------------------------------------
+
+
+class TestRunFeatureTrain:
+    """run_feature_train fits IQR bounds from data, saves them, then delegates to run_feature."""
+
+    @pytest.fixture
+    def _patched(self) -> Any:
+        """Common patch context for run_feature_train tests."""
+        return {
+            "DataCleaner": "orchestration.lib.feature_helpers.DataCleaner",
+            "FeatureEngineer": "orchestration.lib.feature_helpers.FeatureEngineer",
+            "open": "orchestration.lib.feature_helpers.open",
+            "json": "orchestration.lib.feature_helpers.json",
+            "makedirs": "orchestration.lib.feature_helpers.os.makedirs",
+        }
+
+    def test_fits_bounds_by_calling_cleaner_clean_without_iqr_bounds(
+        self, override_config: dict[str, Any]
+    ) -> None:
+        """DataCleaner.clean() is called without iqr_bounds so bounds are fitted fresh."""
+        # Arrange
+        with (
+            patch("orchestration.lib.feature_helpers.DataCleaner") as mock_cleaner_cls,
+            patch("orchestration.lib.feature_helpers.FeatureEngineer"),
+            patch("orchestration.lib.feature_helpers.json"),
+            patch("orchestration.lib.feature_helpers.open", mock_open()),
+            patch("orchestration.lib.feature_helpers.os.makedirs"),
+        ):
+            cleaner = mock_cleaner_cls.return_value
+            cleaner.clean.return_value = ("CLEANED_DF", IQR_BOUNDS)
+
+            # Act
+            run_feature_train(BRONZE_PATH, config=override_config)
+
+        # Assert — clean called with no iqr_bounds kwarg (fit mode)
+        cleaner.clean.assert_called_once_with(cleaner.load_bronze.return_value)
+
+    def test_saves_fitted_bounds_to_model_store_path(
+        self, override_config: dict[str, Any]
+    ) -> None:
+        """Fitted IQR bounds are written to model.store_path/iqr_bounds.json."""
+        # Arrange
+        m = mock_open()
+        with (
+            patch("orchestration.lib.feature_helpers.DataCleaner") as mock_cleaner_cls,
+            patch("orchestration.lib.feature_helpers.FeatureEngineer"),
+            patch("orchestration.lib.feature_helpers.open", m),
+            patch("orchestration.lib.feature_helpers.json") as mock_json,
+            patch("orchestration.lib.feature_helpers.os.makedirs"),
+        ):
+            cleaner = mock_cleaner_cls.return_value
+            cleaner.clean.return_value = ("CLEANED_DF", IQR_BOUNDS)
+
+            # Act
+            run_feature_train(BRONZE_PATH, config=override_config)
+
+        # Assert — opened bounds file for writing at the correct path
+        opened_path = m.call_args[0][0]
+        assert opened_path == f"{MODEL_ROOT}/iqr_bounds.json"
+        mock_json.dump.assert_called_once_with(
+            IQR_BOUNDS, m.return_value.__enter__.return_value, indent=2
+        )
+
+    def test_runs_engineer_with_for_training_true(
+        self, override_config: dict[str, Any]
+    ) -> None:
+        """FeatureEngineer.run(for_training=True) is called after cleaning."""
+        # Arrange
+        with (
+            patch("orchestration.lib.feature_helpers.DataCleaner") as mock_cleaner_cls,
+            patch("orchestration.lib.feature_helpers.FeatureEngineer") as mock_engineer,
+            patch("orchestration.lib.feature_helpers.open", mock_open()),
+            patch("orchestration.lib.feature_helpers.json"),
+            patch("orchestration.lib.feature_helpers.os.makedirs"),
+        ):
+            cleaner = mock_cleaner_cls.return_value
+            cleaner.clean.return_value = ("CLEANED_DF", IQR_BOUNDS)
+
+            # Act
+            run_feature_train(BRONZE_PATH, config=override_config)
+
+        # Assert
+        mock_engineer.assert_called_once_with(config=override_config)
+        mock_engineer.return_value.run.assert_called_once_with(for_training=True)
+
+    def test_returns_bronze_path(self, override_config: dict[str, Any]) -> None:
+        """Stable XCom contract: bronze path is returned unchanged."""
+        # Arrange
+        with (
+            patch("orchestration.lib.feature_helpers.DataCleaner") as mock_cleaner_cls,
+            patch("orchestration.lib.feature_helpers.FeatureEngineer"),
+            patch("orchestration.lib.feature_helpers.open", mock_open()),
+            patch("orchestration.lib.feature_helpers.json"),
+            patch("orchestration.lib.feature_helpers.os.makedirs"),
+        ):
+            cleaner = mock_cleaner_cls.return_value
+            cleaner.clean.return_value = ("CLEANED_DF", IQR_BOUNDS)
+
+            # Act
+            result = run_feature_train(BRONZE_PATH, config=override_config)
+
+        # Assert
+        assert result == BRONZE_PATH

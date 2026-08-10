@@ -6,6 +6,7 @@ the 50-line guideline and to allow independent unit testing.
 
 from __future__ import annotations
 
+from mlflow.exceptions import MlflowException
 from mlflow.tracking import MlflowClient
 
 from app.core.metrics import compute_wape_lift
@@ -18,14 +19,14 @@ def apply_gate(
     challenger_wape: float,
     min_lift_pct: float,
 ) -> tuple[str, str | None]:
-    """Evaluate a challenger model against the current Production champion.
+    """Evaluate a challenger model against the current @champion alias.
 
     Decision tree:
-    - No Production version exists → auto-promote (first-ever or all prior rejected).
+    - No @champion alias exists → auto-promote (first-ever or all prior rejected).
     - Champion tag ``model_test_wape`` missing or ``'nan'`` → reject with reason
       ``champion_wape_unavailable``.
-    - Challenger lift >= *min_lift_pct* → promote challenger; archive champion.
-    - Otherwise → reject with a descriptive reason string.
+    - Challenger lift >= *min_lift_pct* → set @champion alias to new_version.
+    - Otherwise → leave @champion alias untouched; return rejected.
 
     The caller is responsible for:
     - Setting ``model_test_wape`` on *new_version* before calling this function.
@@ -45,18 +46,16 @@ def apply_gate(
         ``"promoted"`` or ``"rejected"`` and *rejection_reason* is a non-empty
         string on rejection, ``None`` on promotion.
     """
-    production_versions = client.get_latest_versions(model_name, stages=["Production"])
+    try:
+        champion = client.get_model_version_by_alias(model_name, "champion")
+    except MlflowException:
+        champion = None
 
-    if not production_versions:
+    if champion is None:
         # First-ever run or all prior versions rejected — auto-promote.
-        client.transition_model_version_stage(
-            name=model_name,
-            version=new_version,
-            stage="Production",
-        )
+        client.set_registered_model_alias(model_name, "champion", new_version)
         return ("promoted", None)
 
-    champion = production_versions[0]
     raw_tag = champion.tags.get("model_test_wape")
 
     if raw_tag is None or raw_tag == "nan":
@@ -66,16 +65,7 @@ def apply_gate(
     lift = compute_wape_lift(champion_wape, challenger_wape)
 
     if lift >= min_lift_pct:
-        client.transition_model_version_stage(
-            name=model_name,
-            version=new_version,
-            stage="Production",
-        )
-        client.transition_model_version_stage(
-            name=model_name,
-            version=champion.version,
-            stage="Archived",
-        )
+        client.set_registered_model_alias(model_name, "champion", new_version)
         return ("promoted", None)
 
     reason = f"wape_lift_{lift:.2f}_below_threshold_{min_lift_pct}"

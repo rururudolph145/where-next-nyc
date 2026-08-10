@@ -89,6 +89,7 @@ train:
   target: target_sum_t1_t2   # PBI B2: 30-min lookahead = sum of next two 15-min bins
 
 model:
+  # name: "RandomForestRegressor" is also valid with no code change (PBI 37 Step 3)
   name: LGBMRegressor
   params:
     n_estimators: 500

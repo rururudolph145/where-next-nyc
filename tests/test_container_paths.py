@@ -79,6 +79,35 @@ class TestContainerPaths:
         assert result["raw"] == "/custom/mount/data/raw/yellow_tripdata"
         assert result["watermark"] == "/custom/mount/data/watermarks/refresh_15min"
 
+    def test_models_path_under_prefix(self) -> None:
+        """container_paths(cfg)['models'] starts with /opt/airflow (PBI 37 Step 7)."""
+        # Arrange / Act
+        result = container_paths(_CONFIG)
+
+        # Assert
+        assert result["models"].startswith("/opt/airflow")
+
+    @pytest.mark.integration
+    def test_train_infer_model_paths_agree(self) -> None:
+        """build_train_config and build_predict_config yield equal model.store_path (PBI 37 Step 7)."""
+        from app.core.config import load_config
+        from orchestration.lib.predict_helpers import build_predict_config
+        from orchestration.lib.training_helpers import build_train_config
+
+        base_cfg = load_config()
+        paths = container_paths(base_cfg)
+        model_root = paths["models"]
+
+        train_cfg = build_train_config(base_cfg, model_root=model_root)
+        predict_cfg = build_predict_config(
+            base_cfg,
+            gold_root=paths["gold"],
+            model_root=model_root,
+            predictions_path=paths["predictions"],
+        )
+
+        assert train_cfg["model"]["store_path"] == predict_cfg["model"]["store_path"]
+
     def test_leading_slash_in_config_path_raises_or_warns(self) -> None:
         """A leading slash in a config path would silently drop the prefix.
 

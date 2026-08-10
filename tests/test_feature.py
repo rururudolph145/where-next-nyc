@@ -286,7 +286,7 @@ class TestLagsConfig:
 # column via ``groupby(zone).shift(-N)``. Direction of shift is critical:
 # ``shift(-N)`` looks *forward* (target = future demand), whereas
 # ``shift(+N)`` would leak past as target — the classic silent-leakage bug.
-# These tests lock the contract before any consumer (trainer, simulator,
+# These tests lock the contract before any consumer (trainer, predictor,
 # heatmap API) depends on it.
 
 

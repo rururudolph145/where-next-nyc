@@ -321,15 +321,14 @@ async def get_health() -> dict[str, Any]:
             # watermark or missing seed_start rather than 500.
             data_publication_lag_days = None
 
-    # Look up Production model version from registry; degrade gracefully on error.
+    # Look up @champion alias version from registry; degrade gracefully on error.
     model_version: str | None = None
     status = "degraded"
     try:
         client = MlflowClient()
-        versions = client.get_latest_versions(_model_name, stages=["Production"])
-        if versions:
-            model_version = versions[0].version
-            status = "ok"
+        champion_mv = client.get_model_version_by_alias(_model_name, "champion")
+        model_version = champion_mv.version
+        status = "ok"
     except Exception:  # noqa: BLE001
         pass
 
@@ -372,10 +371,7 @@ async def get_model_info() -> dict[str, Any]:
 
     try:
         client = MlflowClient()
-        versions = client.get_latest_versions(_model_name, stages=["Production"])
-        if not versions:
-            return _null_response
-        v = versions[0]
+        v = client.get_model_version_by_alias(_model_name, "champion")
     except Exception:  # noqa: BLE001
         return _null_response
 

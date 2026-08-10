@@ -44,6 +44,33 @@ def build_feature_config(
     return config
 
 
+def run_feature_train(
+    bronze_path: str,
+    *,
+    config: dict[str, Any],
+) -> str:
+    """Fit IQR bounds from bronze, save them, then delegate to run_feature.
+
+    Training-only path: DataCleaner.clean() is called without pre-fitted bounds
+    so bounds are inferred from the training window. The fitted bounds are
+    persisted to model.store_path/iqr_bounds.json so subsequent inference runs
+    can load them via run_feature (transform-only).
+    """
+    cleaner = DataCleaner(config)
+    raw = cleaner.load_bronze()
+    cleaned, bounds = cleaner.clean(raw)
+
+    store_path: str = config["model"]["store_path"]
+    os.makedirs(store_path, exist_ok=True)
+    bounds_path = os.path.join(store_path, "iqr_bounds.json")
+    with open(bounds_path, "w") as f:
+        json.dump(bounds, f, indent=2)
+
+    cleaner.save_silver(cleaned)
+    FeatureEngineer(config=config).run(for_training=True)
+    return bronze_path
+
+
 def run_feature(
     bronze_path: str,
     *,

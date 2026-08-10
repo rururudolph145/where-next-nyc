@@ -41,6 +41,8 @@ import pandas as pd
 import pytest
 import yaml
 
+from mlflow.exceptions import MlflowException
+
 from app.training.trainer import Trainer
 
 
@@ -212,9 +214,12 @@ def _build_mlflow_mock(
 
     # MlflowClient instance returned via mlflow.tracking.MlflowClient()
     mock_client = MagicMock()
-    mock_client.get_latest_versions.return_value = (
-        production_versions if production_versions is not None else []
-    )
+    if production_versions:
+        mock_client.get_model_version_by_alias.return_value = production_versions[0]
+    else:
+        mock_client.get_model_version_by_alias.side_effect = MlflowException(
+            "Alias champion not found"
+        )
     mock_mlflow.tracking.MlflowClient.return_value = mock_client
 
     return mock_mlflow

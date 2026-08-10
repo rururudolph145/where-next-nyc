@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
+from mlflow.exceptions import MlflowException
 
 from tests.conftest import make_mock_version
 
@@ -818,7 +819,7 @@ class TestHealthEndpoint:
 
         mock_version = make_mock_version(version="3")
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = [mock_version]
+        mock_client_instance.get_model_version_by_alias.return_value = mock_version
 
         with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
             with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
@@ -858,8 +859,12 @@ class TestHealthEndpoint:
         )
         monkeypatch.setattr(serving_module, "_predictions_df", predictions)
 
+        from mlflow.exceptions import MlflowException
+
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = []
+        mock_client_instance.get_model_version_by_alias.side_effect = MlflowException(
+            "Alias champion not found"
+        )
 
         with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
             with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
@@ -950,7 +955,9 @@ class TestHealthEndpoint:
         monkeypatch.setattr(serving_module, "_predictions_df", empty_df)
 
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = []
+        mock_client_instance.get_model_version_by_alias.side_effect = MlflowException(
+            "Alias champion not found"
+        )
 
         with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
             with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
@@ -984,7 +991,9 @@ class TestHealthEndpoint:
         monkeypatch.setattr(serving_module, "_predictions_df", predictions)
 
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = []
+        mock_client_instance.get_model_version_by_alias.side_effect = MlflowException(
+            "Alias champion not found"
+        )
 
         with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
             with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
@@ -1023,7 +1032,7 @@ class TestModelInfoEndpoint:
             tags={"model_test_wape": "0.1823", "wape_lift_pct": "12.4"},
         )
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = [mock_version]
+        mock_client_instance.get_model_version_by_alias.return_value = mock_version
 
         with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
             with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
@@ -1052,7 +1061,9 @@ class TestModelInfoEndpoint:
         import app.api.main as serving_module
 
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = []
+        mock_client_instance.get_model_version_by_alias.side_effect = MlflowException(
+            "Alias champion not found"
+        )
 
         with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
             with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
@@ -1085,7 +1096,7 @@ class TestModelInfoEndpoint:
             tags={},  # no tags
         )
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = [mock_version]
+        mock_client_instance.get_model_version_by_alias.return_value = mock_version
 
         with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
             with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
@@ -1097,6 +1108,71 @@ class TestModelInfoEndpoint:
         assert body["status"] == "ok"
         assert body["model_test_wape"] is None
         assert body["wape_lift_pct"] is None
+
+
+# ---------------------------------------------------------------------------
+# PBI 37 Step 6 — /health and /model-info use alias API (RED → GREEN)
+# ---------------------------------------------------------------------------
+
+
+class TestHealthAliasAPI:
+    """PBI 37 Step 6: /health and /model-info use get_model_version_by_alias."""
+
+    def test_health_calls_alias_not_stage_api(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GET /health: get_model_version_by_alias called; get_latest_versions NOT called (PBI 37 Step 6 RED)."""
+        import app.api.main as serving_module
+
+        monkeypatch.delenv("DEMO_MODE", raising=False)
+        predictions = pd.DataFrame(
+            {
+                "pulocationid": [1],
+                "hour": pd.to_datetime(["2021-03-01 00:00:00"]),
+                "predicted_trip_count": [10.0],
+                "actual_trip_count": [9.0],
+            }
+        )
+        monkeypatch.setattr(serving_module, "_predictions_df", predictions)
+
+        mock_version = make_mock_version(version="5")
+        mock_client_instance = MagicMock()
+        mock_client_instance.get_model_version_by_alias.return_value = mock_version
+
+        with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
+            with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
+                local_client = TestClient(serving_module.app)
+                resp = local_client.get("/health")
+
+        assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+        assert body["model_version"] == "5"
+        mock_client_instance.get_model_version_by_alias.assert_called_once()
+        mock_client_instance.get_latest_versions.assert_not_called()
+
+    def test_model_info_calls_alias_not_stage_api(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GET /model-info: get_model_version_by_alias called; get_latest_versions NOT called (PBI 37 Step 6 RED)."""
+        import app.api.main as serving_module
+
+        mock_version = make_mock_version(
+            version="5", tags={"model_test_wape": "12.5", "wape_lift_pct": "3.1"}
+        )
+        mock_client_instance = MagicMock()
+        mock_client_instance.get_model_version_by_alias.return_value = mock_version
+
+        with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
+            with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
+                local_client = TestClient(serving_module.app)
+                resp = local_client.get("/model-info")
+
+        assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+        assert body["status"] == "ok"
+        assert body["model_version"] == "5"
+        mock_client_instance.get_model_version_by_alias.assert_called_once()
+        mock_client_instance.get_latest_versions.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

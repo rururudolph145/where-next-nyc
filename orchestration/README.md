@@ -130,6 +130,29 @@ safe to re-trigger later.
 Re-triggering after a promote or reject is a no-op until the inference
 watermark advances another 30 sim-days.
 
+## Container MLflow Setup
+
+Before the **first container training run**, you must delete any host-created
+`data/mlflow.db` file:
+
+```bash
+rm -f data/mlflow.db
+```
+
+A `mlflow.db` created on the host bakes the host absolute path into the
+`experiments.artifact_location` column (e.g. `/home/<user>/.../mlruns/1`).
+That path is unreachable inside the container (`/opt/airflow/…`), so MLflow
+can track the run but cannot find the artifact — causing `mlflow.sklearn.load_model`
+and `/model-info` to degrade silently.
+
+Deleting the file lets the container create a fresh SQLite DB on startup with
+the container-relative `artifact_location`. The `model.pkl` on disk is
+unaffected (it is outside the DB).
+
+**Recovery**: if the training DAG completes but `/model-info` returns
+`"status": "no_production_model"`, suspect a stale host `mlflow.db`. Stop
+the stack, `rm -f data/mlflow.db`, restart, and re-trigger.
+
 ## AIRFLOW_UID
 
 The `orchestration/.env.example` template sets `AIRFLOW_UID=1000`. Check your

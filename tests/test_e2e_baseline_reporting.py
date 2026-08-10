@@ -523,11 +523,10 @@ class TestAC6MetricsConsolidation:
     """
 
     def test_ac6_all_three_delegates_share_core_evaluate_results(self) -> None:
-        """Trainer.evaluate, Predictor.evaluate, and HourlySimulator.compute_metrics
-        all produce the same dict as app.core.metrics.evaluate for identical input."""
+        """Trainer.evaluate and Predictor.evaluate both produce the same dict
+        as app.core.metrics.evaluate for identical input."""
         from app.core.metrics import evaluate as core_evaluate
         from app.inference.predictor import Predictor
-        from app.inference.simulator import HourlySimulator
         from app.training.trainer import Trainer as _Trainer
 
         y_true_series = pd.Series([10.0, 20.0, 30.0, 0.0])
@@ -537,28 +536,21 @@ class TestAC6MetricsConsolidation:
         core_result = core_evaluate(y_true_series, y_pred_arr)
         trainer_result = _Trainer.evaluate(y_true_series, y_pred_arr)
         predictor_result = Predictor.evaluate(y_true_series, y_pred_arr)
-        simulator_result = HourlySimulator.compute_metrics(
-            y_true_series.to_numpy(), y_pred_arr
-        )
 
-        # Assert — all four must be identical dicts
+        # Assert — all three must be identical dicts
         assert trainer_result == core_result, (
             "Trainer.evaluate diverged from core evaluate"
         )
         assert predictor_result == core_result, (
             "Predictor.evaluate diverged from core evaluate"
         )
-        assert simulator_result == core_result, (
-            "HourlySimulator.compute_metrics diverged from core evaluate"
-        )
 
     def test_ac6_no_duplicate_evaluate_implementations(self) -> None:
-        """Confirm that Trainer, Predictor, and HourlySimulator do NOT define
-        their own metric arithmetic — they delegate to app.core.metrics."""
+        """Confirm that Trainer and Predictor do NOT define their own metric
+        arithmetic — they delegate to app.core.metrics."""
         import inspect
 
         from app.inference.predictor import Predictor
-        from app.inference.simulator import HourlySimulator
         from app.training.trainer import Trainer as _Trainer
 
         # Inspect source of each wrapper; none should contain 'np.mean' or 'np.abs'
@@ -566,7 +558,6 @@ class TestAC6MetricsConsolidation:
         for cls, method_name in [
             (_Trainer, "evaluate"),
             (Predictor, "evaluate"),
-            (HourlySimulator, "compute_metrics"),
         ]:
             src = inspect.getsource(getattr(cls, method_name))
             assert "np.mean" not in src, (

@@ -14,6 +14,8 @@ import mlflow
 import numpy as np
 import pandas as pd
 from lightgbm import LGBMRegressor
+from sklearn.base import RegressorMixin  # type: ignore[import-untyped]
+from sklearn.ensemble import RandomForestRegressor  # type: ignore[import-untyped]
 
 from app.core.config import load_config
 from app.core.metrics import compute_recall_at_k, compute_wape_lift, evaluate
@@ -25,8 +27,9 @@ from app.training.registry_gate import apply_gate
 # mypy --strict's implicit-reexport check.
 __all__ = ["MODELS", "Trainer", "mlflow"]
 
-MODELS: dict[str, type[LGBMRegressor]] = {
+MODELS: dict[str, type[RegressorMixin]] = {
     "LGBMRegressor": LGBMRegressor,
+    "RandomForestRegressor": RandomForestRegressor,
 }
 
 
@@ -46,7 +49,7 @@ class Trainer:
         self.model_name: str = model_cfg["name"]
         self.model_params: dict[str, Any] = model_cfg.get("params", {})
         self.store_path: str = model_cfg["store_path"]
-        self.model: LGBMRegressor = MODELS[self.model_name](**self.model_params)
+        self.model: RegressorMixin = MODELS[self.model_name](**self.model_params)
 
         train_cfg: dict[str, Any] = self.config["train"]
         self.features: list[str] = train_cfg["features"]
@@ -323,7 +326,16 @@ class Trainer:
             if recall_at_3 is not None:
                 mlflow.log_metric("recall_at_3", recall_at_3)
 
-            mlflow.lightgbm.log_model(self.model, artifact_path="model")
+            mlflow.sklearn.log_model(
+                self.model,
+                artifact_path="model",
+                skops_trusted_types=[
+                    "lightgbm.basic.Booster",
+                    "lightgbm.sklearn.LGBMRegressor",
+                    "sklearn.ensemble._forest.RandomForestRegressor",
+                    "collections.OrderedDict",
+                ],
+            )
 
             # Register model in MLflow Model Registry.
             run_id = active_run.info.run_id
@@ -355,19 +367,24 @@ class Trainer:
                     self.min_wape_lift_pct,
                 )
             else:
-                # No baseline — check whether an incumbent exists.
-                production_versions = client.get_latest_versions(
-                    self.registry_model_name, stages=["Production"]
-                )
-                if production_versions:
+                # No baseline — check whether an incumbent alias exists.
+                from mlflow.exceptions import MlflowException as _MlflowException
+
+                try:
+                    client.get_model_version_by_alias(
+                        self.registry_model_name, "champion"
+                    )
+                    incumbent_exists = True
+                except _MlflowException:
+                    incumbent_exists = False
+
+                if incumbent_exists:
                     gate_result = "rejected"
                     rejection_reason = "no_baseline_for_comparison"
                 else:
-                    # First-ever run without baseline — auto-promote.
-                    client.transition_model_version_stage(
-                        name=self.registry_model_name,
-                        version=new_version,
-                        stage="Production",
+                    # First-ever run without baseline — auto-promote via alias.
+                    client.set_registered_model_alias(
+                        self.registry_model_name, "champion", new_version
                     )
                     gate_result = "promoted"
                     rejection_reason = None
