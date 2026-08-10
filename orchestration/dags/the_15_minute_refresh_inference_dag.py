@@ -42,6 +42,7 @@ from app.core.watermark import next_window, read_watermark, write_watermark
 
 try:
     from orchestration.lib.boundary_helpers import is_dataset_exhausted
+    from orchestration.lib.container_paths import container_paths
     from orchestration.lib.feature_helpers import build_feature_config, run_feature
     from orchestration.lib.ingest_helpers import build_ingest_config, run_ingest
     from orchestration.lib.log_predict_helpers import run_log_predict
@@ -49,6 +50,7 @@ try:
     from orchestration.lib.validate_helpers import build_validate_config, run_validate
 except ImportError:
     from boundary_helpers import is_dataset_exhausted  # type: ignore[import-not-found,no-redef]
+    from container_paths import container_paths  # type: ignore[import-not-found,no-redef]
     from feature_helpers import build_feature_config, run_feature  # type: ignore[import-not-found,no-redef]
     from ingest_helpers import build_ingest_config, run_ingest  # type: ignore[import-not-found,no-redef]
     from log_predict_helpers import run_log_predict  # type: ignore[import-not-found,no-redef]
@@ -61,22 +63,10 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
+# _WATERMARK_ROOT: pure module-level literal — used by _read_watermark /
+# _write_watermark as a Path argument. Tasks derive all other paths at
+# execution time via container_paths(config).
 _WATERMARK_ROOT = Path("/opt/airflow/data/watermarks/refresh_15min")
-
-# Dataset ceiling. Hardcoded per the design brainstorm — deriving from
-# end_year_month="2021-03" yields 23:59:59 (2 s too late), which caused
-# two overrun runs before stopping. One deterministic constant.
-DATASET_MAX = datetime(2021, 3, 31, 23, 59, 57)
-
-RAW_ROOT = "/opt/airflow/data/raw/yellow_tripdata"
-BRONZE_ROOT = "/opt/airflow/data/bronze/yellow_tripdata/bronze.parquet"
-SILVER_ROOT = "/opt/airflow/data/silver/yellow_tripdata_cleaned.parquet"
-GOLD_ROOT = "/opt/airflow/data/gold/yellow_tripdata"
-SHAPEFILE_PATH = "/opt/airflow/data/reference/taxi_zones.shp"
-MODEL_ROOT = "/opt/airflow/data/models"
-PREDICTIONS_PATH = "/opt/airflow/data/predictions/demand_predictions.parquet"
-PREDICT_MODEL_ROOT = "/opt/airflow/data/models_trained"
-MONITORING_ROOT = "/opt/airflow/data/monitoring/predictions"
 
 
 # ---------------------------------------------------------------------------
@@ -91,10 +81,11 @@ def _read_watermark(**context: object) -> dict[str, str]:
     task-execution time (not module-import time -- avoids DAG-parse latency).
     """
     config = load_config()
-    seed_start = datetime.fromisoformat(config["ingest"]["seed_start"])
-    duration = pd.Timedelta(config["ingest"]["slice_duration"]).to_pytimedelta()
+    paths = container_paths(config)
+    seed_start = datetime.fromisoformat(config.ingest.seed_start)
+    duration = pd.Timedelta(config.ingest.slice_duration).to_pytimedelta()
 
-    position = read_watermark(_WATERMARK_ROOT) or seed_start
+    position = read_watermark(Path(paths["watermark"])) or seed_start
     start, end = next_window(position, duration)
     window = {"window_start": start.isoformat(), "window_end": end.isoformat()}
     logger.info("read_watermark: %s", window)
@@ -106,11 +97,13 @@ def _check_no_new_data(**context: object) -> None:
     ti = context["ti"]  # type: ignore[index]
     window: dict[str, str] = ti.xcom_pull(task_ids="read_watermark")  # type: ignore[attr-defined]
     window_start = datetime.fromisoformat(window["window_start"])
-    if is_dataset_exhausted(window_start, dataset_max=DATASET_MAX):
+    config = load_config()
+    dataset_max = datetime.fromisoformat(config.ingest.dataset_max)
+    if is_dataset_exhausted(window_start, dataset_max=dataset_max):
         logger.info(
-            "check_no_new_data: window_start=%s >= DATASET_MAX=%s -- skipping run",
+            "check_no_new_data: window_start=%s >= dataset_max=%s -- skipping run",
             window_start,
-            DATASET_MAX,
+            dataset_max,
         )
         raise AirflowSkipException("no new data / dataset boundary reached")
     logger.info("check_no_new_data: window_start=%s -- continuing", window_start)
@@ -122,10 +115,13 @@ def _ingest(**context: object) -> str:
     window: dict[str, str] = ti.xcom_pull(task_ids="read_watermark")  # type: ignore[attr-defined]
     window_end = datetime.fromisoformat(window["window_end"])
     config = load_config()
-    seed_start = datetime.fromisoformat(config["ingest"]["seed_start"])
+    paths = container_paths(config)
+    seed_start = datetime.fromisoformat(config.ingest.seed_start)
 
     ingest_config = build_ingest_config(
-        config, raw_root=RAW_ROOT, bronze_root=BRONZE_ROOT
+        config,
+        raw_root=paths["raw"],
+        bronze_root=paths["bronze"],
     )
     bronze_path = run_ingest(window_end, seed_start=seed_start, config=ingest_config)
     logger.info(
@@ -138,8 +134,10 @@ def _validate(**context: object) -> None:
     """Validate bronze schema; hold the watermark if it fails."""
     ti = context["ti"]  # type: ignore[index]
     bronze_path: str = ti.xcom_pull(task_ids="ingest")  # type: ignore[attr-defined]
-    config = build_validate_config(load_config(), silver_root=SILVER_ROOT)
-    run_validate(bronze_path, config=config)
+    config = load_config()
+    paths = container_paths(config)
+    validate_config = build_validate_config(config, silver_root=paths["silver"])
+    run_validate(bronze_path, config=validate_config)
     logger.info("validate: OK for %s", bronze_path)
 
 
@@ -147,14 +145,16 @@ def _feature(**context: object) -> None:
     """Run DataCleaner (bronze->silver) then FeatureEngineer (silver->gold)."""
     ti = context["ti"]  # type: ignore[index]
     bronze_path: str = ti.xcom_pull(task_ids="ingest")  # type: ignore[attr-defined]
-    config = build_feature_config(
-        load_config(),
-        silver_root=SILVER_ROOT,
-        gold_root=GOLD_ROOT,
-        shapefile_path=SHAPEFILE_PATH,
-        model_root=MODEL_ROOT,
+    config = load_config()
+    paths = container_paths(config)
+    feature_config = build_feature_config(
+        config,
+        silver_root=paths["silver"],
+        gold_root=paths["gold"],
+        shapefile_path=paths["shapefile"],
+        model_root=paths["models"],
     )
-    run_feature(bronze_path, config=config)
+    run_feature(bronze_path, config=feature_config)
     logger.info("feature: silver+gold materialized for %s", bronze_path)
 
 
@@ -167,20 +167,24 @@ def _predict(**context: object) -> str | None:
     ti = context["ti"]  # type: ignore[index]
     window: dict[str, str] = ti.xcom_pull(task_ids="read_watermark")  # type: ignore[attr-defined]
     since = datetime.fromisoformat(window["window_start"])
-    config = build_predict_config(
-        load_config(),
-        gold_root=GOLD_ROOT,
-        model_root=PREDICT_MODEL_ROOT,
-        predictions_path=PREDICTIONS_PATH,
+    config = load_config()
+    paths = container_paths(config)
+    predict_config = build_predict_config(
+        config,
+        gold_root=paths["gold"],
+        model_root=paths["models"],
+        predictions_path=paths["predictions"],
     )
-    output_path = run_predict(config=config, since=since)
+    output_path = run_predict(config=predict_config, since=since)
     logger.info("predict: wrote predictions -> %s", output_path)
     return output_path
 
 
 def _log_predict(**context: object) -> None:
     """Reshape predictions parquet and write monitoring log."""
-    result = run_log_predict(PREDICTIONS_PATH, monitoring_root=MONITORING_ROOT)
+    config = load_config()
+    paths = container_paths(config)
+    result = run_log_predict(paths["predictions"], monitoring_root=paths["monitoring"])
     logger.info("log_predict: %s", result or "skipped (empty predictions)")
 
 
@@ -193,7 +197,9 @@ def _write_watermark(**context: object) -> None:
     ti = context["ti"]  # type: ignore[index]
     window: dict[str, str] = ti.xcom_pull(task_ids="read_watermark")  # type: ignore[attr-defined]
     window_end = datetime.fromisoformat(window["window_end"])
-    write_watermark(_WATERMARK_ROOT, window_end)
+    config = load_config()
+    paths = container_paths(config)
+    write_watermark(Path(paths["watermark"]), window_end)
     logger.info("write_watermark: %s", window_end)
 
 

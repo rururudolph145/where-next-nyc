@@ -1,34 +1,40 @@
-python = .venv/bin/python
-pip = .venv/bin/pip
+# NYC Taxi Demand Forecasting — Makefile
+#
+# One-liner ergonomics for the two things a reviewer actually types:
+#   1. Quality gates before pushing (make check)
+#   2. The mode-2 demo path (make airflow-up / make demo / make demo-tick)
+#
+# Everything else here is a thin wrapper over `uv run …` or `docker compose …`.
+
+# --- Dev environment ---------------------------------------------------------
 
 setup:
-	python3 -m venv .venv
-	$(.venv/bin/python) -m pip install --upgrade pip
-	$(pip) install -r requirements.txt
+	uv sync
 
-run:
-	$(python) -m pipeline.run_all
+# --- Quality gates (mirror scripts/ci-*.sh) ----------------------------------
 
-mlflow:
-	.venv/bin/mlflow ui
+lint:
+	uv run ruff check .
+
+format:
+	uv run ruff format .
+
+format-check:
+	uv run ruff format --check .
+
+typecheck:
+	uv run mypy app tests
 
 test:
-	$(python) -m pytest
+	uv run pytest
 
-clean:
-	rm -rf steps/__pycache__
-	rm -rf __pycache__
-	rm -rf .pytest_cache
-	rm -rf tests/__pycache__
+# Aggregate: runs the same four gates CI enforces. Pre-push shortcut.
+check: lint format-check typecheck test
 
-remove:
-	rm -rf .venv
-	rm -rf mlruns
+# --- Orchestration (Airflow container stack) ---------------------------------
+# Bootstrap once: `cp orchestration/.env.example orchestration/.env`
+# then `make airflow-init`. See orchestration/README.md.
 
-# --- Orchestration (PBI 25a) -------------------------------------------------
-# Container-only Airflow. Bootstrap with `cp orchestration/.env.example orchestration/.env`
-# before running `make airflow-init`. See orchestration/README.md.
-#
 COMPOSE_FILES = -f orchestration/docker-compose.yaml
 
 airflow-init:
@@ -40,18 +46,17 @@ airflow-up:
 airflow-down:
 	docker compose $(COMPOSE_FILES) down
 
-# --- Demo (PBI 25b) -----------------------------------------------------------
-# Two demo entrypoints:
-#   make demo       -- Static demo. Starts FastAPI serving cached predictions.
-#   make demo-tick  -- Fire one DAG run against a running Airflow stack.
+# --- Demo --------------------------------------------------------------------
+# Two entrypoints:
+#   make demo       -- FastAPI serving cached predictions on :8000
+#   make demo-tick  -- Fire one DAG run to advance the sim watermark 15 min
 #
-# Live cadence: `make airflow-up` then repeat `make demo-tick` to walk
-# the 2021 timeline one 15-minute slice per trigger.
-#
-# Teardown: make demo-stop  (stops FastAPI and the Airflow stack).
+# Live cadence: `make airflow-up`, then repeat `make demo-tick` to walk
+# the 2021 timeline. To replay from seed use `make reset-watermark` first.
+# Teardown: `make demo-stop`.
 
 demo:
-	@echo "[demo] Static demo -- serving cached predictions"
+	@echo "[demo] Static demo -- serving cached predictions on :8000"
 	uv run uvicorn app.api.main:app --host 0.0.0.0 --port 8000
 
 demo-tick:
@@ -61,4 +66,24 @@ demo-tick:
 demo-stop:
 	docker compose $(COMPOSE_FILES) down
 
-.PHONY: setup run mlflow test clean remove airflow-init airflow-up airflow-down demo demo-tick demo-stop
+# --- Reset -------------------------------------------------------------------
+# Kept separate on purpose. reset-mlflow nukes registry metadata baked with
+# a host-absolute artifact_location -- opt in deliberately, not as a side
+# effect of a generic `reset`.
+
+reset-watermark:
+	rm -f data/watermarks/refresh_15min/.current_watermark
+
+reset-mlflow:
+	rm -f data/mlflow.db
+
+# --- Clean -------------------------------------------------------------------
+
+clean:
+	find . -type d -name __pycache__ -not -path './.venv/*' -prune -exec rm -rf {} +
+	rm -rf .pytest_cache .mypy_cache .ruff_cache
+
+.PHONY: setup lint format format-check typecheck test check \
+        airflow-init airflow-up airflow-down \
+        demo demo-tick demo-stop \
+        reset-watermark reset-mlflow clean

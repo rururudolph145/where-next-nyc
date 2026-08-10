@@ -1,19 +1,19 @@
-"""Tests for orchestration_experiment/dags/exp04_predict.py.
+"""Tests for orchestration/lib/predict_helpers.py.
 
 PBI EXP-04 (predict + log) — the pure predict helper the DAG delegates to.
 Inserts a ``predict`` task between ``feature`` and ``log_predict``.
 
 Two seams keep this unit-testable:
 
-  * ``build_predict_config`` — deep-overrides ``data.gold_path``,
+  * ``build_predict_config`` — overrides ``data.gold_path``,
     ``model.store_path``, and ``inference.output_path`` to point at the
-    experiment roots. The base config is never mutated.
+    experiment roots. The base config is never mutated (frozen model).
   * ``run_predict`` — constructs ``Predictor(config=config)``, calls ``.run()``,
     and returns the ``output_path`` string from the response.
 
 AC coverage:
   - build_predict_config overrides the three experiment paths
-  - build_predict_config does not mutate the base config (deep copy)
+  - build_predict_config does not mutate the base config (frozen model → new object)
   - build_predict_config preserves unrelated keys
   - run_predict constructs Predictor with the injected config and calls run()
   - run_predict returns the output_path from the Predictor response
@@ -21,13 +21,15 @@ AC coverage:
 
 from __future__ import annotations
 
-import copy
+from datetime import datetime
 from typing import Any
 from unittest.mock import patch
 
+import pandas as pd
 import pytest
 
-from predict_helpers import (  # type: ignore[import-not-found]
+from app.core.config import AppConfig
+from orchestration.lib.predict_helpers import (
     build_predict_config,
     run_predict,
 )
@@ -42,25 +44,11 @@ PREDICTIONS_PATH = "/opt/airflow/data_exp/predictions/demand_predictions.parquet
 
 
 @pytest.fixture
-def base_config() -> dict[str, Any]:
-    """Minimal config mirroring the shape Predictor reads."""
-    return {
-        "env": "experiment",
-        "data": {
-            "bronze_path": "data/bronze/yellow_tripdata/bronze.parquet",
-            "silver_path": "data/silver/yellow_tripdata_cleaned.parquet",
-            "gold_path": "data/gold/yellow_tripdata",
-        },
-        "model": {"store_path": "models/"},
-        "train": {
-            "features": ["trip_count_lag1"],
-            "target": "target_sum_t1_t2",
-        },
-        "inference": {
-            "output_path": "data/predictions/demand_predictions.parquet",
-            "simulation": {"start_hour": "2021-03-01 00:00:00"},
-        },
-    }
+def base_config() -> AppConfig:
+    """AppConfig mirroring the shape Predictor reads."""
+    from tests.conftest import _FULL_CONFIG_DICT
+
+    return AppConfig.model_validate(_FULL_CONFIG_DICT)
 
 
 # ---------------------------------------------------------------------------
@@ -72,12 +60,9 @@ class TestBuildPredictConfig:
     """build_predict_config injects the isolated paths (the seam)."""
 
     def test_overrides_paths_without_mutating_base(
-        self, base_config: dict[str, Any]
+        self, base_config: AppConfig
     ) -> None:
-        """AC: overrides three paths AND base config is unchanged (deep-copy contract)."""
-        # Arrange
-        snapshot = copy.deepcopy(base_config)
-
+        """AC: overrides three paths AND base config is unchanged (frozen model)."""
         # Act
         result = build_predict_config(
             base_config,
@@ -87,13 +72,13 @@ class TestBuildPredictConfig:
         )
 
         # Assert — overrides applied
-        assert result["data"]["gold_path"] == GOLD_ROOT
-        assert result["model"]["store_path"] == MODEL_ROOT
-        assert result["inference"]["output_path"] == PREDICTIONS_PATH
-        # Assert — base not mutated
-        assert base_config == snapshot
+        assert result.data.gold_path == GOLD_ROOT
+        assert result.model.store_path == MODEL_ROOT
+        assert result.inference.output_path == PREDICTIONS_PATH
+        # Assert — base not mutated (new object)
+        assert result is not base_config
 
-    def test_preserves_unrelated_keys(self, base_config: dict[str, Any]) -> None:
+    def test_preserves_unrelated_keys(self, base_config: AppConfig) -> None:
         """Only the redirected keys change; everything else passes through."""
         # Act
         result = build_predict_config(
@@ -104,12 +89,12 @@ class TestBuildPredictConfig:
         )
 
         # Assert
-        assert result["data"]["bronze_path"] == base_config["data"]["bronze_path"]
-        assert result["train"]["features"] == base_config["train"]["features"]
-        assert result["train"]["target"] == base_config["train"]["target"]
+        assert result.data.bronze_path == base_config.data.bronze_path
+        assert result.train.features == base_config.train.features
+        assert result.train.target == base_config.train.target
         assert (
-            result["inference"]["simulation"]["start_hour"]
-            == base_config["inference"]["simulation"]["start_hour"]
+            result.inference.simulation.start_hour
+            == base_config.inference.simulation.start_hour
         )
 
 
@@ -122,11 +107,9 @@ class TestRunPredict:
     """run_predict wires Predictor with the override config."""
 
     def test_calls_predictor_with_config_and_returns_output_path(
-        self, base_config: dict[str, Any], tmp_path: Any
+        self, base_config: AppConfig, tmp_path: Any
     ) -> None:
         """AC: Predictor constructed with config=cfg, .run() called, returns output_path."""
-        import pandas as pd
-
         # Arrange — write a non-empty gold file so the empty-gold guard does not fire
         gold_dir = tmp_path / "gold"
         gold_dir.mkdir()
@@ -145,7 +128,7 @@ class TestRunPredict:
             "n_predictions": 10,
         }
 
-        with patch("predict_helpers.Predictor") as mock_predictor_cls:
+        with patch("orchestration.lib.predict_helpers.Predictor") as mock_predictor_cls:
             mock_predictor_cls.return_value.run.return_value = fake_response
 
             # Act
@@ -158,12 +141,9 @@ class TestRunPredict:
         assert result == PREDICTIONS_PATH
 
     def test_run_predict_passes_since_through(
-        self, base_config: dict[str, Any], tmp_path: Any
+        self, base_config: AppConfig, tmp_path: Any
     ) -> None:
         """run_predict forwards since= kwarg to Predictor.run(since=...)."""
-        import pandas as pd
-        from datetime import datetime
-
         # Arrange
         gold_dir = tmp_path / "gold"
         gold_dir.mkdir()
@@ -183,7 +163,7 @@ class TestRunPredict:
             "n_predictions": 5,
         }
 
-        with patch("predict_helpers.Predictor") as mock_predictor_cls:
+        with patch("orchestration.lib.predict_helpers.Predictor") as mock_predictor_cls:
             mock_predictor_cls.return_value.run.return_value = fake_response
 
             # Act
@@ -193,7 +173,7 @@ class TestRunPredict:
         mock_predictor_cls.return_value.run.assert_called_once_with(since=since_ts)
 
     def test_run_predict_returns_none_when_gold_is_empty(
-        self, base_config: dict[str, Any], tmp_path: Any
+        self, base_config: AppConfig, tmp_path: Any
     ) -> None:
         """run_predict returns None (no crash) when gold has 0 rows.
 
@@ -201,8 +181,6 @@ class TestRunPredict:
         (no 28-day lookback history yet). Crashing here stops the watermark
         from advancing and leaves the pipeline stuck.
         """
-        import pandas as pd
-
         cfg = build_predict_config(
             base_config,
             gold_root=str(tmp_path),
@@ -216,7 +194,7 @@ class TestRunPredict:
         )
         empty_gold.to_parquet(tmp_path / "hourly_demand_featured.parquet", index=False)
 
-        with patch("predict_helpers.Predictor") as mock_predictor_cls:
+        with patch("orchestration.lib.predict_helpers.Predictor") as mock_predictor_cls:
             mock_predictor_cls.return_value.load_gold.return_value = empty_gold
 
             # Act — must not raise, must not call Predictor at all

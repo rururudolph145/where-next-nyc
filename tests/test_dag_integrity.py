@@ -30,7 +30,7 @@ _ALLOWED_PY_FILES = {
 }
 
 # Paths required for `make demo-tick` to succeed end-to-end.
-_MODEL_PKL = REPO_ROOT / "data" / "models_trained" / "model.pkl"
+_MODEL_PKL = REPO_ROOT / "data" / "models" / "model.pkl"
 _IQR_BOUNDS = REPO_ROOT / "data" / "models" / "iqr_bounds.json"
 
 
@@ -45,12 +45,11 @@ class TestDemoTickPreconditions:
     """
 
     def test_model_pkl_exists(self) -> None:
-        """data/models_trained/model.pkl must be present for the predict task."""
+        """data/models/model.pkl must be present for the predict task."""
         # Arrange / Act / Assert
         assert _MODEL_PKL.exists(), (
             f"Missing {_MODEL_PKL}. "
-            "Copy from mlruns/1/models/m-9a3a980ff2264b9b924f5424792b6117/"
-            "artifacts/model.pkl"
+            "Copy from data/models_trained/model.pkl or trigger train_monthly_dag."
         )
 
     def test_model_pkl_is_valid_joblib(self) -> None:

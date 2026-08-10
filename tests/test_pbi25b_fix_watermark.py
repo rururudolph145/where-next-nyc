@@ -24,11 +24,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
 import pytest
 
+from app.core.config import AppConfig
 from app.core.watermark import (
     _WATERMARK_FILE,
     read_watermark,
@@ -91,19 +91,21 @@ def two_bucket_raw_tree(tmp_path: Path) -> Path:
     return raw_root
 
 
-def _ingest_config(raw_root: Path, bronze_path: Path) -> dict[str, Any]:
-    """Build an Ingestion config pointing at the temp raw / bronze paths."""
-    return {
-        "data": {
-            "raw_path": str(raw_root),
-            "bronze_path": str(bronze_path),
-        },
-        "ingest": {
-            "start_year_month": "2021-01",
-            "end_year_month": "2021-01",
-            "bronze_schema": _bronze_schema(),
-        },
-    }
+def _ingest_config(raw_root: Path, bronze_path: Path) -> AppConfig:
+    """Build an AppConfig pointing at the temp raw / bronze paths."""
+    from tests.conftest import _FULL_CONFIG_DICT
+
+    base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+    return base.model_copy(
+        update={
+            "data": base.data.model_copy(
+                update={
+                    "raw_path": str(raw_root),
+                    "bronze_path": str(bronze_path),
+                }
+            ),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -332,19 +334,21 @@ class TestSliceDurationGuard:
     ) -> None:
         """slice_duration != feature.bucket raises AssertionError."""
         # Arrange
-        config: dict[str, Any] = {
-            "data": {
-                "raw_path": str(tmp_path / "raw"),
-                "bronze_path": str(tmp_path / "bronze.parquet"),
-            },
-            "ingest": {
-                "start_year_month": "2021-01",
-                "end_year_month": "2021-01",
-                "bronze_schema": _bronze_schema(),
-                "slice_duration": "30min",
-            },
-            "feature": {"bucket": "15min"},
-        }
+        from tests.conftest import _FULL_CONFIG_DICT
+
+        base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+        config = base.model_copy(
+            update={
+                "data": base.data.model_copy(
+                    update={
+                        "raw_path": str(tmp_path / "raw"),
+                        "bronze_path": str(tmp_path / "bronze.parquet"),
+                    }
+                ),
+                "ingest": base.ingest.model_copy(update={"slice_duration": "30min"}),
+                "feature": base.feature.model_copy(update={"bucket": "15min"}),
+            }
+        )
 
         # Act / Assert
         with pytest.raises(AssertionError, match="must equal"):
@@ -355,19 +359,21 @@ class TestSliceDurationGuard:
     ) -> None:
         """slice_duration == feature.bucket constructs without error."""
         # Arrange
-        config: dict[str, Any] = {
-            "data": {
-                "raw_path": str(tmp_path / "raw"),
-                "bronze_path": str(tmp_path / "bronze.parquet"),
-            },
-            "ingest": {
-                "start_year_month": "2021-01",
-                "end_year_month": "2021-01",
-                "bronze_schema": _bronze_schema(),
-                "slice_duration": "15min",
-            },
-            "feature": {"bucket": "15min"},
-        }
+        from tests.conftest import _FULL_CONFIG_DICT
+
+        base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+        config = base.model_copy(
+            update={
+                "data": base.data.model_copy(
+                    update={
+                        "raw_path": str(tmp_path / "raw"),
+                        "bronze_path": str(tmp_path / "bronze.parquet"),
+                    }
+                ),
+                "ingest": base.ingest.model_copy(update={"slice_duration": "15min"}),
+                "feature": base.feature.model_copy(update={"bucket": "15min"}),
+            }
+        )
 
         # Act — should not raise
         ingestion = Ingestion(config=config)

@@ -42,7 +42,8 @@ site/
 mlruns/
 
 # Model artifacts
-models/*.pkl
+models/
+data/models_trained/
 
 # Data
 data/raw/

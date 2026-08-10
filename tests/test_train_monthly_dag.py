@@ -23,13 +23,14 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
 
-import training_helpers as th  # type: ignore[import-not-found]
+import orchestration.lib.training_helpers as th
+
+from app.core.config import AppConfig
 
 SEED_START = "2021-01-18T00:00:00"
 SEED_DT = datetime(2021, 1, 18, 0, 0, 0)
@@ -44,13 +45,10 @@ def _write_wm(root: Path, dt: datetime) -> None:
 
 
 @pytest.fixture
-def base_config() -> dict[str, Any]:
-    return {
-        "ingest": {"seed_start": SEED_START},
-        "data": {"gold_path": "data/gold/yellow_tripdata"},
-        "mlflow": {"model_name": MODEL_NAME, "tracking_uri": "sqlite:///mlflow.db"},
-        "train": {"gate": {"min_wape_lift_pct": 2.0}},
-    }
+def base_config() -> AppConfig:
+    from tests.conftest import _FULL_CONFIG_DICT
+
+    return AppConfig.model_validate(_FULL_CONFIG_DICT)
 
 
 class TestWatermarkPlumbing:
@@ -64,7 +62,7 @@ class TestWatermarkPlumbing:
         assert issubclass(th.EmptyTrainingWindowError, Exception)
 
     def test_bootstrap_falls_back_to_seed_start(
-        self, tmp_path: Path, base_config: dict[str, Any]
+        self, tmp_path: Path, base_config: AppConfig
     ) -> None:
         """No last_training file → last_training_wm resolves to seed_start."""
         # Arrange
@@ -79,7 +77,7 @@ class TestWatermarkPlumbing:
         assert result["last_training_wm"] == SEED_DT.isoformat()
 
     def test_bootstrap_flag_true_when_file_absent(
-        self, tmp_path: Path, base_config: dict[str, Any]
+        self, tmp_path: Path, base_config: AppConfig
     ) -> None:
         """is_bootstrap is True when the last_training watermark is absent."""
         # Arrange
@@ -93,7 +91,7 @@ class TestWatermarkPlumbing:
         assert result["is_bootstrap"] is True
 
     def test_bootstrap_flag_false_when_file_present(
-        self, tmp_path: Path, base_config: dict[str, Any]
+        self, tmp_path: Path, base_config: AppConfig
     ) -> None:
         """is_bootstrap is False once a last_training watermark exists."""
         # Arrange
@@ -110,7 +108,7 @@ class TestWatermarkPlumbing:
         assert result["last_training_wm"] == (SEED_DT + timedelta(days=30)).isoformat()
 
     def test_missing_refresh_watermark_raises(
-        self, tmp_path: Path, base_config: dict[str, Any]
+        self, tmp_path: Path, base_config: AppConfig
     ) -> None:
         """Absent refresh watermark is invalid: training-before-inference."""
         # Arrange / Act / Assert
@@ -136,11 +134,8 @@ class TestWatermarkPlumbing:
         last = SEED_DT
         refresh = SEED_DT + timedelta(days=30)
 
-        # Act
-        result = th.check_window_ready(refresh, last)
-
-        # Assert
-        assert result is None
+        # Act / Assert — should return without raising
+        th.check_window_ready(refresh, last)
 
     def test_check_window_ready_raises_when_refresh_behind_training(self) -> None:
         """refresh < last_training is impossible under normal op → fail loud."""
@@ -397,12 +392,13 @@ class TestDagStructure:
         assert "monthly" in dag.tags
 
     def test_task_chain_is_linear(self, dag) -> None:  # type: ignore[no-untyped-def]
-        """Five tasks in the expected linear order."""
+        """Six tasks in the expected linear order."""
         # Arrange
         expected_tasks = {
             "read_watermarks",
             "check_window_ready",
             "compute_window",
+            "feature",
             "train",
             "write_training_watermark",
         }
@@ -416,6 +412,150 @@ class TestDagStructure:
         task_map = {t.task_id: t for t in dag.tasks}
         assert task_map["read_watermarks"].downstream_task_ids == {"check_window_ready"}
         assert task_map["check_window_ready"].downstream_task_ids == {"compute_window"}
-        assert task_map["compute_window"].downstream_task_ids == {"train"}
+        assert task_map["compute_window"].downstream_task_ids == {"feature"}
+        assert task_map["feature"].downstream_task_ids == {"train"}
         assert task_map["train"].downstream_task_ids == {"write_training_watermark"}
         assert task_map["write_training_watermark"].downstream_task_ids == set()
+
+
+class TestTrainDagFeatureTask:
+    """_feature task calls run_feature with for_training=True into a train-gold path."""
+
+    def test_feature_callable_calls_run_feature_with_for_training_true(self) -> None:
+        """_feature() passes for_training=True to run_feature."""
+        # Arrange
+        pytest.importorskip("airflow")
+        from unittest.mock import patch, MagicMock
+
+        from orchestration.dags.train_monthly_dag import _feature
+
+        ti_mock = MagicMock()
+        ti_mock.xcom_pull.return_value = (
+            "/opt/airflow/data/bronze/yellow_tripdata/bronze.parquet"
+        )
+        context = {"ti": ti_mock}
+
+        with patch(
+            "orchestration.dags.train_monthly_dag.run_feature"
+        ) as mock_run_feature:
+            mock_run_feature.return_value = ti_mock.xcom_pull.return_value
+            # Act
+            _feature(**context)
+
+        # Assert — for_training=True was passed
+        _, kwargs = mock_run_feature.call_args
+        assert kwargs.get("for_training") is True
+
+    def test_feature_callable_uses_train_gold_path(self) -> None:
+        """_feature() writes to a train-specific gold path, not inference gold."""
+        # Arrange
+        pytest.importorskip("airflow")
+        from unittest.mock import patch, MagicMock
+
+        from orchestration.dags.train_monthly_dag import _feature
+
+        ti_mock = MagicMock()
+        ti_mock.xcom_pull.return_value = (
+            "/opt/airflow/data/bronze/yellow_tripdata/bronze.parquet"
+        )
+        context = {"ti": ti_mock}
+
+        with patch(
+            "orchestration.dags.train_monthly_dag.run_feature"
+        ) as mock_run_feature:
+            mock_run_feature.return_value = ti_mock.xcom_pull.return_value
+            with patch(
+                "orchestration.dags.train_monthly_dag.build_feature_config"
+            ) as mock_bfc:
+                mock_bfc.return_value = {}
+                # Act
+                _feature(**context)
+
+        # Assert — gold_root passed to build_feature_config differs from inference gold
+        _, kwargs = mock_bfc.call_args
+        assert kwargs["gold_root"] != "/opt/airflow/data/gold/yellow_tripdata"
+        assert "train" in kwargs["gold_root"]
+
+
+class TestWindowDaysConfig:
+    """Step 4 — window_days wired from config."""
+
+    def test_compute_window_respects_window_days_param(self) -> None:
+        """window_days=7 overrides the 30-day default in compute_window."""
+        # Arrange
+        from orchestration.lib import training_helpers as th
+
+        seed = datetime(2021, 1, 18)
+        last = seed + timedelta(days=30)
+
+        # Act
+        _, end = th.compute_window(seed, last, window_days=7)
+
+        # Assert — window_end is last + 7d (not 30d)
+        assert end == last + timedelta(days=7)
+
+    def test_check_window_ready_passes_at_custom_window_boundary(self) -> None:
+        """check_window_ready passes when delta == window_days (custom value)."""
+        # Arrange
+        from orchestration.lib import training_helpers as th
+
+        last = datetime(2021, 2, 1)
+        refresh = last + timedelta(days=7)
+
+        # Act — should NOT raise (delta equals the window requirement)
+        th.check_window_ready(refresh, last, window_days=7)
+
+    def test_check_window_ready_skips_when_below_custom_window(self) -> None:
+        """check_window_ready raises AirflowSkipException when delta < window_days."""
+        # Arrange
+        import pytest
+
+        try:
+            from airflow.exceptions import AirflowSkipException
+        except ImportError:
+            pytest.skip("Airflow not installed in host env")
+
+        from orchestration.lib import training_helpers as th
+
+        last = datetime(2021, 2, 1)
+        refresh = last + timedelta(days=3)  # 3 < 7
+
+        # Act / Assert
+        with pytest.raises(AirflowSkipException):
+            th.check_window_ready(refresh, last, window_days=7)
+
+
+class TestBuildTrainConfig:
+    """build_train_config overrides model.store_path without mutating base."""
+
+    def test_build_train_config_overrides_store_path(self) -> None:
+        """build_train_config sets model.store_path to the supplied model_root."""
+        # Arrange
+        from tests.conftest import _FULL_CONFIG_DICT
+
+        from orchestration.lib.training_helpers import build_train_config
+
+        base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+
+        # Act
+        result = build_train_config(base, model_root="/opt/airflow/data/models")
+
+        # Assert
+        assert result.model.store_path == "/opt/airflow/data/models"
+
+    def test_build_train_config_does_not_mutate_base(self) -> None:
+        """Frozen model: the returned config is a new object, not base."""
+        # Arrange
+        from tests.conftest import _FULL_CONFIG_DICT
+
+        from orchestration.lib.training_helpers import build_train_config
+
+        base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+        original_store_path = base.model.store_path
+
+        # Act
+        result = build_train_config(base, model_root="/opt/airflow/data/models")
+
+        # Assert
+        assert result is not base
+        assert base.model.store_path == original_store_path

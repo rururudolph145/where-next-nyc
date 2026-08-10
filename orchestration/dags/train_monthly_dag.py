@@ -1,8 +1,8 @@
 """train_monthly_dag -- manually-triggered monthly training cycle.
 
-Topology (linear, 5 tasks):
-    read_watermarks -> check_window_ready -> compute_window -> train
-        -> write_training_watermark
+Topology (linear, 6 tasks):
+    read_watermarks -> check_window_ready -> compute_window -> feature
+        -> train -> write_training_watermark
 
 Training model
 --------------
@@ -36,14 +36,23 @@ from app.training.trainer import Trainer
 from mlflow.tracking import MlflowClient  # type: ignore[import-not-found]
 
 try:
+    from orchestration.lib.container_paths import container_paths
+    from orchestration.lib.feature_helpers import (
+        build_feature_config,
+        run_feature_train,
+    )
     from orchestration.lib.training_helpers import (
+        build_train_config,
         check_window_ready,
         compute_window,
         resolve_watermarks,
         run_train,
     )
 except ImportError:
+    from container_paths import container_paths  # type: ignore[import-not-found,no-redef]
+    from feature_helpers import build_feature_config, run_feature_train  # type: ignore[import-not-found,no-redef]
     from training_helpers import (  # type: ignore[import-not-found,no-redef]
+        build_train_config,
         check_window_ready,
         compute_window,
         resolve_watermarks,
@@ -58,7 +67,6 @@ logger = logging.getLogger(__name__)
 
 _REFRESH_WM_ROOT = Path("/opt/airflow/data/watermarks/refresh_15min")
 _LAST_TRAINING_ROOT = Path("/opt/airflow/data/watermarks/last_training")
-GOLD_FILE = "/opt/airflow/data/gold/yellow_tripdata/hourly_demand_featured.parquet"
 MODEL_NAME = "ny_taxi_demand_model"
 
 
@@ -76,12 +84,14 @@ def _read_watermarks(**context: object) -> dict[str, object]:
 
 
 def _check_window_ready(**context: object) -> None:
-    """Skip when inference hasn't advanced ≥30d ahead of last training."""
+    """Skip when inference hasn't advanced ≥window_days ahead of last training."""
     ti = context["ti"]  # type: ignore[index]
     wm: dict[str, object] = ti.xcom_pull(task_ids="read_watermarks")  # type: ignore[attr-defined]
     refresh_wm = datetime.fromisoformat(str(wm["refresh_wm"]))
     last_training_wm = datetime.fromisoformat(str(wm["last_training_wm"]))
-    check_window_ready(refresh_wm, last_training_wm)
+    config = load_config()
+    window_days: int = config.train.window_days
+    check_window_ready(refresh_wm, last_training_wm, window_days=window_days)
     logger.info(
         "check_window_ready: refresh=%s last_training=%s — continuing",
         refresh_wm,
@@ -94,12 +104,33 @@ def _compute_window(**context: object) -> dict[str, str]:
     ti = context["ti"]  # type: ignore[index]
     wm: dict[str, object] = ti.xcom_pull(task_ids="read_watermarks")  # type: ignore[attr-defined]
     config = load_config()
-    seed_start = datetime.fromisoformat(config["ingest"]["seed_start"])
+    seed_start = datetime.fromisoformat(config.ingest.seed_start)
     last_training_wm = datetime.fromisoformat(str(wm["last_training_wm"]))
-    start, end = compute_window(seed_start, last_training_wm)
+    window_days: int = config.train.window_days
+    start, end = compute_window(seed_start, last_training_wm, window_days=window_days)
     window = {"window_start": start.isoformat(), "window_end": end.isoformat()}
     logger.info("compute_window: %s", window)
     return window
+
+
+def _feature(**context: object) -> None:
+    """Run feature engineering with for_training=True into an ephemeral train-gold path.
+
+    Writes to data/gold/yellow_tripdata_train/ so training labels (target_sum_t1_t2)
+    are computed without touching the inference gold written by the inference DAG.
+    """
+    config = load_config()
+    paths = container_paths(config)
+    train_gold_root = paths["gold"].replace("yellow_tripdata", "yellow_tripdata_train")
+    feature_config = build_feature_config(
+        config,
+        silver_root=paths["silver"],
+        gold_root=train_gold_root,
+        shapefile_path=paths["shapefile"],
+        model_root=paths["models"],
+    )
+    run_feature_train(paths["bronze"], config=feature_config)
+    logger.info("feature(train): gold written to %s", train_gold_root)
 
 
 def _train(**context: object) -> dict[str, object]:
@@ -109,12 +140,17 @@ def _train(**context: object) -> dict[str, object]:
     window_start = datetime.fromisoformat(window["window_start"])
     window_end = datetime.fromisoformat(window["window_end"])
 
+    config = load_config()
+    paths = container_paths(config)
+    train_gold_root = paths["gold"].replace("yellow_tripdata", "yellow_tripdata_train")
+    train_config = build_train_config(config, model_root=paths["models"])
+
     result = run_train(
-        gold_file=Path(GOLD_FILE),
+        gold_file=Path(train_gold_root) / "hourly_demand_featured.parquet",
         window_start=window_start,
         window_end=window_end,
         model_name=MODEL_NAME,
-        trainer_factory=Trainer,
+        trainer_factory=lambda: Trainer(train_config),
         client_factory=MlflowClient,
     )
     logger.info("train: %s", result)
@@ -155,6 +191,10 @@ with DAG(
         task_id="compute_window",
         python_callable=_compute_window,
     )
+    feature_task = PythonOperator(
+        task_id="feature",
+        python_callable=_feature,
+    )
     train = PythonOperator(
         task_id="train",
         python_callable=_train,
@@ -169,6 +209,7 @@ with DAG(
         read_watermarks
         >> check_window_ready_task
         >> compute_window_task
+        >> feature_task
         >> train
         >> write_training_watermark
     )

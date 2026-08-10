@@ -11,8 +11,10 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
+from mlflow.exceptions import MlflowException
 
-from tests.conftest import make_mock_version
+from app.core.config import AppConfig
+from tests.conftest import _FULL_CONFIG_DICT, make_mock_version
 
 
 @pytest.fixture()
@@ -96,9 +98,16 @@ def client(
     serving_module._model_version = "3"
     serving_module._served_from_stage = "Production"
     # Redirect log writes to tmp_path so no real disk I/O hits data/ tree.
-    serving_module._config = {
-        "monitoring": {"predictions_path": str(tmp_path / "monitoring_predictions")}
-    }
+    _tmp_config = AppConfig.model_validate(_FULL_CONFIG_DICT).model_copy(
+        update={
+            "monitoring": AppConfig.model_validate(
+                _FULL_CONFIG_DICT
+            ).monitoring.model_copy(
+                update={"predictions_path": str(tmp_path / "monitoring_predictions")}
+            )
+        }
+    )
+    serving_module._config = _tmp_config
     # Point watermark root at an empty tmp dir so read_watermark returns None
     # and the no-hour branch falls back to latest-hour (no watermark cap).
     serving_module._watermark_root = tmp_path / "watermarks" / "refresh_15min"
@@ -741,12 +750,14 @@ class TestLifespanCentroidWiring:
         mock_build_centroid = MagicMock(return_value=expected_centroids)
         mock_load_predictions = MagicMock(return_value=fake_predictions)
         mock_load_zone_lookup = MagicMock(return_value={1: "Newark Airport"})
-        fake_config = {
-            "serving": {
-                "predictions_path": "fake/predictions.parquet",
-                "zone_shapefile_path": "fake/taxi_zones.shp",
+        base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+        fake_config: AppConfig = base.model_copy(
+            update={
+                "serving": base.serving.model_copy(
+                    update={"zone_shapefile_path": "fake/taxi_zones.shp"}
+                )
             }
-        }
+        )
 
         monkeypatch.setattr(
             serving_module, "build_centroid_lookup", mock_build_centroid
@@ -765,16 +776,7 @@ class TestLifespanCentroidWiring:
 # PBI 27 — GET /health endpoint tests
 # ---------------------------------------------------------------------------
 
-_FAKE_CONFIG = {
-    # PBI 25b FIX: /health derives the simulation position from the watermark,
-    # falling back to ingest.seed_start when no watermark file exists.
-    "ingest": {"seed_start": "2021-01-18T00:00:00"},
-    "serving": {
-        "predictions_path": "fake/predictions.parquet",
-        "zone_shapefile_path": "fake/taxi_zones.shp",
-    },
-    "mlflow": {"model_name": "ny_taxi_demand_model"},
-}
+_FAKE_CONFIG: AppConfig = AppConfig.model_validate(_FULL_CONFIG_DICT)
 
 
 class TestHealthEndpoint:
@@ -818,7 +820,7 @@ class TestHealthEndpoint:
 
         mock_version = make_mock_version(version="3")
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = [mock_version]
+        mock_client_instance.get_model_version_by_alias.return_value = mock_version
 
         with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
             with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
@@ -858,8 +860,12 @@ class TestHealthEndpoint:
         )
         monkeypatch.setattr(serving_module, "_predictions_df", predictions)
 
+        from mlflow.exceptions import MlflowException
+
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = []
+        mock_client_instance.get_model_version_by_alias.side_effect = MlflowException(
+            "Alias champion not found"
+        )
 
         with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
             with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
@@ -950,7 +956,9 @@ class TestHealthEndpoint:
         monkeypatch.setattr(serving_module, "_predictions_df", empty_df)
 
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = []
+        mock_client_instance.get_model_version_by_alias.side_effect = MlflowException(
+            "Alias champion not found"
+        )
 
         with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
             with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
@@ -984,7 +992,9 @@ class TestHealthEndpoint:
         monkeypatch.setattr(serving_module, "_predictions_df", predictions)
 
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = []
+        mock_client_instance.get_model_version_by_alias.side_effect = MlflowException(
+            "Alias champion not found"
+        )
 
         with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
             with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
@@ -1023,7 +1033,7 @@ class TestModelInfoEndpoint:
             tags={"model_test_wape": "0.1823", "wape_lift_pct": "12.4"},
         )
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = [mock_version]
+        mock_client_instance.get_model_version_by_alias.return_value = mock_version
 
         with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
             with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
@@ -1052,7 +1062,9 @@ class TestModelInfoEndpoint:
         import app.api.main as serving_module
 
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = []
+        mock_client_instance.get_model_version_by_alias.side_effect = MlflowException(
+            "Alias champion not found"
+        )
 
         with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
             with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
@@ -1085,7 +1097,7 @@ class TestModelInfoEndpoint:
             tags={},  # no tags
         )
         mock_client_instance = MagicMock()
-        mock_client_instance.get_latest_versions.return_value = [mock_version]
+        mock_client_instance.get_model_version_by_alias.return_value = mock_version
 
         with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
             with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
@@ -1097,6 +1109,71 @@ class TestModelInfoEndpoint:
         assert body["status"] == "ok"
         assert body["model_test_wape"] is None
         assert body["wape_lift_pct"] is None
+
+
+# ---------------------------------------------------------------------------
+# PBI 37 Step 6 — /health and /model-info use alias API (RED → GREEN)
+# ---------------------------------------------------------------------------
+
+
+class TestHealthAliasAPI:
+    """PBI 37 Step 6: /health and /model-info use get_model_version_by_alias."""
+
+    def test_health_calls_alias_not_stage_api(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GET /health: get_model_version_by_alias called; get_latest_versions NOT called (PBI 37 Step 6 RED)."""
+        import app.api.main as serving_module
+
+        monkeypatch.delenv("DEMO_MODE", raising=False)
+        predictions = pd.DataFrame(
+            {
+                "pulocationid": [1],
+                "hour": pd.to_datetime(["2021-03-01 00:00:00"]),
+                "predicted_trip_count": [10.0],
+                "actual_trip_count": [9.0],
+            }
+        )
+        monkeypatch.setattr(serving_module, "_predictions_df", predictions)
+
+        mock_version = make_mock_version(version="5")
+        mock_client_instance = MagicMock()
+        mock_client_instance.get_model_version_by_alias.return_value = mock_version
+
+        with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
+            with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
+                local_client = TestClient(serving_module.app)
+                resp = local_client.get("/health")
+
+        assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+        assert body["model_version"] == "5"
+        mock_client_instance.get_model_version_by_alias.assert_called_once()
+        mock_client_instance.get_latest_versions.assert_not_called()
+
+    def test_model_info_calls_alias_not_stage_api(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GET /model-info: get_model_version_by_alias called; get_latest_versions NOT called (PBI 37 Step 6 RED)."""
+        import app.api.main as serving_module
+
+        mock_version = make_mock_version(
+            version="5", tags={"model_test_wape": "12.5", "wape_lift_pct": "3.1"}
+        )
+        mock_client_instance = MagicMock()
+        mock_client_instance.get_model_version_by_alias.return_value = mock_version
+
+        with patch("app.api.main.load_config", return_value=_FAKE_CONFIG):
+            with patch("app.api.main.MlflowClient", return_value=mock_client_instance):
+                local_client = TestClient(serving_module.app)
+                resp = local_client.get("/model-info")
+
+        assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+        assert body["status"] == "ok"
+        assert body["model_version"] == "5"
+        mock_client_instance.get_model_version_by_alias.assert_called_once()
+        mock_client_instance.get_latest_versions.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1308,10 +1385,14 @@ class TestHeatmapWatermarkFilter:
         serving_module._generated_at = "2021-03-01T12:00:00+00:00"
         serving_module._model_version = "3"
         serving_module._served_from_stage = "Production"
-        serving_module._config = {
-            "monitoring": {"predictions_path": str(tmp_path / "mon")},
-            "ingest": {"seed_start": "2021-01-18T00:00:00"},
-        }
+        _base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+        serving_module._config = _base.model_copy(
+            update={
+                "monitoring": _base.monitoring.model_copy(
+                    update={"predictions_path": str(tmp_path / "mon")}
+                )
+            }
+        )
         serving_module._watermark_root = wm_root
         if watermark is not None:
             write_watermark(wm_root, watermark)
@@ -1412,3 +1493,61 @@ class TestHeatmapWatermarkFilter:
         # Assert
         assert resp.status_code == 200
         assert resp.json()["hour"] == "2021-03-01T01:00:00"
+
+
+# ---------------------------------------------------------------------------
+# Step 6 — lifespan wires _watermark_root from config["serving"]["watermark_path"]
+# ---------------------------------------------------------------------------
+
+
+class TestLifespanWatermarkPathWiring:
+    """Step 6 — serving.watermark_path is honoured by lifespan()."""
+
+    def test_lifespan_sets_watermark_root_from_config(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """lifespan() must set _watermark_root to Path(config["serving"]["watermark_path"]).
+
+        Arrange:
+        - Provide a fake_config with a custom watermark_path.
+        - Patch _load_predictions and _load_zone_lookup to avoid filesystem I/O.
+        Act: enter the app via TestClient (triggers lifespan).
+        Assert: _watermark_root equals the configured path.
+        """
+        import app.api.main as serving_module
+
+        custom_wm_path = "custom/watermarks/refresh"
+        _base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+        fake_config: AppConfig = _base.model_copy(
+            update={
+                "serving": _base.serving.model_copy(
+                    update={"watermark_path": custom_wm_path}
+                )
+            }
+        )
+
+        fake_predictions = pd.DataFrame(
+            {
+                "pulocationid": [1],
+                "hour": pd.to_datetime(["2021-03-01 00:00:00"]),
+                "predicted_trip_count": [5.0],
+                "actual_trip_count": [4.0],
+            }
+        )
+
+        monkeypatch.setattr(
+            serving_module,
+            "_load_predictions",
+            MagicMock(return_value=fake_predictions),
+        )
+        monkeypatch.setattr(
+            serving_module, "_load_zone_lookup", MagicMock(return_value={1: "Zone A"})
+        )
+        monkeypatch.setattr(
+            serving_module, "build_centroid_lookup", MagicMock(return_value={})
+        )
+
+        with patch("app.api.main.load_config", return_value=fake_config):
+            with TestClient(serving_module.app):
+                # Assert — _watermark_root reflects the configured path
+                assert serving_module._watermark_root == Path(custom_wm_path)

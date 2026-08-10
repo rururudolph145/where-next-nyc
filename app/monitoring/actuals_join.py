@@ -180,16 +180,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 if __name__ == "__main__":
+    from app.core.config import AppConfig
+
     args = _parse_args()
-    config = load_config()
-    monitoring = config.get("monitoring", {})
+    _cfg: AppConfig = load_config()  # type: ignore[assignment]
     out = join_actuals(
         start_date=args.start_date,
         end_date=args.end_date,
-        predictions_root=monitoring.get(
-            "predictions_path", "data/monitoring/predictions"
-        ),
-        gold_path=config["data"]["gold_path"],
-        output_root=monitoring.get("joined_path", "data/monitoring/joined"),
+        predictions_root=_cfg.monitoring.predictions_path,
+        gold_path=_cfg.data.gold_path,
+        output_root=_cfg.monitoring.joined_path,
     )
     print(f"Joined output written to: {out}")

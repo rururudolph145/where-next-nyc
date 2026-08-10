@@ -22,17 +22,16 @@ external data in pytest):
 
 from __future__ import annotations
 
-import copy
 from datetime import datetime
-from typing import Any
 
+from app.core.config import AppConfig
 from app.ingestion.ingest import Ingestion
 
 
 def build_ingest_config(
-    base: dict[str, Any], *, raw_root: str, bronze_root: str
-) -> dict[str, Any]:
-    """Return a copy of *base* with the data paths pointed at experiment roots.
+    base: AppConfig, *, raw_root: str, bronze_root: str
+) -> AppConfig:
+    """Return a new AppConfig with the data paths pointed at experiment roots.
 
     The override is the isolation seam: ``Ingestion.__init__`` reads
     ``data.raw_path`` / ``data.bronze_path`` directly, so redirecting them here
@@ -41,23 +40,24 @@ def build_ingest_config(
     equal or ``Ingestion.__init__`` asserts) — passes through unchanged.
 
     Args:
-        base: The parsed config to override (not mutated).
+        base: The parsed AppConfig to override (not mutated — frozen model).
         raw_root: Absolute path to the read-only raw ``yellow_tripdata`` root.
         bronze_root: Absolute path for the bronze parquet under the experiment
             data root.
 
     Returns:
-        A deep copy of *base* with the two data paths overridden.
+        A new AppConfig with the two data paths overridden.
     """
-    config = copy.deepcopy(base)
-    config["data"]["raw_path"] = raw_root
-    config["data"]["bronze_path"] = bronze_root
-    return config
+    return base.model_copy(
+        update={
+            "data": base.data.model_copy(
+                update={"raw_path": raw_root, "bronze_path": bronze_root}
+            )
+        }
+    )
 
 
-def run_ingest(
-    window_end: datetime, *, seed_start: datetime, config: dict[str, Any]
-) -> str:
+def run_ingest(window_end: datetime, *, seed_start: datetime, config: AppConfig) -> str:
     """Ingest cumulative bronze ``[seed_start, window_end)`` and return its path.
 
     ``window_start`` is FROZEN at *seed_start* every run; only *window_end*

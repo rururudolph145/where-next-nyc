@@ -42,8 +42,13 @@ from typing import Any
 import pandas as pd
 import pytest
 
+from app.core.config import AppConfig
 from app.ingestion.clean import DataCleaner
-from app.ingestion.schema import DataValidationError
+from app.ingestion.schema import (
+    DataValidationError,
+    build_bronze_schema,
+    validate_bronze_schema,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +91,8 @@ def _make_cleaner(tmp_path: Path, *, bronze_df: pd.DataFrame) -> DataCleaner:
     The silver dir is NOT pre-created; tests that exercise AC #5 rely on
     DataCleaner (via write_validation_log) to create it.
     """
+    from conftest import _FULL_CONFIG_DICT  # type: ignore[import-not-found]
+
     bronze_path = tmp_path / "bronze" / "raw.parquet"
     bronze_path.parent.mkdir(parents=True, exist_ok=True)
     bronze_df.to_parquet(bronze_path, index=False)
@@ -93,17 +100,21 @@ def _make_cleaner(tmp_path: Path, *, bronze_df: pd.DataFrame) -> DataCleaner:
     silver_path = tmp_path / "silver" / "cleaned.parquet"
     # Deliberately do NOT create silver_path.parent — AC #5 asserts auto-creation.
 
-    config: dict[str, Any] = {
-        "env": "local",
-        "data": {
-            "bronze_path": str(bronze_path),
-            "silver_path": str(silver_path),
-        },
-        "clean": {"null_strategy": "drop"},
-        "inference": {"simulation": {"start_hour": "2023-06-01 00:00:00"}},
-        "model": {"store_path": str(tmp_path / "models")},
-    }
-    return DataCleaner(config)
+    base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+    cfg = base.model_copy(
+        update={
+            "data": base.data.model_copy(
+                update={
+                    "bronze_path": str(bronze_path),
+                    "silver_path": str(silver_path),
+                }
+            ),
+            "model": base.model.model_copy(
+                update={"store_path": str(tmp_path / "models")}
+            ),
+        }
+    )
+    return DataCleaner(cfg)
 
 
 def _validation_dir(tmp_path: Path) -> Path:
@@ -530,20 +541,27 @@ def test_edge_repeat_runs_produce_distinct_log_files(tmp_path: Path) -> None:
         shared_silver = tmp_path / "shared_silver"
         shared_silver.mkdir()
 
-        def _shared_config(run_label: str) -> dict[str, Any]:
+        from conftest import _FULL_CONFIG_DICT  # type: ignore[import-not-found]
+
+        _base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+
+        def _shared_config(run_label: str) -> AppConfig:
             bronze_p = tmp_path / run_label / "raw.parquet"
             bronze_p.parent.mkdir(parents=True, exist_ok=True)
             bronze_df.to_parquet(bronze_p, index=False)
-            return {
-                "env": "local",
-                "data": {
-                    "bronze_path": str(bronze_p),
-                    "silver_path": str(shared_silver / "cleaned.parquet"),
-                },
-                "clean": {"null_strategy": "drop"},
-                "inference": {"simulation": {"start_hour": "2023-06-01 00:00:00"}},
-                "model": {"store_path": str(tmp_path / "models")},
-            }
+            return _base.model_copy(
+                update={
+                    "data": _base.data.model_copy(
+                        update={
+                            "bronze_path": str(bronze_p),
+                            "silver_path": str(shared_silver / "cleaned.parquet"),
+                        }
+                    ),
+                    "model": _base.model.model_copy(
+                        update={"store_path": str(tmp_path / "models")}
+                    ),
+                }
+            )
 
         c1 = DataCleaner(_shared_config("run1"))
         call_index[0] = 0
@@ -587,3 +605,42 @@ def test_edge_empty_bronze_frame_passes_schema(tmp_path: Path) -> None:
     assert payload["rows_in"] == 0
     assert payload["rows_passing"] == 0
     assert payload["rows_failing"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Step 3 — zone_id_min/max via build_bronze_schema and validate_bronze_schema
+# ---------------------------------------------------------------------------
+
+
+def test_build_bronze_schema_accepts_locationid_within_custom_range() -> None:
+    """build_bronze_schema(1, 300) accepts PULocationID=280 that 265 would reject."""
+    # Arrange
+    df = _valid_bronze_df().copy()
+    df.loc[0, "PULocationID"] = 280.0
+    schema = build_bronze_schema(1, 300)
+
+    # Act / Assert — no SchemaErrors raised
+    schema.validate(df, lazy=True)
+
+
+def test_validate_bronze_schema_config_override_widens_zone_range() -> None:
+    """validate_bronze_schema(df, config=...) with zone_id_max=300 accepts ID=280."""
+    # Arrange
+    df = _valid_bronze_df().copy()
+    df.loc[0, "PULocationID"] = 280.0
+    config = {"ingest": {"zone_id_min": 1, "zone_id_max": 300}}
+
+    # Act / Assert — no exception with widened range
+    validate_bronze_schema(df, config=config)
+
+
+def test_validate_bronze_schema_default_still_rejects_zone_266() -> None:
+    """Default zone_id_max=265 still rejects PULocationID=266 (regression guard)."""
+    # Arrange
+    df = _valid_bronze_df().copy()
+    df.loc[0, "PULocationID"] = 266.0
+    # No config override — should use the 265 default
+
+    # Act / Assert
+    with pytest.raises(DataValidationError):
+        validate_bronze_schema(df)

@@ -8,7 +8,7 @@ The DAG file (``exp03a_validate_dag.py``) is a thin wrapper that pulls
 
 Two seams keep this unit-testable:
 
-  * :func:`build_validate_config` deep-overrides ``data.silver_path`` so
+  * :func:`build_validate_config` overrides ``data.silver_path`` so
     ``validation_log_dir(config)`` resolves under the experiment root —
     never production ``data/``.
   * :func:`run_validate` reads bronze, calls ``validate_bronze_schema``,
@@ -20,13 +20,12 @@ Two seams keep this unit-testable:
 
 from __future__ import annotations
 
-import copy
-from typing import Any
-
 import pandas as pd
 
+from pathlib import Path
+
 from app.core.clock import Clock
-from app.core.paths import validation_log_dir
+from app.core.config import AppConfig
 from app.ingestion.schema import (
     DataValidationError,
     validate_bronze_schema,
@@ -34,29 +33,29 @@ from app.ingestion.schema import (
 )
 
 
-def build_validate_config(base: dict[str, Any], *, silver_root: str) -> dict[str, Any]:
-    """Return a copy of *base* with ``data.silver_path`` pointed at *silver_root*.
+def build_validate_config(base: AppConfig, *, silver_root: str) -> AppConfig:
+    """Return a new AppConfig with ``data.silver_path`` pointed at *silver_root*.
 
     The override is the isolation seam: ``validation_log_dir(config)`` derives
     its path from ``data.silver_path``, so redirecting that key here keeps logs
     under the experiment root and never the production ``data/`` tree.
 
     Args:
-        base: The parsed config to override (not mutated).
+        base: The parsed AppConfig to override (not mutated — frozen model).
         silver_root: Absolute path for the experiment silver parquet.
 
     Returns:
-        A deep copy of *base* with ``data.silver_path`` overridden.
+        A new AppConfig with ``data.silver_path`` overridden.
     """
-    config = copy.deepcopy(base)
-    config["data"]["silver_path"] = silver_root
-    return config
+    return base.model_copy(
+        update={"data": base.data.model_copy(update={"silver_path": silver_root})}
+    )
 
 
 def run_validate(
     bronze_path: str,
     *,
-    config: dict[str, Any],
+    config: AppConfig,
     clock: Clock | None = None,
 ) -> str:
     """Validate bronze schema; write a log; re-raise on failure.
@@ -73,7 +72,7 @@ def run_validate(
 
     Args:
         bronze_path: Absolute path to the bronze parquet to validate.
-        config: Override config with ``data.silver_path`` pointing at the
+        config: Override AppConfig with ``data.silver_path`` pointing at the
             experiment root (see :func:`build_validate_config`).
         clock: Optional ``Clock`` for deterministic timestamps in tests.
             Defaults to ``WallClock()`` inside ``write_validation_log``.
@@ -85,7 +84,7 @@ def run_validate(
         RuntimeError: If bronze fails schema validation.
     """
     df = pd.read_parquet(bronze_path)
-    log_dir = validation_log_dir(config)
+    log_dir = Path(config.data.silver_path).parent / "_validation"
     failure_reasons: list[str] = []
     try:
         validate_bronze_schema(df)
