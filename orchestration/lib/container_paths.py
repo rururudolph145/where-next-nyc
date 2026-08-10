@@ -18,6 +18,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from app.core.config import AppConfig
+
 _DEFAULT_PREFIX = "/opt/airflow"
 
 _RELATIVE_GETTERS: list[tuple[str, list[str]]] = [
@@ -34,7 +36,7 @@ _RELATIVE_GETTERS: list[tuple[str, list[str]]] = [
 
 
 def container_paths(
-    config: dict[str, Any],
+    config: AppConfig,
     prefix: str = _DEFAULT_PREFIX,
 ) -> dict[str, str]:
     """Return a dict of absolute in-container paths derived from *config*.
@@ -44,7 +46,7 @@ def container_paths(
     where ``relative`` is the config value and must NOT start with ``/``.
 
     Args:
-        config: Parsed configuration dictionary (from load_config()).
+        config: Parsed AppConfig (from load_config()).
         prefix: Container mount prefix. Defaults to ``/opt/airflow``.
 
     Returns:
@@ -59,9 +61,9 @@ def container_paths(
     result: dict[str, str] = {}
     for key, key_path in _RELATIVE_GETTERS:
         section, *rest = key_path
-        node: Any = config[section]
+        node: Any = getattr(config, section)
         for part in rest:
-            node = node[part]
+            node = getattr(node, part)
         relative: str = str(node)
         if relative.startswith("/"):
             raise ValueError(

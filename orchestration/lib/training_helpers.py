@@ -14,7 +14,6 @@ Two seams keep this unit-testable:
 
 from __future__ import annotations
 
-import copy
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -22,6 +21,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
+from app.core.config import AppConfig
 from app.core.watermark import read_watermark
 
 logger = logging.getLogger(__name__)
@@ -43,7 +43,7 @@ class EmptyTrainingWindowError(Exception):
 
 
 def resolve_watermarks(
-    config: dict[str, Any],
+    config: AppConfig,
     refresh_root: Path,
     last_training_root: Path,
 ) -> dict[str, Any]:
@@ -64,7 +64,7 @@ def resolve_watermarks(
     last_wm: datetime = (
         last_wm_raw
         if last_wm_raw is not None
-        else datetime.fromisoformat(config["ingest"]["seed_start"])
+        else datetime.fromisoformat(config.ingest.seed_start)
     )
 
     return {
@@ -146,17 +146,17 @@ def tag_promoted_version(
 
 
 def build_train_config(
-    base: dict[str, Any],
+    base: AppConfig,
     *,
     model_root: str,
-) -> dict[str, Any]:
-    """Return a copy of *base* with model.store_path overridden to model_root.
+) -> AppConfig:
+    """Return a new AppConfig with model.store_path overridden to model_root.
 
-    Mirrors build_predict_config — deep-copies, never mutates base.
+    Mirrors build_predict_config — model_copy, never mutates base.
     """
-    config = copy.deepcopy(base)
-    config["model"]["store_path"] = model_root
-    return config
+    return base.model_copy(
+        update={"model": base.model.model_copy(update={"store_path": model_root})}
+    )
 
 
 def run_train(

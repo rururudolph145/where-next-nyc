@@ -7,7 +7,7 @@ XCom, builds the override config, and calls ``run_feature``.
 Two seams keep this unit-testable:
 
   * :func:`build_feature_config` redirects silver/gold/shapefile/model paths
-    to the experiment root. The base is deep-copied, never mutated.
+    to the experiment root. The base is never mutated (frozen model).
   * :func:`run_feature` cleans bronze→silver using pre-fitted IQR bounds
     (transform-only — no re-split, no re-fit), then runs FeatureEngineer
     (silver→gold), returning the bronze path unchanged for a stable XCom flow.
@@ -15,39 +15,43 @@ Two seams keep this unit-testable:
 
 from __future__ import annotations
 
-import copy
 import json
 import os
-from typing import Any
 
+from app.core.config import AppConfig
 from app.ingestion.clean import DataCleaner
 from app.ingestion.feature import FeatureEngineer
 
 
 def build_feature_config(
-    base: dict[str, Any],
+    base: AppConfig,
     *,
     silver_root: str,
     gold_root: str,
     shapefile_path: str,
     model_root: str,
-) -> dict[str, Any]:
-    """Return a copy of *base* redirected to the experiment roots.
+) -> AppConfig:
+    """Return a new AppConfig redirected to the experiment roots.
 
-    The base is deep-copied, never mutated.
+    The base is never mutated (frozen Pydantic model).
     """
-    config = copy.deepcopy(base)
-    config["data"]["silver_path"] = silver_root
-    config["data"]["gold_path"] = gold_root
-    config["feature"]["zone_shapefile_path"] = shapefile_path
-    config["model"]["store_path"] = model_root
-    return config
+    return base.model_copy(
+        update={
+            "data": base.data.model_copy(
+                update={"silver_path": silver_root, "gold_path": gold_root}
+            ),
+            "feature": base.feature.model_copy(
+                update={"zone_shapefile_path": shapefile_path}
+            ),
+            "model": base.model.model_copy(update={"store_path": model_root}),
+        }
+    )
 
 
 def run_feature_train(
     bronze_path: str,
     *,
-    config: dict[str, Any],
+    config: AppConfig,
 ) -> str:
     """Fit IQR bounds from bronze, save them, then delegate to run_feature.
 
@@ -60,7 +64,7 @@ def run_feature_train(
     raw = cleaner.load_bronze()
     cleaned, bounds = cleaner.clean(raw)
 
-    store_path: str = config["model"]["store_path"]
+    store_path: str = config.model.store_path
     os.makedirs(store_path, exist_ok=True)
     bounds_path = os.path.join(store_path, "iqr_bounds.json")
     with open(bounds_path, "w") as f:
@@ -74,7 +78,7 @@ def run_feature_train(
 def run_feature(
     bronze_path: str,
     *,
-    config: dict[str, Any],
+    config: AppConfig,
     for_training: bool = False,
 ) -> str:
     """Clean bronze→silver (transform-only), then engineer silver→gold.
@@ -90,7 +94,7 @@ def run_feature(
     cleaner = DataCleaner(config)
     raw = cleaner.load_bronze()
 
-    iqr_bounds_path = os.path.join(config["model"]["store_path"], "iqr_bounds.json")
+    iqr_bounds_path = os.path.join(config.model.store_path, "iqr_bounds.json")
     with open(iqr_bounds_path) as f:
         iqr_bounds = json.load(f)
 

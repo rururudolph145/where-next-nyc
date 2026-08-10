@@ -6,49 +6,53 @@ is a thin wrapper that builds the override config and calls ``run_predict``.
 Two seams keep this unit-testable:
 
   * :func:`build_predict_config` redirects gold, model, and predictions
-    output paths to the experiment root. The base config is deep-copied, never
-    mutated.
+    output paths to the experiment root. The base config is never mutated
+    (frozen Pydantic model).
   * :func:`run_predict` constructs ``Predictor(config=config)``, calls
     ``.run()``, and returns the ``output_path`` string.
 """
 
 from __future__ import annotations
 
-import copy
 import logging
 import os
 from typing import Any
 
 import pandas as pd
 
+from app.core.config import AppConfig
 from app.inference.predictor import Predictor
 
 logger = logging.getLogger(__name__)
 
 
 def build_predict_config(
-    base: dict[str, Any],
+    base: AppConfig,
     *,
     gold_root: str,
     model_root: str,
     predictions_path: str,
-) -> dict[str, Any]:
-    """Return a copy of *base* redirected to the experiment roots.
+) -> AppConfig:
+    """Return a new AppConfig redirected to the experiment roots.
 
-    Overrides three paths. The base is deep-copied, never mutated.
+    Overrides three paths. The base is never mutated (frozen Pydantic model).
     """
-    config = copy.deepcopy(base)
-    config["data"]["gold_path"] = gold_root
-    config["model"]["store_path"] = model_root
-    config["inference"]["output_path"] = predictions_path
-    return config
+    return base.model_copy(
+        update={
+            "data": base.data.model_copy(update={"gold_path": gold_root}),
+            "model": base.model.model_copy(update={"store_path": model_root}),
+            "inference": base.inference.model_copy(
+                update={"output_path": predictions_path}
+            ),
+        }
+    )
 
 
-def run_predict(*, config: dict[str, Any], since: Any | None = None) -> str | None:
+def run_predict(*, config: AppConfig, since: Any | None = None) -> str | None:
     """Run Predictor with the override config and return the output path.
 
     Args:
-        config: Inference configuration dict (built by build_predict_config).
+        config: Inference AppConfig (built by build_predict_config).
         since: Optional lower-bound timestamp passed to Predictor.run(since=).
             When supplied, only rows with ``hour >= since`` are scored.
 
@@ -56,9 +60,7 @@ def run_predict(*, config: dict[str, Any], since: Any | None = None) -> str | No
     history on early pipeline runs, so FeatureEngineer drops every row.
     The DAG logs the skip and lets write_watermark advance normally.
     """
-    gold_file = os.path.join(
-        config["data"]["gold_path"], "hourly_demand_featured.parquet"
-    )
+    gold_file = os.path.join(config.data.gold_path, "hourly_demand_featured.parquet")
     gold = pd.read_parquet(gold_file)
     if gold.empty:
         logger.info(
