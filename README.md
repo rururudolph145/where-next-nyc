@@ -25,10 +25,14 @@ Model-quality metrics (MAE / RMSE / WAPE) measure the model. They don't measure 
 
 | Metric | What it asks |
 |---|---|
-| **Recall @ top-K zones** | Of the trips that actually happened in the next 30 min, what fraction occurred in the top-K predicted zones? |
 | **WAPE lift over baseline** | How much better is LightGBM than "last week, same hour, same zone"? |
 
-A model that beats the naive baseline by a meaningful WAPE margin *and* keeps recall@3 above the baseline is doing real work. A model that only wins on MAE but offers no recall@K lift is a vanity win.
+Rather than absolute RMSE that fails to measure severity of mistaken prediction in smaller-demand-area, we opt to use WAPE that is more robust and scale-invariant.
+
+Any challenger model must beat the previous champion model by > 2% WAPE
+Any model must be able to beat the baseline by 15%
+
+Analysis of this proof of concept is in the /experiment/rolling_retrain_eval.ipynb 
 
 ## How the Demo Works (Watermark-Driven Simulation)
 
@@ -58,9 +62,11 @@ A running system does **not** prove that drivers following the heatmap are bette
 - **Single-agent assumption.** The model predicts demand as if the heatmap did not itself change driver behaviour. It does **not** model demand-supply equilibration — if every real driver flocked to the same top zone, the prediction would self-defeat. Capturing that requires the deferred outcome harness plus a supply-aware demand model.
 - **Macro patterns only.** The model captures temporal + spatial regularities. It does not yet incorporate weather, events, or transit disruptions — the cases where intuition most often fails. Those are roadmap items.
 
-Built with **LightGBM**, tracked with **MLflow**, served via **FastAPI**, orchestrated with **Airflow** (watermark-driven, walking the 2021 timeline one 15-min slice per DAG run), and organised as a Bronze / Silver / Gold data pipeline.
+Built with **LightGBM**, tracked with **MLflow**, served via **FastAPI**, orchestrated with **Airflow** 
 
-## Current Forecasting Design (PBI B2)
+(Simulation is watermark-driven, walking the 2022 timeline one 15-min slice per DAG run), and organised as a Bronze / Silver / Gold data pipeline.
+
+## Current Forecasting Design
 
 | Knob | Value | Meaning |
 |---|---|---|
@@ -106,7 +112,7 @@ app/                       Production source
 ├── api/                   FastAPI app — GET / · /heatmap · /health · /model-info
 └── core/                  config · clock · paths · watermark · logging · metrics
 
-orchestration/             Airflow 3.2.2 stack (docker-compose)
+orchestration/             Airflow 2.10.3 stack (docker-compose, container-only)
 ├── dags/                  15_minute_refresh_inference_dag (8-task watermark chain)
 └── lib/                   *_helpers.py — Airflow-free DAG logic (host-testable)
 
@@ -283,3 +289,25 @@ docker run -p 80:80 ny-taxi-demand
 | 11 | Load testing (latency SLO baseline + CI guard) | ⏸ deferred |
 
 Legend: ✅ done · ⏳ in progress · ⏸ deferred by design. See [`implementation_checklist/pbi_tracker.md`](implementation_checklist/pbi_tracker.md) for per-PBI status, dependencies, and rationale.
+
+## Tech Stack
+
+| Layer | Tool | Role |
+|---|---|---|
+| Language / runtime | **Python 3.13**, **uv** | Fast, reproducible env; `uv.lock` committed |
+| Data processing | **pandas**, **pyarrow**, **Parquet** | Medallion Bronze/Silver/Gold on parquet |
+| Schema validation | **Pandera** | Bronze→Silver schema gate (PBI 19) — halts on TLC schema drift |
+| Geospatial | **geopandas**, **scikit-learn** BallTree | Zone shapefile + haversine k-NN spatial smoothing |
+| ML model | **LightGBM** | Tabular gradient boosting — beats XGBoost on this shape of data |
+| Experiment tracking | **MLflow** | Params, metrics, model registry, champion-vs-challenger gate |
+| API serving | **FastAPI**, **uvicorn** | `/heatmap`, `/health`, `/model-info` |
+| Orchestration | **Apache Airflow 2.10.3** | Watermark-driven 15-min refresh DAG (LocalExecutor, container-only) |
+| Containerisation | **Docker**, **docker-compose** | Airflow stack + reproducible service boot |
+| Testing | **pytest**, **pandera** | ~445 tests: unit + AAA + E2E on synthetic data |
+| Quality gates | **ruff**, **mypy** | Enforced in GitHub Actions on every PR |
+| CI/CD | **GitHub Actions** | Lint + test workflows (PBI 30) |
+
+**Deliberate non-choices:**
+- **No cloud provider** — the entire stack runs on one laptop via docker-compose. Portfolio scope, not a scale demo.
+- **No streaming (Kafka / Flink)** — inference is batch by nature (needs *aggregates* over closed windows). Streaming ingestion would help; streaming inference wouldn't.
+- **No Celery / KubernetesExecutor** — LocalExecutor is the honest topology for a single-machine demo. Upscaling is documented in `docs/adr/` for when it matters.

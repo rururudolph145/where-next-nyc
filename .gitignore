@@ -143,3 +143,30 @@ user_story_map.html
 *.png.jpg
 *.jpg.png
 store sales project/
+
+# Preserve the medallion directory shape for a fresh clone — keep .gitkeep only.
+# These negations must live at the END of the file so they win against every
+# ignore rule above. Also: git will NOT recurse into an ignored directory to
+# find a negated file, so each parent directory has to be re-included too —
+# the * glob then re-ignores its contents, leaving only the .gitkeep tracked.
+!data/bronze/
+data/bronze/*
+!data/bronze/.gitkeep
+!data/gold/
+data/gold/*
+!data/gold/.gitkeep
+!data/silver/
+data/silver/*
+!data/silver/.gitkeep
+!data/models/
+data/models/*
+!data/models/.gitkeep
+!data/raw/
+data/raw/*
+!data/raw/.gitkeep
+!data/watermarks/
+data/watermarks/*
+!data/watermarks/.gitkeep
+!data/watermarks/refresh_15min/
+data/watermarks/refresh_15min/*
+!data/watermarks/refresh_15min/.gitkeep
