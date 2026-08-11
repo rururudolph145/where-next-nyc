@@ -1,7 +1,9 @@
 # Airflow 2.10.3 LocalExecutor stack for 15_minute_refresh_inference_dag.
 #
 # Boot with `make airflow-init` then `make airflow-up`. UI at
-# http://localhost:8081 (default creds: airflow/airflow).
+# http://localhost:8081. Credentials read from orchestration/.env:
+#   AIRFLOW_WWW_USER_USERNAME (default: airflow)
+#   AIRFLOW_WWW_USER_PASSWORD (default: airflow)
 #
 # Path map (relative to this file):
 #   ./dags     -> /opt/airflow/dags            (DAG-scanned)
@@ -52,13 +54,17 @@ services:
   airflow-init:
     <<: *airflow-common
     entrypoint: /bin/bash
+    environment:
+      <<: *airflow-common-env
+      AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_WWW_USER_USERNAME:-airflow}
+      AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_WWW_USER_PASSWORD:-airflow}
     command:
       - -c
       - |
         airflow db migrate &&
         airflow users create \
-          --username airflow \
-          --password airflow \
+          --username "${AIRFLOW_WWW_USER_USERNAME}" \
+          --password "${AIRFLOW_WWW_USER_PASSWORD}" \
           --firstname Air \
           --lastname Flow \
           --role Admin \

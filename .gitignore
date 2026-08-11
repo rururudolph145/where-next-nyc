@@ -83,6 +83,7 @@ orchestration_experiment/data/
 .agents/
 .claude/agent-memory/
 .claude/hooks/
+.claude/skills/solid-review/
 .superpowers/
 
 # Generated HTML docs and scratch assets
