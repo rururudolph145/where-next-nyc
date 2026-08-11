@@ -264,10 +264,20 @@ docker run -p 80:80 ny-taxi-demand
 - `docs/adr/` — architecture decision records
 - `implementation_checklist/pbi_tracker.md` — PBI history, dependencies, priority order
 
-## Roadmap (high level)
+## Roadmap
 
-- **MVP (shipped)** — single-horizon training, inference, heatmap API
-- **B-track (shipped)** — 15-min bucket + spatial smoothing + 30-min summed-horizon target
-- **Live cadence (shipped)** — watermark-driven `15_minute_refresh_inference_dag` on Airflow, `/health` freshness, `make demo-tick`
-- **Deferred** — outcome harness (synthetic-driver evaluation of heatmap lift), closed training/feedback loops, drift-triggered retrain
-- **Post-MVP** — personalised ranking (DiDi-style)
+| Phase | Scope | Status |
+|-------|-------|--------|
+| 1 | Experimental notebook (data exploration, model prototyping) | ✅ done |
+| 2 | Project structure (train → inference → `/heatmap`) | ✅ done |
+| 3 | Additional features + 15-min bucket for 15-min refresh (B-track) | ✅ done |
+| 4 | API layer (FastAPI: `/heatmap`, `/health`, `/model-info`) | ✅ done |
+| 5 | MLflow layer (tracking, registry, champion-vs-challenger gate, fallback) | ✅ done |
+| 6 | GitHub Actions CI (lint + test) | ✅ done |
+| 7 | Airflow orchestrator layer (watermark-driven 15-min refresh DAG) | ✅ done |
+| 8 | Monitoring (prediction log ✅ · drift detector · alerts · monitor DAG) | ⏸ deferred |
+| 9 | Operational fast-forward (walk the 2021 timeline via `make demo-tick`) | ✅ done |
+| 10 | Portfolio submission polish (lift numbers, methodology ADR, error-analysis, one-command bring-up) | ⏳ in progress |
+| 11 | Load testing (latency SLO baseline + CI guard) | ⏸ deferred |
+
+Legend: ✅ done · ⏳ in progress · ⏸ deferred by design. See [`implementation_checklist/pbi_tracker.md`](implementation_checklist/pbi_tracker.md) for per-PBI status, dependencies, and rationale.
