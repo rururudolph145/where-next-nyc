@@ -110,9 +110,10 @@ def _check_no_new_data(**context: object) -> None:
 
 
 def _ingest(**context: object) -> str:
-    """Write cumulative bronze ``[seed_start, window_end)``."""
+    """Write incremental bronze slice, or seed full history on first run."""
     ti = context["ti"]  # type: ignore[index]
     window: dict[str, str] = ti.xcom_pull(task_ids="read_watermark")  # type: ignore[attr-defined]
+    window_start = datetime.fromisoformat(window["window_start"])
     window_end = datetime.fromisoformat(window["window_end"])
     config = load_config()
     paths = container_paths(config)
@@ -123,9 +124,17 @@ def _ingest(**context: object) -> str:
         raw_root=paths["raw"],
         bronze_root=paths["bronze"],
     )
-    bronze_path = run_ingest(window_end, seed_start=seed_start, config=ingest_config)
+    bronze_path = run_ingest(
+        window_end,
+        window_start=window_start,
+        seed_start=seed_start,
+        config=ingest_config,
+    )
     logger.info(
-        "ingest: wrote bronze [%s, %s) -> %s", seed_start, window_end, bronze_path
+        "ingest: wrote bronze slice [%s, %s) -> %s",
+        window_start,
+        window_end,
+        bronze_path,
     )
     return bronze_path
 

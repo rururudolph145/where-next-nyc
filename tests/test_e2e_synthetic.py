@@ -145,7 +145,6 @@ def _legacy_config(tmp_path: Any) -> AppConfig:
             "train": TrainConfig(
                 window_days=base.train.window_days,
                 gate=TrainGateConfig(),
-                split_ratios=[0.8, 0.1, 0.1],
                 features=[
                     "hour_of_day_sin",
                     "hour_of_day_cos",
@@ -190,7 +189,6 @@ def _b1_config(tmp_path: Any) -> AppConfig:
             "train": TrainConfig(
                 window_days=base.train.window_days,
                 gate=TrainGateConfig(),
-                split_ratios=base.train.split_ratios,
                 features=[
                     "hour_of_day_sin",
                     "hour_of_day_cos",
@@ -231,17 +229,14 @@ def _train_no_mlflow(config: AppConfig, gold: pd.DataFrame) -> dict[str, Any]:
     test stays hermetic.
     """
     trainer = Trainer(config=config)
-    train_df, val_df, test_df = trainer.split_data(gold)
+    train_df, test_df = trainer.split_data(gold)
     x_train = train_df[trainer.features]
     y_train = train_df[trainer.target]
     trainer.train(x_train, y_train)
-    val_preds = trainer.model.predict(val_df[trainer.features])
     test_preds = trainer.model.predict(test_df[trainer.features])
     return {
-        "val_metrics": trainer.evaluate(val_df[trainer.target], val_preds),
         "test_metrics": trainer.evaluate(test_df[trainer.target], test_preds),
         "n_train": len(train_df),
-        "n_val": len(val_df),
         "n_test": len(test_df),
         "test_preds": test_preds,
     }
@@ -270,7 +265,7 @@ def test_legacy_pipeline_smoke(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -
     result = _train_no_mlflow(config, gold)
     assert np.isfinite(result["test_preds"]).all()
     assert result["n_train"] > 0
-    assert result["val_metrics"]["mae"] >= 0
+    assert result["test_metrics"]["mae"] >= 0
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +327,6 @@ def _b2_config(tmp_path: Any) -> AppConfig:
             "train": TrainConfig(
                 window_days=base.train.window_days,
                 gate=TrainGateConfig(),
-                split_ratios=base.train.split_ratios,
                 features=[
                     "hour_of_day_sin",
                     "hour_of_day_cos",

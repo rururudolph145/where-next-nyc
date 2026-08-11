@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -240,3 +243,224 @@ def test_load_raw_parallel_equivalence(
         reference[bronze_df.columns.tolist()].reset_index(drop=True),
         check_like=False,
     )
+
+
+# ---------------------------------------------------------------------------
+# Steps 1–3: Ingestion.append_slice (pure, no I/O)
+# ---------------------------------------------------------------------------
+
+
+def _make_df(timestamps: list[datetime]) -> pd.DataFrame:
+    """Build a minimal DataFrame with tpep_pickup_datetime for append_slice tests."""
+    return pd.DataFrame({"tpep_pickup_datetime": pd.to_datetime(timestamps)})
+
+
+class TestAppendSlice:
+    """Ingestion.append_slice merges slices idempotently."""
+
+    def test_append_slice_concats_disjoint_slices(self) -> None:
+        """Result rowcount equals the sum of both slices, sorted by pickup time.
+
+        AC: new rows appended, output sorted by tpep_pickup_datetime.
+        """
+        # Arrange
+        cutoff = datetime(2021, 1, 19)
+        existing = _make_df([datetime(2021, 1, 18, 0), datetime(2021, 1, 18, 1)])
+        new_slice = _make_df([datetime(2021, 1, 19, 0), datetime(2021, 1, 19, 1)])
+
+        # Act
+        result = Ingestion.append_slice(existing, new_slice, cutoff=cutoff)
+
+        # Assert
+        assert len(result) == 4
+        assert result["tpep_pickup_datetime"].is_monotonic_increasing
+
+    def test_append_slice_is_idempotent_on_same_window(self) -> None:
+        """Re-appending the same slice yields the same rowcount as a clean append.
+
+        AC: retry-safe — no row duplication on repeated runs of the same window.
+        """
+        # Arrange
+        cutoff = datetime(2021, 1, 19)
+        existing = _make_df([datetime(2021, 1, 18, 0)])
+        new_slice = _make_df([datetime(2021, 1, 19, 0)])
+
+        # Act
+        first = Ingestion.append_slice(existing, new_slice, cutoff=cutoff)
+        second = Ingestion.append_slice(first, new_slice, cutoff=cutoff)
+
+        # Assert
+        assert len(second) == len(first)
+
+    def test_append_slice_drop_boundary_inclusive_at_cutoff(self) -> None:
+        """An existing row exactly at cutoff is dropped before concat.
+
+        AC: boundary is >= cutoff (left-inclusive window [cutoff, …) means the
+        cutoff row belongs to the new slice, not the old bronze).
+        """
+        # Arrange
+        cutoff = datetime(2021, 1, 19)
+        existing = _make_df([datetime(2021, 1, 18, 0), cutoff])  # cutoff row present
+        new_slice = _make_df([cutoff, datetime(2021, 1, 19, 1)])
+
+        # Act
+        result = Ingestion.append_slice(existing, new_slice, cutoff=cutoff)
+
+        # Assert — only 1 pre-cutoff row from existing + 2 new_slice rows = 3
+        assert len(result) == 3
+
+
+# ---------------------------------------------------------------------------
+# Steps 4–5: Ingestion.bronze_exists / load_bronze (I/O, tmp_path)
+# ---------------------------------------------------------------------------
+
+
+class TestBronzeIO:
+    """bronze_exists and load_bronze work against a real tmp_path."""
+
+    def _make_ingestion(
+        self, tmp_path: Path, bronze_schema: dict[str, str]
+    ) -> Ingestion:
+        from tests.conftest import _FULL_CONFIG_DICT
+
+        base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+        bronze_path = tmp_path / "bronze.parquet"
+        config = base.model_copy(
+            update={
+                "data": base.data.model_copy(
+                    update={
+                        "raw_path": str(tmp_path / "raw"),
+                        "bronze_path": str(bronze_path),
+                    }
+                ),
+                "ingest": base.ingest.model_copy(
+                    update={"bronze_schema": bronze_schema}
+                ),
+            }
+        )
+        return Ingestion(config=config)
+
+    def test_bronze_exists_false_when_absent(
+        self, tmp_path: Path, bronze_schema: dict[str, str]
+    ) -> None:
+        """bronze_exists() returns False when the bronze file does not exist."""
+        # Arrange
+        ingestion = self._make_ingestion(tmp_path, bronze_schema)
+
+        # Act / Assert
+        assert ingestion.bronze_exists() is False
+
+    def test_bronze_exists_true_after_write(
+        self, tmp_path: Path, bronze_schema: dict[str, str]
+    ) -> None:
+        """bronze_exists() returns True after save_bronze writes the file."""
+        # Arrange
+        ingestion = self._make_ingestion(tmp_path, bronze_schema)
+        df = _make_df([datetime(2021, 1, 18)])
+
+        # Act
+        ingestion.save_bronze(df)
+
+        # Assert
+        assert ingestion.bronze_exists() is True
+
+    def test_load_bronze_round_trips_written_frame(
+        self, tmp_path: Path, bronze_schema: dict[str, str]
+    ) -> None:
+        """load_bronze() returns a DataFrame with the same rowcount that was saved."""
+        # Arrange
+        ingestion = self._make_ingestion(tmp_path, bronze_schema)
+        df = _make_df([datetime(2021, 1, 18), datetime(2021, 1, 19)])
+
+        # Act
+        ingestion.save_bronze(df)
+        loaded = ingestion.load_bronze()
+
+        # Assert
+        assert len(loaded) == len(df)
+
+
+# ---------------------------------------------------------------------------
+# Steps 6–7: load_raw(since=...) — synthetic month folders under tmp_path
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def three_month_raw_tree(tmp_path: Path) -> Path:
+    """Three months of tiny daily parquets with distinct sentinel timestamps.
+
+    month 1: rows in 2021-01, month 2: rows in 2021-02, month 3: rows in 2021-03.
+    """
+    raw_root = tmp_path / "raw"
+    for month_tag, start in [
+        ("2021_01", pd.Timestamp("2021-01-01")),
+        ("2021_02", pd.Timestamp("2021-02-01")),
+        ("2021_03", pd.Timestamp("2021-03-01")),
+    ]:
+        month_dir = raw_root / month_tag
+        month_dir.mkdir(parents=True, exist_ok=True)
+        _write_daily_parquet(month_dir / f"{month_tag}_01.parquet", start, n_rows=2)
+    return raw_root
+
+
+def _ingestion_for_since(
+    tmp_path: Path, raw_root: Path, bronze_schema: dict[str, str]
+) -> Ingestion:
+    from tests.conftest import _FULL_CONFIG_DICT
+
+    base = AppConfig.model_validate(_FULL_CONFIG_DICT)
+    config = base.model_copy(
+        update={
+            "data": base.data.model_copy(
+                update={
+                    "raw_path": str(raw_root),
+                    "bronze_path": str(tmp_path / "bronze.parquet"),
+                }
+            ),
+            "ingest": base.ingest.model_copy(
+                update={
+                    "start_year_month": "2021-01",
+                    "end_year_month": "2021-03",
+                    "bronze_schema": bronze_schema,
+                }
+            ),
+        }
+    )
+    return Ingestion(config=config)
+
+
+class TestLoadRawSince:
+    """load_raw(since=...) reads only months at-or-after the given datetime."""
+
+    def test_load_raw_since_reads_only_month_at_or_after(
+        self, tmp_path: Path, three_month_raw_tree: Path, bronze_schema: dict[str, str]
+    ) -> None:
+        """since=2021-02-01 reads months 2 and 3 only; month-1 rows absent.
+
+        AC: incremental reads skip already-ingested raw months.
+        """
+        # Arrange
+        ingestion = _ingestion_for_since(tmp_path, three_month_raw_tree, bronze_schema)
+        since = datetime(2021, 2, 1)
+
+        # Act
+        df = ingestion.load_raw(since=since)
+
+        # Assert — only months 2+3 present; month-1 sentinel (Jan) must be absent
+        assert (df["tpep_pickup_datetime"] < pd.Timestamp("2021-02-01")).sum() == 0
+
+    def test_load_raw_since_none_reads_full_range(
+        self, tmp_path: Path, three_month_raw_tree: Path, bronze_schema: dict[str, str]
+    ) -> None:
+        """load_raw(since=None) returns all months — backward-compat regression guard.
+
+        AC: existing callers (Ingestion.run(), bulk_advance.py) unaffected.
+        """
+        # Arrange
+        ingestion = _ingestion_for_since(tmp_path, three_month_raw_tree, bronze_schema)
+
+        # Act
+        df = ingestion.load_raw(since=None)
+
+        # Assert — all three months present (6 rows total from fixture)
+        assert len(df) == 6

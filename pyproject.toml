@@ -37,7 +37,7 @@ dependencies = [
 ]
 
 [tool.pytest.ini_options]
-pythonpath = ["orchestration/lib", "tests"]
+pythonpath = [".", "orchestration/lib", "tests"]
 addopts = [
     "--cov=app",
     "--cov-report=term-missing:skip-covered",

@@ -429,49 +429,16 @@ class TestAC5ApplesApplesAlignment:
     def test_ac5_aligned_subset_excludes_rows_missing_week_ago(
         self, tmp_path: Path
     ) -> None:
-        """Build a Gold fixture where the test split covers the *first* week of
-        data so no week-ago values exist.  The baseline should drop all rows,
-        and the aligned model evaluation should also have zero rows — but
-        Trainer.run() should complete without error and log 0.0 for recall."""
-        # Arrange: 2 weeks of data, 60/20/20 split → test ≈ last 20% of week 2.
-        # Use the default 4-week fixture but only pass 2 weeks to the trainer so
-        # the test split (last ~20%) lands in week 2 and HAS a week-ago anchor.
-        # To force the NaN-drop path, use only the first 1 week + 1 hour so the
-        # test rows have no week-ago data (gold contains < 7 days).
-        n_weeks = 1
-        records = []
-        for hour in range(n_weeks * 24 + 1):  # just past 1 week
-            ts = BASE_TS + pd.Timedelta(hours=hour)
-            for zone in ZONES:
-                records.append(
-                    {
-                        "pulocationid": zone,
-                        "hour": ts,
-                        "trip_count": float(zone * 10 + hour % 24),
-                        "hour_of_day_sin": float(np.sin(2 * np.pi * (hour % 24) / 24)),
-                        "hour_of_day_cos": float(np.cos(2 * np.pi * (hour % 24) / 24)),
-                        "day_of_week_sin": 0.0,
-                        "day_of_week_cos": 1.0,
-                        "month_sin": 0.0,
-                        "month_cos": 1.0,
-                        "pickup_longitude": float(-74.00 - zone * 0.01),
-                        "pickup_latitude": float(40.70 + zone * 0.01),
-                        "trip_count_lag_1": float(zone * 10 + (hour - 1) % 24),
-                        "trip_count_lag_3": float(zone * 10 + (hour - 3) % 24),
-                        "trip_count_lag_6": float(zone * 10 + (hour - 6) % 24),
-                        "trip_count_lag_12": float(zone * 10 + (hour - 12) % 24),
-                        "trip_count_lag_24": float(zone * 10 + (hour - 24) % 24),
-                        "trip_count_lag_168": float(zone * 10 + hour % 24),
-                    }
-                )
-
-        short_gold = pd.DataFrame(records)
-        gold_dir = tmp_path / "gold"
-        gold_dir.mkdir(parents=True)
-        short_gold.to_parquet(gold_dir / "hourly_demand_featured.parquet", index=False)
-
+        """When aligned_df is empty (baseline returns no week-ago rows), Trainer.run()
+        completes without error and sets all four baseline-related keys to None."""
+        # Arrange: use 4-week fixture (train non-empty); force baseline empty via mock
+        gold_dir, gold_df = _make_4week_gold(tmp_path)
         config = _trainer_config(tmp_path)
         trainer = Trainer(config=config)
+
+        empty_aligned = pd.DataFrame(
+            columns=["pulocationid", "hour", "y_true", "y_pred_baseline"]
+        )
 
         # Act — run should not raise even when aligned_df is empty
         with patch("app.training.trainer.mlflow") as mock_mlflow:
@@ -479,11 +446,13 @@ class TestAC5ApplesApplesAlignment:
                 return_value=MagicMock()
             )
             mock_mlflow.start_run.return_value.__exit__ = MagicMock(return_value=False)
-            result = trainer.run(data=short_gold)
+            with patch(
+                "app.training.trainer.LastWeekSameHourBaseline.predict",
+                return_value=empty_aligned,
+            ):
+                result = trainer.run(data=gold_df)
 
-        # Assert — run() completed; with no week-ago overlap the new empty-aligned
-        # guard sets all four baseline-related keys to None so that meaningless
-        # metrics are not logged to MLflow.
+        # Assert — run() completed; empty-aligned guard sets all four keys to None
         assert result["baseline_metrics"] is None
         assert result["model_aligned_metrics"] is None
         assert result["wape_lift_pct"] is None
@@ -763,46 +732,14 @@ class TestEdgeCaseNoWeekAgoOverlap:
         4. result["recall_at_3"] is None
         5. mlflow.log_metric was NOT called for any of the six conditional keys
         """
-        # Arrange — 1 week of data for 3 zones (168 hours × 3 zones = 504 rows).
-        # With a 60/20/20 split the test slice covers the last 20% ≈ last 33 hours,
-        # which fall within week 1 and have no week-ago anchor in the Gold history.
-        n_hours = 24 * 7  # exactly 1 week
-        records = []
-        for hour_offset in range(n_hours):
-            ts = BASE_TS + pd.Timedelta(hours=hour_offset)
-            for zone in ZONES:
-                hour_of_day = hour_offset % 24
-                records.append(
-                    {
-                        "pulocationid": zone,
-                        "hour": ts,
-                        "trip_count": float(zone * 10 + hour_of_day),
-                        "hour_of_day_sin": float(np.sin(2 * np.pi * hour_of_day / 24)),
-                        "hour_of_day_cos": float(np.cos(2 * np.pi * hour_of_day / 24)),
-                        "day_of_week_sin": float(np.sin(2 * np.pi * ts.dayofweek / 7)),
-                        "day_of_week_cos": float(np.cos(2 * np.pi * ts.dayofweek / 7)),
-                        "month_sin": float(np.sin(2 * np.pi * ts.month / 12)),
-                        "month_cos": float(np.cos(2 * np.pi * ts.month / 12)),
-                        "pickup_longitude": float(-74.00 - zone * 0.01),
-                        "pickup_latitude": float(40.70 + zone * 0.01),
-                        "trip_count_lag_1": float(zone * 10 + (hour_of_day - 1) % 24),
-                        "trip_count_lag_3": float(zone * 10 + (hour_of_day - 3) % 24),
-                        "trip_count_lag_6": float(zone * 10 + (hour_of_day - 6) % 24),
-                        "trip_count_lag_12": float(zone * 10 + (hour_of_day - 12) % 24),
-                        "trip_count_lag_24": float(zone * 10 + (hour_of_day - 24) % 24),
-                        "trip_count_lag_168": float(zone * 10 + hour_of_day),
-                    }
-                )
-
-        one_week_gold = pd.DataFrame(records)
-        gold_dir = tmp_path / "gold"
-        gold_dir.mkdir(parents=True)
-        one_week_gold.to_parquet(
-            gold_dir / "hourly_demand_featured.parquet", index=False
-        )
-
+        # Arrange — 4-week fixture (train non-empty); force aligned_df empty via mock
+        gold_dir, gold_df = _make_4week_gold(tmp_path)
         config = _trainer_config(tmp_path)
         trainer = Trainer(config=config)
+
+        empty_aligned = pd.DataFrame(
+            columns=["pulocationid", "hour", "y_true", "y_pred_baseline"]
+        )
 
         # Act
         with patch("app.training.trainer.mlflow") as mock_mlflow:
@@ -810,7 +747,11 @@ class TestEdgeCaseNoWeekAgoOverlap:
                 return_value=MagicMock()
             )
             mock_mlflow.start_run.return_value.__exit__ = MagicMock(return_value=False)
-            result = trainer.run(data=one_week_gold)
+            with patch(
+                "app.training.trainer.LastWeekSameHourBaseline.predict",
+                return_value=empty_aligned,
+            ):
+                result = trainer.run(data=gold_df)
 
         # Assert 1–4: all four baseline-related keys are None
         assert result["baseline_metrics"] is None

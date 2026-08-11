@@ -74,8 +74,8 @@ class TestDatasetMaxConfigParsing:
     def test_config_dataset_max_seconds_is_57_not_59(self) -> None:
         """config.yml ingest.dataset_max parses to second=57 (not 59).
 
-        seconds=57 is intentional — deriving from end_year_month='2021-03'
-        yields 23:59:59 (2 s too late) which caused two overrun DAG runs.
+        seconds=57 is intentional — deriving from end_year_month yields
+        23:59:59 (2 s too late) which caused two overrun DAG runs.
         """
         # Arrange
         from app.core.config import load_config
@@ -90,7 +90,7 @@ class TestDatasetMaxConfigParsing:
             f"Expected second=57, got {dataset_max.second} — "
             "transcription error: check config.yml ingest.dataset_max"
         )
-        assert dataset_max == datetime(2021, 3, 31, 23, 59, 57)
+        assert dataset_max == datetime(2022, 3, 31, 23, 59, 57)
 
     def test_check_no_new_data_reads_dataset_max_from_config(self) -> None:
         """_check_no_new_data skips when window_start >= config dataset_max.

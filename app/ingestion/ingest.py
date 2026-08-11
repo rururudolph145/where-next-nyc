@@ -97,7 +97,39 @@ class Ingestion:
     # Core pipeline
     # ------------------------------------------------------------------
 
-    def load_raw(self) -> pd.DataFrame:
+    def bronze_exists(self) -> bool:
+        """Return True if the bronze parquet file already exists on disk."""
+        return Path(self.bronze_path).exists()
+
+    def load_bronze(self) -> pd.DataFrame:
+        """Read the existing bronze parquet into a DataFrame."""
+        return pd.read_parquet(self.bronze_path)
+
+    @staticmethod
+    def append_slice(
+        existing: pd.DataFrame,
+        new_slice: pd.DataFrame,
+        *,
+        cutoff: datetime,
+    ) -> pd.DataFrame:
+        """Idempotent merge: drop existing rows >= cutoff, then concat new_slice.
+
+        Args:
+            existing: The current cumulative bronze DataFrame.
+            new_slice: Rows for the new window ``[cutoff, window_end)``.
+            cutoff: The window_start of the new slice (left-inclusive boundary).
+
+        Returns:
+            Merged DataFrame sorted by tpep_pickup_datetime.
+        """
+        cutoff_naive = Ingestion._naive(cutoff)
+        before = existing[existing["tpep_pickup_datetime"] < cutoff_naive]
+        merged = pd.concat([before, new_slice], ignore_index=True)
+        return merged.sort_values("tpep_pickup_datetime", kind="mergesort").reset_index(
+            drop=True
+        )
+
+    def load_raw(self, since: datetime | None = None) -> pd.DataFrame:
         """Scan the raw folder for daily parquets and concatenate them.
 
         Reads each ``YYYY_MM/*.parquet`` in parallel via a
@@ -113,7 +145,10 @@ class Ingestion:
         Raises:
             FileNotFoundError: If no parquet files are found in the range.
         """
-        tags = self._iter_year_months(self.start_ym, self.end_ym)
+        since_ym = (
+            f"{since.year}-{since.month:02d}" if since is not None else self.start_ym
+        )
+        tags = self._iter_year_months(since_ym, self.end_ym)
         raw_root = Path(self.raw_path)
 
         schema: dict[str, str] = self.config.ingest.bronze_schema

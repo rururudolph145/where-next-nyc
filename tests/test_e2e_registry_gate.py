@@ -119,31 +119,16 @@ def _make_4week_gold(tmp_path: Path) -> tuple[Path, pd.DataFrame]:
 
 
 def _make_no_overlap_gold(tmp_path: Path) -> tuple[Path, pd.DataFrame]:
-    """Build a 1-week Gold fixture so the test split has no week-ago overlap.
+    """Build a 4-week Gold fixture for no-baseline scenarios.
 
-    With a 80/10/10 split the test slice (last 10%) spans < 7 days from the
-    start of the Gold data, so LastWeekSameHourBaseline returns an empty
-    aligned_df — ensuring wape_lift_pct is None in Trainer.run().
+    The calling tests patch LastWeekSameHourBaseline.predict to return empty,
+    so the data size only needs to be large enough for LightGBM to train.
+    A 4-week dataset (same as the main fixture) is used so train is non-empty.
 
     Returns:
-        (gold_dir_path, short_gold_df) tuple.
+        (gold_dir_path, gold_df) tuple.
     """
-    rng = np.random.RandomState(99)
-    n = 100  # ~10 test rows, no week-ago overlap possible
-    hours = pd.date_range("2022-01-03 00:00:00", periods=n, freq="h")
-    data: dict[str, Any] = {
-        "pulocationid": rng.randint(1, 4, n),
-        "hour": hours,
-        "trip_count": rng.randint(1, 20, n).astype(float),
-    }
-    for feat in _FEATURES:
-        data[feat] = rng.rand(n)
-
-    short_df = pd.DataFrame(data)
-    gold_dir = tmp_path / "gold"
-    gold_dir.mkdir(parents=True)
-    short_df.to_parquet(gold_dir / "hourly_demand_featured.parquet", index=False)
-    return gold_dir, short_df
+    return _make_4week_gold(tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -478,8 +463,8 @@ class TestRegistryGateAcceptance:
         - Run tag gate_result == 'rejected' (AC-16).
         - Run tag gate_rejection_reason == 'no_baseline_for_comparison' (AC-14).
         """
-        # Arrange: short gold → no week-ago overlap → wape_lift_pct=None
-        _, short_df = _make_no_overlap_gold(tmp_path)
+        # Arrange: baseline forced empty → wape_lift_pct=None; incumbent exists
+        _, gold_df = _make_no_overlap_gold(tmp_path)
         champion = _champion_mock(version="1", wape_tag="20.0")
         config = _registry_config(tmp_path)
         trainer = Trainer(config=config)
@@ -488,10 +473,17 @@ class TestRegistryGateAcceptance:
             registered_version="2",
             production_versions=[champion],
         )
+        empty_aligned = pd.DataFrame(
+            columns=["pulocationid", "hour", "y_true", "y_pred_baseline"]
+        )
 
         # Act
         with patch("app.training.trainer.mlflow", mock_mlflow):
-            result = trainer.run(data=short_df)
+            with patch(
+                "app.training.trainer.LastWeekSameHourBaseline.predict",
+                return_value=empty_aligned,
+            ):
+                result = trainer.run(data=gold_df)
 
         # Assert — confirm the no-overlap condition held (precondition check)
         assert result["wape_lift_pct"] is None, (
@@ -532,8 +524,8 @@ class TestRegistryGateAcceptance:
         - result["model_path"] is not None and the file exists on disk (AC-10 via AC-8).
         - Run tag gate_result == 'promoted' (AC-16).
         """
-        # Arrange: short gold → wape_lift_pct=None; empty registry
-        _, short_df = _make_no_overlap_gold(tmp_path)
+        # Arrange: baseline forced empty → wape_lift_pct=None; no incumbent
+        _, gold_df = _make_no_overlap_gold(tmp_path)
         config = _registry_config(tmp_path)
         trainer = Trainer(config=config)
         mock_mlflow = _build_mlflow_mock(
@@ -541,10 +533,17 @@ class TestRegistryGateAcceptance:
             registered_version="1",
             production_versions=[],
         )
+        empty_aligned = pd.DataFrame(
+            columns=["pulocationid", "hour", "y_true", "y_pred_baseline"]
+        )
 
         # Act
         with patch("app.training.trainer.mlflow", mock_mlflow):
-            result = trainer.run(data=short_df)
+            with patch(
+                "app.training.trainer.LastWeekSameHourBaseline.predict",
+                return_value=empty_aligned,
+            ):
+                result = trainer.run(data=gold_df)
 
         # Assert — confirm no-overlap precondition
         assert result["wape_lift_pct"] is None, (

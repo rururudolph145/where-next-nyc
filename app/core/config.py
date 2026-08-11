@@ -57,7 +57,6 @@ class TrainGateConfig(BaseModel):
 class TrainConfig(BaseModel):
     window_days: int
     gate: TrainGateConfig
-    split_ratios: list[float]
     features: list[str]
     target: str
 

@@ -956,19 +956,8 @@ class TestTrainerWapeLiftPctTag:
         Assert: result["wape_lift_pct"] is None AND set_model_version_tag was
                 never called with key "wape_lift_pct". No exception raised.
         """
-        # Arrange: short dataset → no week-ago overlap → wape_lift_pct=None
-        rng = np.random.RandomState(0)
-        n = 100
-        hours = pd.date_range("2022-01-01", periods=n, freq="h")
-        data: dict[str, Any] = {
-            "hour": hours,
-            "pulocationid": rng.randint(1, 5, n),
-        }
-        for feat in _TRAINER_FEATURES:
-            data[feat] = rng.rand(n)
-        data["trip_count"] = rng.randint(1, 20, n).astype(float)
-        tiny_df = pd.DataFrame(data)
-
+        # Arrange: force aligned_df empty via mock so wape_lift_pct=None; no incumbent
+        gold_dir, gold_df = _make_4week_gold(tmp_path)
         trainer = Trainer(config=_registry_config(tmp_path))
         mock_mlflow = _build_mlflow_mock(
             registered_version="1",
@@ -976,10 +965,20 @@ class TestTrainerWapeLiftPctTag:
         )
         mock_client = mock_mlflow.tracking.MlflowClient.return_value
 
+        empty_aligned = pd.DataFrame(
+            columns=["pulocationid", "hour", "y_true", "y_pred_baseline"]
+        )
+
         # Act
         with patch("app.training.trainer.mlflow", mock_mlflow):
-            with patch.object(trainer, "save_model", return_value="models/model.pkl"):
-                result = trainer.run(data=tiny_df)
+            with patch(
+                "app.training.trainer.LastWeekSameHourBaseline.predict",
+                return_value=empty_aligned,
+            ):
+                with patch.object(
+                    trainer, "save_model", return_value="models/model.pkl"
+                ):
+                    result = trainer.run(data=gold_df)
 
         # Assert: wape_lift_pct is None AND tag not written
         assert result["wape_lift_pct"] is None

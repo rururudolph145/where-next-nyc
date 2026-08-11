@@ -115,64 +115,46 @@ def gold_df() -> pd.DataFrame:
 
 
 class TestSplitData:
-    """Tests for Trainer.split_data."""
+    """Tests for Trainer.split_data — 2-way calendar split."""
 
-    def test_split_ratios(self, trainer: Trainer, gold_df: pd.DataFrame) -> None:
-        """Train/val/test sets have approximately correct proportions."""
-        train, val, test = trainer.split_data(gold_df)
+    def test_returns_two_tuple(self, trainer: Trainer, gold_df: pd.DataFrame) -> None:
+        """split_data returns (train, test) — val is gone."""
+        result = trainer.split_data(gold_df)
+        assert len(result) == 2
 
-        n = len(gold_df)
-        assert len(train) + len(val) + len(test) == n
-        assert abs(len(train) / n - 0.8) < 0.02
-        assert abs(len(val) / n - 0.1) < 0.02
-        assert abs(len(test) / n - 0.1) < 0.02
-
-    def test_all_splits_non_empty(
+    def test_cutoff_is_max_hour_minus_7_days(
         self, trainer: Trainer, gold_df: pd.DataFrame
     ) -> None:
-        """All three splits contain at least one row."""
-        train, val, test = trainer.split_data(gold_df)
-        assert len(train) > 0
-        assert len(val) > 0
-        assert len(test) > 0
+        """train contains rows before cutoff; test contains rows at/after cutoff."""
+        train, test = trainer.split_data(gold_df)
+        cutoff = gold_df["hour"].max() - pd.Timedelta(days=7)
+        assert train["hour"].max() < cutoff
+        assert test["hour"].min() >= cutoff
 
-    def test_no_temporal_leakage(self, trainer: Trainer, gold_df: pd.DataFrame) -> None:
-        """Max hour in train < min hour in val < min hour in test."""
-        train, val, test = trainer.split_data(gold_df)
-
-        assert train["hour"].max() < val["hour"].min()
-        assert val["hour"].max() < test["hour"].min()
-
-    def test_no_overlap(self, trainer: Trainer, gold_df: pd.DataFrame) -> None:
-        """No overlapping timestamps between splits."""
-        train, val, test = trainer.split_data(gold_df)
-
-        train_hours = set(train["hour"])
-        val_hours = set(val["hour"])
-        test_hours = set(test["hour"])
-
-        assert train_hours.isdisjoint(val_hours)
-        assert val_hours.isdisjoint(test_hours)
-        assert train_hours.isdisjoint(test_hours)
+    def test_no_row_loss(self, trainer: Trainer, gold_df: pd.DataFrame) -> None:
+        """Total rows in train + test equals input rows."""
+        train, test = trainer.split_data(gold_df)
+        assert len(train) + len(test) == len(gold_df)
 
     def test_deterministic(self, trainer: Trainer, gold_df: pd.DataFrame) -> None:
         """Calling split_data twice produces identical results."""
-        train1, val1, test1 = trainer.split_data(gold_df)
-        train2, val2, test2 = trainer.split_data(gold_df)
-
+        train1, test1 = trainer.split_data(gold_df)
+        train2, test2 = trainer.split_data(gold_df)
         pd.testing.assert_frame_equal(train1, train2)
-        pd.testing.assert_frame_equal(val1, val2)
         pd.testing.assert_frame_equal(test1, test2)
 
-    def test_sorted_within_splits(
+    def test_no_overlap(self, trainer: Trainer, gold_df: pd.DataFrame) -> None:
+        """No overlapping timestamps between train and test."""
+        train, test = trainer.split_data(gold_df)
+        assert set(train["hour"]).isdisjoint(set(test["hour"]))
+
+    def test_both_splits_non_empty(
         self, trainer: Trainer, gold_df: pd.DataFrame
     ) -> None:
-        """Each split is sorted by hour."""
-        train, val, test = trainer.split_data(gold_df)
-
-        assert train["hour"].is_monotonic_increasing
-        assert val["hour"].is_monotonic_increasing
-        assert test["hour"].is_monotonic_increasing
+        """Both splits must have at least one row."""
+        train, test = trainer.split_data(gold_df)
+        assert len(train) > 0
+        assert len(test) > 0
 
 
 # -- Test: train -------------------------------------------------------------
@@ -183,7 +165,7 @@ class TestTrainModel:
 
     def test_model_is_fitted(self, trainer: Trainer, gold_df: pd.DataFrame) -> None:
         """Model has fitted attributes after training."""
-        train_df, _, _ = trainer.split_data(gold_df)
+        train_df, _ = trainer.split_data(gold_df)
         x_train = train_df[trainer.features]
         y_train = train_df[trainer.target]
 
@@ -194,11 +176,11 @@ class TestTrainModel:
 
     def test_model_can_predict(self, trainer: Trainer, gold_df: pd.DataFrame) -> None:
         """Fitted model produces predictions."""
-        train_df, val_df, _ = trainer.split_data(gold_df)
+        train_df, test_df = trainer.split_data(gold_df)
         trainer.train(train_df[trainer.features], train_df[trainer.target])
 
-        preds = trainer.model.predict(val_df[trainer.features])
-        assert len(preds) == len(val_df)
+        preds = trainer.model.predict(test_df[trainer.features])
+        assert len(preds) == len(test_df)
 
 
 # -- Test: evaluate ----------------------------------------------------------
@@ -209,11 +191,11 @@ class TestEvaluate:
 
     def test_metric_keys(self, trainer: Trainer, gold_df: pd.DataFrame) -> None:
         """Returns dict with expected metric keys."""
-        train_df, val_df, _ = trainer.split_data(gold_df)
+        train_df, test_df = trainer.split_data(gold_df)
         trainer.train(train_df[trainer.features], train_df[trainer.target])
-        preds = trainer.model.predict(val_df[trainer.features])
+        preds = trainer.model.predict(test_df[trainer.features])
 
-        metrics = trainer.evaluate(val_df[trainer.target], preds)
+        metrics = trainer.evaluate(test_df[trainer.target], preds)
 
         assert set(metrics.keys()) == {"mae", "rmse", "mape", "wape"}
 
@@ -221,22 +203,22 @@ class TestEvaluate:
         self, trainer: Trainer, gold_df: pd.DataFrame
     ) -> None:
         """All metric values are non-negative."""
-        train_df, val_df, _ = trainer.split_data(gold_df)
+        train_df, test_df = trainer.split_data(gold_df)
         trainer.train(train_df[trainer.features], train_df[trainer.target])
-        preds = trainer.model.predict(val_df[trainer.features])
+        preds = trainer.model.predict(test_df[trainer.features])
 
-        metrics = trainer.evaluate(val_df[trainer.target], preds)
+        metrics = trainer.evaluate(test_df[trainer.target], preds)
 
         for key, value in metrics.items():
             assert value >= 0, f"{key} is negative: {value}"
 
     def test_mae_leq_rmse(self, trainer: Trainer, gold_df: pd.DataFrame) -> None:
         """MAE <= RMSE by definition."""
-        train_df, val_df, _ = trainer.split_data(gold_df)
+        train_df, test_df = trainer.split_data(gold_df)
         trainer.train(train_df[trainer.features], train_df[trainer.target])
-        preds = trainer.model.predict(val_df[trainer.features])
+        preds = trainer.model.predict(test_df[trainer.features])
 
-        metrics = trainer.evaluate(val_df[trainer.target], preds)
+        metrics = trainer.evaluate(test_df[trainer.target], preds)
 
         assert metrics["mae"] <= metrics["rmse"]
 
@@ -298,12 +280,13 @@ class TestRunLogsToMlflow:
         # Params logged
         mock_mlflow.log_params.assert_called_once_with(trainer.model_params)
 
-        # Metrics logged (val + test × 4 metrics each)
+        # Metrics logged (test × 4 metrics; val removed in rolling-retrain)
         metric_calls = mock_mlflow.log_metric.call_args_list
         metric_names = {c[0][0] for c in metric_calls}
-        for prefix in ["val_", "test_"]:
-            for key in ["mae", "rmse", "mape", "wape"]:
-                assert f"{prefix}{key}" in metric_names
+        for key in ["mae", "rmse", "mape", "wape"]:
+            assert f"test_{key}" in metric_names
+        for key in ["mae", "rmse", "mape", "wape"]:
+            assert f"val_{key}" not in metric_names
 
         # Model logged via sklearn flavour (PBI 37 Step 3)
         mock_mlflow.sklearn.log_model.assert_called_once()
@@ -626,19 +609,10 @@ class TestRegistryGate:
         assert tag_calls.get("gate_rejection_reason") == "champion_wape_unavailable"
 
     def test_gate_rejects_with_no_baseline_when_incumbent_exists(
-        self, tmp_path: Any
+        self, gold_df: pd.DataFrame, tmp_path: Any
     ) -> None:
         """wape_lift_pct=None + Production exists → rejection with no_baseline_for_comparison (AC-14)."""
-        # Arrange: use a tiny dataset so aligned_df is empty (no week-ago overlap)
-        rng = np.random.RandomState(0)
-        n = 100  # Only ~10 rows in test; no week-ago overlap possible
-        hours = pd.date_range("2022-01-01", periods=n, freq="h")
-        data: dict[str, Any] = {"hour": hours, "pulocationid": rng.randint(1, 5, n)}
-        for feat in FEATURES:
-            data[feat] = rng.rand(n)
-        data["trip_count"] = rng.randint(1, 20, n)
-        tiny_df = pd.DataFrame(data)
-
+        # Arrange: force aligned_df empty by making baseline.predict return [] regardless of data
         champion = _make_champion(version="0", wape_tag="10.0")
         trainer = Trainer(config=_registry_config())
         trainer.store_path = str(tmp_path / "models")
@@ -646,10 +620,18 @@ class TestRegistryGate:
             registered_version="1", production_versions=[champion]
         )
 
-        # Act
+        empty_aligned = pd.DataFrame(
+            columns=["pulocationid", "hour", "y_true", "y_pred_baseline"]
+        )
+
+        # Act: baseline returns empty → no wape_lift_pct → gate rejects
         with patch("app.training.trainer.mlflow", mock_mlflow):
-            with patch.object(trainer, "save_model") as mock_save:
-                trainer.run(data=tiny_df)
+            with patch(
+                "app.training.trainer.LastWeekSameHourBaseline.predict",
+                return_value=empty_aligned,
+            ):
+                with patch.object(trainer, "save_model") as mock_save:
+                    trainer.run(data=gold_df)
 
         # Assert
         tag_calls = {c.args[0]: c.args[1] for c in mock_mlflow.set_tag.call_args_list}
@@ -658,29 +640,28 @@ class TestRegistryGate:
         mock_save.assert_not_called()
 
     def test_gate_promotes_when_no_baseline_and_no_incumbent(
-        self, tmp_path: Any
+        self, gold_df: pd.DataFrame, tmp_path: Any
     ) -> None:
         """wape_lift_pct=None + no Production → auto-promote (AC-15)."""
-        # Arrange: tiny dataset → no week-ago overlap → wape_lift_pct=None
-        rng = np.random.RandomState(0)
-        n = 100
-        hours = pd.date_range("2022-01-01", periods=n, freq="h")
-        data: dict[str, Any] = {"hour": hours, "pulocationid": rng.randint(1, 5, n)}
-        for feat in FEATURES:
-            data[feat] = rng.rand(n)
-        data["trip_count"] = rng.randint(1, 20, n)
-        tiny_df = pd.DataFrame(data)
-
+        # Arrange: force aligned_df empty so wape_lift_pct=None
         trainer = Trainer(config=_registry_config())
         trainer.store_path = str(tmp_path / "models")
         mock_mlflow = _make_mock_mlflow(registered_version="1", production_versions=[])
 
+        empty_aligned = pd.DataFrame(
+            columns=["pulocationid", "hour", "y_true", "y_pred_baseline"]
+        )
+
         # Act
         with patch("app.training.trainer.mlflow", mock_mlflow):
-            with patch.object(
-                trainer, "save_model", return_value="models/model.pkl"
-            ) as mock_save:
-                trainer.run(data=tiny_df)
+            with patch(
+                "app.training.trainer.LastWeekSameHourBaseline.predict",
+                return_value=empty_aligned,
+            ):
+                with patch.object(
+                    trainer, "save_model", return_value="models/model.pkl"
+                ) as mock_save:
+                    trainer.run(data=gold_df)
 
         # Assert: promoted despite no baseline
         tag_calls = {c.args[0]: c.args[1] for c in mock_mlflow.set_tag.call_args_list}
@@ -831,29 +812,29 @@ class TestRegistryGate:
                 float(c.args[3])  # value must be float-parseable
 
     def test_gate_does_not_write_wape_lift_pct_tag_when_none(
-        self, tmp_path: Any
+        self, gold_df: pd.DataFrame, tmp_path: Any
     ) -> None:
         """wape_lift_pct=None (no baseline overlap) → wape_lift_pct tag not written (AC #12)."""
-        # Arrange: tiny dataset → no week-ago overlap → wape_lift_pct=None
-        # AND no Production incumbent → auto-promote path (gate_result="promoted")
-        rng = np.random.RandomState(0)
-        n = 100
-        hours = pd.date_range("2022-01-01", periods=n, freq="h")
-        data: dict[str, Any] = {"hour": hours, "pulocationid": rng.randint(1, 5, n)}
-        for feat in FEATURES:
-            data[feat] = rng.rand(n)
-        data["trip_count"] = rng.randint(1, 20, n)
-        tiny_df = pd.DataFrame(data)
-
+        # Arrange: force aligned_df empty so wape_lift_pct=None; no incumbent → auto-promote
         trainer = Trainer(config=_registry_config())
         trainer.store_path = str(tmp_path / "models")
         mock_mlflow = _make_mock_mlflow(registered_version="1", production_versions=[])
         mock_client = mock_mlflow.tracking.MlflowClient.return_value
 
+        empty_aligned = pd.DataFrame(
+            columns=["pulocationid", "hour", "y_true", "y_pred_baseline"]
+        )
+
         # Act: auto-promoted but wape_lift_pct is None
         with patch("app.training.trainer.mlflow", mock_mlflow):
-            with patch.object(trainer, "save_model", return_value="models/model.pkl"):
-                result = trainer.run(data=tiny_df)
+            with patch(
+                "app.training.trainer.LastWeekSameHourBaseline.predict",
+                return_value=empty_aligned,
+            ):
+                with patch.object(
+                    trainer, "save_model", return_value="models/model.pkl"
+                ):
+                    result = trainer.run(data=gold_df)
 
         # Assert: wape_lift_pct was None and its tag was NOT written
         assert result["wape_lift_pct"] is None
@@ -969,32 +950,35 @@ class TestRegistryGate:
         mock_client.set_registered_model_alias.assert_not_called()
         mock_client.transition_model_version_stage.assert_not_called()
 
-    def test_trainer_inline_block_never_calls_stage_api(self, tmp_path: Any) -> None:
+    def test_trainer_inline_block_never_calls_stage_api(
+        self, gold_df: pd.DataFrame, tmp_path: Any
+    ) -> None:
         """Trainer inline no-baseline path: uses alias API not get_latest_versions (PBI 37 Step 2).
 
-        Tiny dataset → wape_lift_pct=None; no Production → auto-promote.
+        Baseline forced empty → wape_lift_pct=None; no Production → auto-promote.
         After Step 2 GREEN: get_latest_versions and transition_model_version_stage
         must never be called from trainer.py's inline block.
         """
-        # Arrange: tiny dataset → no week-ago overlap → wape_lift_pct=None
-        rng = np.random.RandomState(0)
-        n = 100
-        hours = pd.date_range("2022-01-01", periods=n, freq="h")
-        data: dict[str, Any] = {"hour": hours, "pulocationid": rng.randint(1, 5, n)}
-        for feat in FEATURES:
-            data[feat] = rng.rand(n)
-        data["trip_count"] = rng.randint(1, 20, n)
-        tiny_df = pd.DataFrame(data)
-
+        # Arrange: force aligned_df empty so wape_lift_pct=None; no incumbent → auto-promote
         trainer = Trainer(config=_registry_config())
         trainer.store_path = str(tmp_path / "models")
         mock_mlflow = _make_mock_mlflow(registered_version="1", production_versions=[])
         mock_client = mock_mlflow.tracking.MlflowClient.return_value
 
+        empty_aligned = pd.DataFrame(
+            columns=["pulocationid", "hour", "y_true", "y_pred_baseline"]
+        )
+
         # Act
         with patch("app.training.trainer.mlflow", mock_mlflow):
-            with patch.object(trainer, "save_model", return_value="models/model.pkl"):
-                trainer.run(data=tiny_df)
+            with patch(
+                "app.training.trainer.LastWeekSameHourBaseline.predict",
+                return_value=empty_aligned,
+            ):
+                with patch.object(
+                    trainer, "save_model", return_value="models/model.pkl"
+                ):
+                    trainer.run(data=gold_df)
 
         # Assert: no stage API anywhere — only alias API
         mock_client.get_latest_versions.assert_not_called()

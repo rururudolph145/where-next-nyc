@@ -1,11 +1,11 @@
 env: local  # local | cloud
 
 ingest:
-  dataset_max: "2021-03-31T23:59:57"   # seconds=57 (not 59) — intentional; matches DATASET_MAX literal in DAG
+  dataset_max: "2022-03-31T23:59:57"   # seconds=57 (not 59) — intentional; matches DATASET_MAX literal in DAG
   zone_id_min: 1
   zone_id_max: 265
   start_year_month: "2021-01"
-  end_year_month: "2021-03"
+  end_year_month: "2022-03"
   max_workers: 8  # ThreadPoolExecutor size for parallel parquet reads
   # PBI 25b FIX — incremental-pipeline watermark over the fixed 2021 data.
   # seed_start is the LOWER bound of the cumulative ingest window (naive ISO,
@@ -67,7 +67,6 @@ train:
   window_days: 30  # ADR-003 §Decision.6 — fixed training window length in calendar days
   gate:
     min_wape_lift_pct: 2.0  # Minimum WAPE lift % to promote challenger to Production
-  split_ratios: [0.8, 0.1, 0.1]  # train / val / test
   features:
     - hour_of_day_sin
     - hour_of_day_cos
