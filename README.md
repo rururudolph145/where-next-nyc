@@ -1,6 +1,8 @@
-# New York Taxi Demand Forecasting
+# where-next-nyc
 
-[![Lint](https://github.com/rururudolph145/NewYorkTaxiDemandForecasting/actions/workflows/lint.yml/badge.svg)](https://github.com/rururudolph145/NewYorkTaxiDemandForecasting/actions/workflows/lint.yml) [![Tests](https://github.com/rururudolph145/NewYorkTaxiDemandForecasting/actions/workflows/test.yml/badge.svg)](https://github.com/rururudolph145/NewYorkTaxiDemandForecasting/actions/workflows/test.yml)
+> An operational 15-minute demand-forecasting system for NYC yellow-taxi drivers.
+
+[![Lint](https://github.com/rururudolph145/where-next-nyc/actions/workflows/lint.yml/badge.svg)](https://github.com/rururudolph145/where-next-nyc/actions/workflows/lint.yml) [![Tests](https://github.com/rururudolph145/where-next-nyc/actions/workflows/test.yml/badge.svg)](https://github.com/rururudolph145/where-next-nyc/actions/workflows/test.yml)
 
 ## The Problem
 

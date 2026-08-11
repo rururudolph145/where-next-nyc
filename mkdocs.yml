@@ -1,6 +1,6 @@
-site_name: New York Taxi Demand Forecasting
-site_description: An MLOps project for forecasting NYC yellow taxi demand.
-repo_url: https://github.com/jason/NewYorkTaxiDemandForecasting
+site_name: where-next-nyc
+site_description: Operational 15-minute demand-forecasting system for NYC yellow-taxi drivers.
+repo_url: https://github.com/rururudolph145/where-next-nyc
 
 theme:
   name: material
