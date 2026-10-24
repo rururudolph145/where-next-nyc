@@ -1,6 +1,8 @@
-# New York Taxi Demand Forecasting
+# where-next-nyc
 
-[![Lint](https://github.com/rururudolph145/NewYorkTaxiDemandForecasting/actions/workflows/lint.yml/badge.svg)](https://github.com/rururudolph145/NewYorkTaxiDemandForecasting/actions/workflows/lint.yml) [![Tests](https://github.com/rururudolph145/NewYorkTaxiDemandForecasting/actions/workflows/test.yml/badge.svg)](https://github.com/rururudolph145/NewYorkTaxiDemandForecasting/actions/workflows/test.yml)
+> An operational 15-minute demand-forecasting system for NYC yellow-taxi drivers.
+
+[![Lint](https://github.com/rururudolph145/where-next-nyc/actions/workflows/lint.yml/badge.svg)](https://github.com/rururudolph145/where-next-nyc/actions/workflows/lint.yml)
 
 ## The Problem
 
@@ -17,16 +19,30 @@ This repository is an **end-to-end demand forecasting system** for NYC yellow ta
 - **Resolution.** Per taxi zone (263 zones), per 15-minute bucket — matches the granularity of the decision.
 - **Counterfactual claim.** The model is meant to beat what an experienced driver already knows (the obvious time-of-day pattern). Lift is measured against a *last-week-same-hour* baseline, not against zero.
 
+## Sample Output
+
+Three consecutive 15-minute refresh ticks render to the same choropleth a driver's app would draw from one `/heatmap` call. All three frames share a single fixed colour scale — nothing is re-normalised per image — so any drift you see between frames is real movement in predicted demand, not a plotting artefact.
+
+| 00:00 | 00:15 | 00:30 |
+|---|---|---|
+| ![00:00 heatmap](docs/assets/heatmap_2022-01-08_0000.png) | ![00:15 heatmap](docs/assets/heatmap_2022-01-08_0015.png) | ![00:30 heatmap](docs/assets/heatmap_2022-01-08_0030.png) |
+
+> **What to look for:** demand concentrates in a handful of high-pickup zones (the red/orange clusters) while most of the city stays cool. At these short 15-minute steps the shift is deliberately subtle — the interesting contrast is *across the day*, when peak and off-peak hours reorder the top zones entirely. Regenerate these frames for any watermark position with `uv run python scripts/render_heatmap_samples.py`.
+
 ## How Value Is Measured
 
 Model-quality metrics (MAE / RMSE / WAPE) measure the model. They don't measure whether a *driver who follows the heatmap* is better off. Two bridging metrics tie the ML output back to the business question:
 
 | Metric | What it asks |
 |---|---|
-| **Recall @ top-K zones** | Of the trips that actually happened in the next 30 min, what fraction occurred in the top-K predicted zones? |
 | **WAPE lift over baseline** | How much better is LightGBM than "last week, same hour, same zone"? |
 
-A model that beats the naive baseline by a meaningful WAPE margin *and* keeps recall@3 above the baseline is doing real work. A model that only wins on MAE but offers no recall@K lift is a vanity win.
+Rather than absolute RMSE that fails to measure severity of mistaken prediction in smaller-demand-area, we opt to use WAPE that is more robust and scale-invariant.
+
+Any challenger model must beat the previous champion model by > 2% WAPE
+Any model must be able to beat the baseline by 15%
+
+Analysis of this proof of concept is in the /experiment/rolling_retrain_eval.ipynb 
 
 ## How the Demo Works (Watermark-Driven Simulation)
 
@@ -56,9 +72,11 @@ A running system does **not** prove that drivers following the heatmap are bette
 - **Single-agent assumption.** The model predicts demand as if the heatmap did not itself change driver behaviour. It does **not** model demand-supply equilibration — if every real driver flocked to the same top zone, the prediction would self-defeat. Capturing that requires the deferred outcome harness plus a supply-aware demand model.
 - **Macro patterns only.** The model captures temporal + spatial regularities. It does not yet incorporate weather, events, or transit disruptions — the cases where intuition most often fails. Those are roadmap items.
 
-Built with **LightGBM**, tracked with **MLflow**, served via **FastAPI**, orchestrated with **Airflow** (watermark-driven, walking the 2021 timeline one 15-min slice per DAG run), and organised as a Bronze / Silver / Gold data pipeline.
+Built with **LightGBM**, tracked with **MLflow**, served via **FastAPI**, orchestrated with **Airflow** 
 
-## Current Forecasting Design (PBI B2)
+(Simulation is watermark-driven, walking the 2022 timeline one 15-min slice per DAG run), and organised as a Bronze / Silver / Gold data pipeline.
+
+## Current Forecasting Design
 
 | Knob | Value | Meaning |
 |---|---|---|
@@ -104,7 +122,7 @@ app/                       Production source
 ├── api/                   FastAPI app — GET / · /heatmap · /health · /model-info
 └── core/                  config · clock · paths · watermark · logging · metrics
 
-orchestration/             Airflow 3.2.2 stack (docker-compose)
+orchestration/             Airflow 2.10.3 stack (docker-compose, container-only)
 ├── dags/                  15_minute_refresh_inference_dag (8-task watermark chain)
 └── lib/                   *_helpers.py — Airflow-free DAG logic (host-testable)
 
@@ -264,10 +282,42 @@ docker run -p 80:80 ny-taxi-demand
 - `docs/adr/` — architecture decision records
 - `implementation_checklist/pbi_tracker.md` — PBI history, dependencies, priority order
 
-## Roadmap (high level)
+## Roadmap
 
-- **MVP (shipped)** — single-horizon training, inference, heatmap API
-- **B-track (shipped)** — 15-min bucket + spatial smoothing + 30-min summed-horizon target
-- **Live cadence (shipped)** — watermark-driven `15_minute_refresh_inference_dag` on Airflow, `/health` freshness, `make demo-tick`
-- **Deferred** — outcome harness (synthetic-driver evaluation of heatmap lift), closed training/feedback loops, drift-triggered retrain
-- **Post-MVP** — personalised ranking (DiDi-style)
+| Phase | Scope | Status |
+|-------|-------|--------|
+| 1 | Experimental notebook (data exploration, model prototyping) | ✅ done |
+| 2 | Project structure (train → inference → `/heatmap`) | ✅ done |
+| 3 | Additional features + 15-min bucket for 15-min refresh (B-track) | ✅ done |
+| 4 | API layer (FastAPI: `/heatmap`, `/health`, `/model-info`) | ✅ done |
+| 5 | MLflow layer (tracking, registry, champion-vs-challenger gate, fallback) | ✅ done |
+| 6 | GitHub Actions CI (lint + test) | ✅ done |
+| 7 | Airflow orchestrator layer (watermark-driven 15-min refresh DAG) | ✅ done |
+| 8 | Monitoring (prediction log ✅ · drift detector · alerts · monitor DAG) | ⏸ deferred |
+| 9 | Operational fast-forward (walk the 2021 timeline via `make demo-tick`) | ✅ done |
+| 10 | Portfolio submission polish (lift numbers, methodology ADR, error-analysis, one-command bring-up) | ⏳ in progress |
+| 11 | Load testing (latency SLO baseline + CI guard) | ⏸ deferred |
+
+Legend: ✅ done · ⏳ in progress · ⏸ deferred by design. See [`implementation_checklist/pbi_tracker.md`](implementation_checklist/pbi_tracker.md) for per-PBI status, dependencies, and rationale.
+
+## Tech Stack
+
+| Layer | Tool | Role |
+|---|---|---|
+| Language / runtime | **Python 3.13**, **uv** | Fast, reproducible env; `uv.lock` committed |
+| Data processing | **pandas**, **pyarrow**, **Parquet** | Medallion Bronze/Silver/Gold on parquet |
+| Schema validation | **Pandera** | Bronze→Silver schema gate (PBI 19) — halts on TLC schema drift |
+| Geospatial | **geopandas**, **scikit-learn** BallTree | Zone shapefile + haversine k-NN spatial smoothing |
+| ML model | **LightGBM** | Tabular gradient boosting — beats XGBoost on this shape of data |
+| Experiment tracking | **MLflow** | Params, metrics, model registry, champion-vs-challenger gate |
+| API serving | **FastAPI**, **uvicorn** | `/heatmap`, `/health`, `/model-info` |
+| Orchestration | **Apache Airflow 2.10.3** | Watermark-driven 15-min refresh DAG (LocalExecutor, container-only) |
+| Containerisation | **Docker**, **docker-compose** | Airflow stack + reproducible service boot |
+| Testing | **pytest**, **pandera** | ~445 tests: unit + AAA + E2E on synthetic data |
+| Quality gates | **ruff**, **mypy** | Enforced in GitHub Actions on every PR |
+| CI/CD | **GitHub Actions** | Lint + test workflows (PBI 30) |
+
+**Deliberate non-choices:**
+- **No cloud provider** — the entire stack runs on one laptop via docker-compose. Portfolio scope, not a scale demo.
+- **No streaming (Kafka / Flink)** — inference is batch by nature (needs *aggregates* over closed windows). Streaming ingestion would help; streaming inference wouldn't.
+- **No Celery / KubernetesExecutor** — LocalExecutor is the honest topology for a single-machine demo. Upscaling is documented in `docs/adr/` for when it matters.

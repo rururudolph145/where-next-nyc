@@ -16,11 +16,11 @@ from app.core.config import AppConfig
 _FULL_CONFIG_DICT: dict = {
     "env": "local",
     "ingest": {
-        "dataset_max": "2021-03-31T23:59:57",
+        "dataset_max": "2022-03-31T23:59:57",
         "zone_id_min": 1,
         "zone_id_max": 265,
         "start_year_month": "2021-01",
-        "end_year_month": "2021-03",
+        "end_year_month": "2022-03",
         "max_workers": 8,
         "seed_start": "2021-01-18T00:00:00",
         "slice_duration": "15min",
@@ -78,7 +78,6 @@ _FULL_CONFIG_DICT: dict = {
     "train": {
         "window_days": 30,
         "gate": {"min_wape_lift_pct": 2.0},
-        "split_ratios": [0.8, 0.1, 0.1],
         "features": [
             "hour_of_day_sin",
             "hour_of_day_cos",

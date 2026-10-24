@@ -53,7 +53,6 @@ class Trainer:
 
         self.features: list[str] = self.config.train.features
         self.target: str = self.config.train.target
-        self.split_ratios: list[float] = self.config.train.split_ratios
 
         self.gold_path: str = self.config.data.gold_path
 
@@ -82,31 +81,25 @@ class Trainer:
     # Time-based splitting
     # ------------------------------------------------------------------
 
-    def split_data(
-        self, df: pd.DataFrame
-    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """Split data into train/val/test using strict time ordering.
+    def split_data(self, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Split data into train/test using a calendar cutoff.
 
-        The data is sorted by ``hour`` and split at the 80th and 90th
-        percentile boundaries. No shuffling is performed.
+        The cutoff is ``max(hour) − 7 days``. Rows before the cutoff go to
+        train; rows at or after go to test. This keeps the test slice fixed to
+        the last week of the ingested window regardless of how much data has
+        accumulated — stable for rolling-retrain evaluation.
 
         Args:
             df: Gold layer DataFrame containing an ``hour`` column.
 
         Returns:
-            A ``(train, val, test)`` tuple of DataFrames.
+            A ``(train, test)`` tuple of DataFrames.
         """
         df = df.sort_values("hour").reset_index(drop=True)
-
-        n = len(df)
-        train_end = int(n * self.split_ratios[0])
-        val_end = int(n * (self.split_ratios[0] + self.split_ratios[1]))
-
-        train = df.iloc[:train_end]
-        val = df.iloc[train_end:val_end]
-        test = df.iloc[val_end:]
-
-        return train, val, test
+        cutoff = df["hour"].max() - pd.Timedelta(days=7)
+        train = df[df["hour"] < cutoff]
+        test = df[df["hour"] >= cutoff]
+        return train, test
 
     # ------------------------------------------------------------------
     # Training
@@ -166,11 +159,11 @@ class Trainer:
         """Execute the full training pipeline.
 
         1. Load Gold data (or use provided DataFrame).
-        2. Split into train / val / test by time.
+        2. Split into train / test by calendar cutoff (last 7 days = test).
         3. Train LGBMRegressor on training set.
-        4. Evaluate on val and test sets (full, unfiltered).
+        4. Evaluate on test set (full, unfiltered).
         5. Run last-week-same-hour baseline on the NaN-filtered test subset.
-        6. Log params, metrics (val, test, baseline, lift, recall) to MLflow.
+        6. Log params, metrics (test, baseline, lift, recall) to MLflow.
         7. Register model in MLflow Model Registry; run champion-vs-challenger gate.
         8. Save model artifact to disk only when the gate promotes the challenger.
 
@@ -179,9 +172,9 @@ class Trainer:
                 the configured gold path.
 
         Returns:
-            Dictionary with ``val_metrics``, ``test_metrics``,
-            ``baseline_metrics``, ``model_aligned_metrics``,
-            ``wape_lift_pct``, ``recall_at_3``, and ``model_path``.
+            Dictionary with ``test_metrics``, ``baseline_metrics``,
+            ``model_aligned_metrics``, ``wape_lift_pct``, ``recall_at_3``,
+            and ``model_path``.
             ``baseline_metrics``, ``model_aligned_metrics``,
             ``wape_lift_pct``, and ``recall_at_3`` are ``None`` when the
             test split has no week-ago overlap (empty ``aligned_df``).
@@ -190,12 +183,10 @@ class Trainer:
         if data is None:
             data = self.load_gold()
 
-        train_df, val_df, test_df = self.split_data(data)
+        train_df, test_df = self.split_data(data)
 
         x_train = train_df[self.features]
         y_train = train_df[self.target]
-        x_val = val_df[self.features]
-        y_val = val_df[self.target]
         x_test = test_df[self.features]
         y_test = test_df[self.target]
 
@@ -203,18 +194,10 @@ class Trainer:
         print(f"Training {self.model_name} on {len(train_df):,} rows")
         self.train(x_train, y_train)
 
-        # Evaluate (full unfiltered sets — kept for backward compatibility)
-        val_preds = self.model.predict(x_val)
+        # Evaluate (full unfiltered test set)
         test_preds = self.model.predict(x_test)
-        val_metrics = self.evaluate(y_val, val_preds)
         test_metrics = self.evaluate(y_test, test_preds)
 
-        print(
-            f"Val:  MAE={val_metrics['mae']:.2f}  "
-            f"RMSE={val_metrics['rmse']:.2f}  "
-            f"MAPE={val_metrics['mape']:.2f}%  "
-            f"WAPE={val_metrics['wape']:.2f}%"
-        )
         print(
             f"Test: MAE={test_metrics['mae']:.2f}  "
             f"RMSE={test_metrics['rmse']:.2f}  "
@@ -300,11 +283,8 @@ class Trainer:
             mlflow.log_param("model_name", self.model_name)
             mlflow.log_param("features", self.features)
             mlflow.log_param("n_train", len(train_df))
-            mlflow.log_param("n_val", len(val_df))
             mlflow.log_param("n_test", len(test_df))
 
-            for key, value in val_metrics.items():
-                mlflow.log_metric(f"val_{key}", value)
             for key, value in test_metrics.items():
                 mlflow.log_metric(f"test_{key}", value)
 
@@ -405,7 +385,6 @@ class Trainer:
                 )
 
         return {
-            "val_metrics": val_metrics,
             "test_metrics": test_metrics,
             "baseline_metrics": baseline_metrics,
             "model_aligned_metrics": model_aligned_metrics,

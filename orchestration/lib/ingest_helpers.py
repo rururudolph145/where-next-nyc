@@ -1,9 +1,7 @@
 """ingest_helpers.py — bronze ingestion helpers for 15_minute_refresh_inference_dag.
 
 Airflow-free by design: the experiment container has Airflow but the host test
-env does not, so the DAG's logic lives here where pytest can import it. The DAG
-file (``exp02_ingest_bronze_dag.py``) is a thin wrapper that pulls ``window_end``
-from XCom, freezes ``seed_start`` from config, and calls these functions.
+env does not, so the DAG's logic lives here where pytest can import it.
 
 Two seams keep this unit-testable without a 340MB raw read (testing rule: no
 external data in pytest):
@@ -11,13 +9,12 @@ external data in pytest):
   * :func:`build_ingest_config` deep-overrides ``data.raw_path`` /
     ``data.bronze_path`` so ``Ingestion`` reads raw from the read-only mount and
     writes bronze under the isolated experiment root — never the production
-    ``data/`` tree. It preserves ``ingest.slice_duration == feature.bucket`` (an
-    ``Ingestion.__init__`` assertion) by leaving those keys untouched.
-  * :func:`run_ingest` constructs ``Ingestion(config=...)`` and calls
-    ``run(window_start=seed_start, window_end=window_end)`` with the seed FROZEN
-    as the lower bound. Bronze is therefore cumulative ``[seed, window_end)`` and
-    grows monotonically as the watermark advances (ADR-001, matches the old prod
-    DAG).
+    ``data/`` tree.
+  * :func:`run_ingest` implements an incremental append strategy: on first run
+    (no bronze yet) it seeds the full ``[seed_start, window_end)`` range; on
+    subsequent runs it reads only the month(s) at-or-after ``window_start`` and
+    appends idempotently via ``Ingestion.append_slice``. Bronze stays cumulative
+    on disk (required by DataCleaner.load_bronze); only the *read* path changes.
 """
 
 from __future__ import annotations
@@ -57,20 +54,42 @@ def build_ingest_config(
     )
 
 
-def run_ingest(window_end: datetime, *, seed_start: datetime, config: AppConfig) -> str:
-    """Ingest cumulative bronze ``[seed_start, window_end)`` and return its path.
+def run_ingest(
+    window_end: datetime,
+    *,
+    window_start: datetime,
+    seed_start: datetime,
+    config: AppConfig,
+) -> str:
+    """Incrementally append to cumulative bronze and return its path.
 
-    ``window_start`` is FROZEN at *seed_start* every run; only *window_end*
-    advances with the watermark, so bronze grows monotonically. Both bounds are
-    naive (the raw ``tpep_pickup_datetime`` is tz-naive NYC wall-clock).
+    First run (no bronze on disk): seeds the full ``[seed_start, window_end)``
+    range via a full raw read — a one-time acceptable cost.
+
+    Subsequent runs (bronze exists): reads only the month(s) at-or-after
+    ``window_start``, clips to ``[window_start, window_end)``, then appends to
+    the existing bronze via ``Ingestion.append_slice`` (idempotent retry-safe).
+
+    Both approaches write bronze once via ``save_bronze``; the caller never sees
+    partial writes.
 
     Args:
         window_end: Exclusive upper bound — the advancing watermark position.
-        seed_start: Inclusive lower bound — the fixed seed, never advances.
-        config: The injected override config (see :func:`build_ingest_config`).
+        window_start: Inclusive lower bound of the *new* slice (= current watermark).
+        seed_start: Fixed seed for the first-run full ingest.
+        config: Injected override config (see :func:`build_ingest_config`).
 
     Returns:
         Path to the written bronze parquet.
     """
     ingestion = Ingestion(config=config)
-    return ingestion.run(window_start=seed_start, window_end=window_end)
+    if not ingestion.bronze_exists():
+        raw = ingestion.load_raw(since=None)
+        seeded = ingestion._filter_window(raw, seed_start, window_end)
+        return ingestion.save_bronze(seeded)
+
+    existing = ingestion.load_bronze()
+    raw = ingestion.load_raw(since=window_start)
+    new_slice = ingestion._filter_window(raw, window_start, window_end)
+    merged = ingestion.append_slice(existing, new_slice, cutoff=window_start)
+    return ingestion.save_bronze(merged)

@@ -53,6 +53,27 @@ class TestAppConfigModelValidate:
         cfg = AppConfig.model_validate(raw)
         assert cfg.feature.horizon_sum_buckets == 2
 
+    def test_split_ratios_field_absent(self) -> None:
+        """TrainConfig must NOT have a split_ratios field (rolling-retrain: calendar split)."""
+        from app.core.config import TrainConfig
+
+        # Arrange / Act / Assert
+        assert "split_ratios" not in TrainConfig.model_fields
+
+    def test_dataset_max_admits_2022(self) -> None:
+        """ingest.dataset_max must be 2022-03-31T23:59:57 (rolling-retrain: admit Q1 2022)."""
+        with open("config.yml") as f:
+            raw = yaml.safe_load(f)
+        cfg = AppConfig.model_validate(raw)
+        assert cfg.ingest.dataset_max == "2022-03-31T23:59:57"
+
+    def test_end_year_month_admits_2022(self) -> None:
+        """ingest.end_year_month must be '2022-03' (rolling-retrain: admit Q1 2022)."""
+        with open("config.yml") as f:
+            raw = yaml.safe_load(f)
+        cfg = AppConfig.model_validate(raw)
+        assert cfg.ingest.end_year_month == "2022-03"
+
 
 class TestAppConfigRequired:
     """AC: missing required fields raise ValidationError, not KeyError."""

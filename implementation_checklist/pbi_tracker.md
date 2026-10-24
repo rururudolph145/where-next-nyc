@@ -625,6 +625,24 @@ PBI 22 (prediction log + actuals) ──> PBI 23 (drift detector) ──> PBI 24
 | [x] | 8 | ~~PBI 13~~ | ~~Parallel-equivalence regression test — RED for PBI 14~~ |
 | [x] | 9 | ~~PBI 14~~ | ~~Parallel `load_raw` — closes the "parallelize I/O-bound" gap~~ |
 
+### Phase 0 · Portfolio Submission Blockers (do before anything else, ~11.5h)
+
+These items are independent of any feature PBI. None of the open PBIs below should be started until Phase 0 is clean.
+
+| Done | Item | Est. | Concrete action |
+|------|------|------|-----------------|
+| [ ] | **Close dirty working tree** | ~30 min | Add `frontend/node_modules/` to `.gitignore`; commit or delete `frontend/`; commit deletion of `tests/test_pbi30_ci_workflows.py`; gitignore `data/bronze/`, `data/gold/`, `data/mlflow.db.bak*`, `data/watermarks.bak*`; open PR `feature/partitioned-prediction-history` → `dev_MVP` and merge. |
+| [ ] | **Verify `make demo-tick` from clean clone** | ~1h | Clone into a fresh dir; follow README bootstrap; run `make airflow-up → make demo-tick → curl /heatmap`; fix anything that breaks; document the exact command sequence. |
+| [ ] | **PBI-S1 — Populate lift numbers in README** | ~45 min | Open MLflow UI; find production run; copy `baseline_wape`, `model_wape`, `wape_lift_pct`, `recall_at_3` (re-run `uv run python -m pipeline.run_all` if the run predates PBI 18); fill in the README "How Value Is Measured" table; move the empty simulation table under a **Roadmap** header. |
+| [ ] | **PBI-S2 — Methodology ADR** | ~1h | Write `docs/adr/ADR-004-model-methodology.md` answering: why LightGBM (vs ARIMA/Prophet), why WAPE (vs MAE/MAPE), why 15-min buckets. One page. Commit. |
+| [ ] | **PBI-S3 — Error-analysis notebook → HTML** | ~3h | Write `notebooks/error_analysis.ipynb` (top-10 worst zones by MAE, MAE heatmap by hour×day, scatter predicted vs actual for zone 161, one-paragraph commentary per chart); render to `docs/error_analysis.html`; commit HTML. |
+| [ ] | **PBI-S4 — One-command bring-up (⭐ IMMEDIATE NEXT STEP, 2026-08-12)** | ~2–4h | **This is the item that effectively closes the project.** Current `dockerfile` is broken on a fresh clone (Python 3.11 vs project 3.13; pip vs uv; `COPY models/` from a gitignored dir). Scope: (a) rewrite root `dockerfile` — `python:3.13-slim`, `uv sync --frozen`, drop the `models/` copy, add `/health` healthcheck, `CMD uvicorn app.api.main:app --host 0.0.0.0 --port 80`; (b) add an `api:` service to `orchestration/docker-compose.yaml` (build from the fixed dockerfile, mount the shared `data/` volume so the API reads what the DAG writes, add depends_on for MLflow/Airflow); (c) add `scripts/seed_data.sh` for the March-2021 raw seed; (d) rewrite README §Setup / §Run / §Docker sections to `git clone → docker compose up → make demo-tick`. Success criterion: fresh clone on a laptop that only has Docker installed can reach `curl http://localhost/heatmap` without a host `uv sync`. |
+| [ ] | **PBI-S5 — Driver-agent simulation harness (stretch)** | ~8h | Implement PBI 28 (see Activity 14 below); replay first week of March 2021; output `docs/simulation_results.md` (3-row policy table); populate the README simulation table. |
+
+**Total Phase 0 (pre-blocking + S1–S4): ~10.25h. With S5: ~18.25h.**
+
+---
+
 ### Open — Phase A · Credibility (start here, ~10h)
 
 | Done | Order | PBI | Rationale |
@@ -690,6 +708,12 @@ PBI 22 (prediction log + actuals) ──> PBI 23 (drift detector) ──> PBI 24
 | [ ] | 33 | PBI 9 | Stale-data handler — historical-averages fallback; complementary to PBI 21's model-level fallback |
 | [ ] | 34 | PBI 10 | Monitoring (L5 signal) — superseded by PBIs 22–24 which decompose this into prediction log + drift + alerts |
 | [ ] | 35 | PBI 4 | Multi-horizon — deferred; A3 knob (`horizon_buckets`) already shipped, just needs a training config flip |
+
+### Tech Debt / Chore
+
+| Done | Order | PBI | Rationale |
+|------|-------|-----|-----------|
+| [ ] | — | PBI 31 | Typed config model (Pydantic v2) — pure internal refactor; no user-visible change; can be picked up any time without blocking other PBIs |
 
 ### Stretch
 
@@ -795,6 +819,56 @@ PBI 22 (prediction log + actuals) ──> PBI 23 (drift detector) ──> PBI 24
   - Wall-clock sentinel trio (`decide_bucket` / `check_watermark` / `write_done`) dropped — watermark-only model handles the same invariant; gap analysis confirmed these are unnecessary.
   - Boundary-skip holds watermark; fresh-slot full chain succeeds + watermark advances (489 passed / 14 skipped on host).
   - **NOT committed** — gitignored; `is_dataset_exhausted` helper promoted to `orchestration/lib/boundary_helpers.py` in PBI 25b promotion commit `1bc9b7a`.
+
+---
+
+---
+
+## Release: Tech Debt / Chore
+
+### Activity: MLflow Model Registry & Train→Inference Contract
+
+- [ ] **PBI 37 — Fix Train→Inference Model Contract (MLflow registry aliases)**
+  - Unify the broken model handoff: 3 directories disagree, train target is off the persistent mount, split-brain `mlflow.db`.
+  - **Problem today:** Train DAG writes to `models/` (not under `../data` mount → ephemeral, lost on container stop). Inference DAG reads from `data/models_trained/`. Feature DAG reads IQR from `data/models/`. None agree.
+  - **Scope:**
+    - Unify model dir on the persistent mount (`data/models_trained/`); give `run_train` a config override so `model.pkl` + `iqr_bounds.json` land on the shared volume
+    - Bundle IQR bounds from training (write alongside model, or into `model_bundle.pkl` per ADR-003)
+    - Migrate `Predictor.load_model()` from disk-path load to MLflow registry-resolve using `@champion` alias (MLflow 2.9+ — replaces deprecated `stages=["Production"]` / `get_latest_versions`)
+    - Unify split-brain `mlflow.db`: settle on one canonical tracking URI + artifact store reachable from host and container; clean stale `mlruns/` file stores
+    - Keep a disk fallback in `Predictor` for the offline/demo path
+  - **Acceptance:**
+    - Train→infer round-trip on the shared path (model written by DAG is read by inference)
+    - Registry-resolve picks the promoted `@champion` version
+    - Gate-reject leaves the served model unchanged
+    - All 26 `FutureWarning`s from `registry_gate.py` eliminated
+    - `uv run pytest` green; `uv run mypy app tests` clean
+  - Depends on: audit PR merged (Steps 1–8 of hardcoded-values-audit complete)
+  - Difficulty: M
+  - Vehicle: `feature-factory` Lane C (pipeline-orchestrator → backend-builder)
+
+---
+
+### Activity: Config Layer Hardening
+
+- [ ] **PBI 31 — Typed Config Model (Pydantic v2)**
+  - Replace the raw-dict `load_config()` in `app/core/config.py` with a Pydantic v2 `AppConfig` model so that missing keys and type mismatches fail at application startup / DAG import rather than mid-run.
+  - **Problem today:** `load_config()` returns `dict[str, Any]`. All 10 call sites store this as `self.config` typed `dict[str, Any]`, so every `config["ingest"]["seed_sart"]` typo is accepted by mypy (returns `Any`) and only raises a `KeyError` at runtime when that code path is first hit.
+  - **Why Pydantic (not dataclasses):** Pydantic v2 (`2.13.2`) is already installed as a transitive dep via FastAPI — no new packages needed. `AppConfig.model_validate(yaml_dict)` replaces a ~35-line manual `from_dict()` factory with ~5 lines. Rich error messages name the exact missing field path. Callers switch from `config["ingest"]["seed_start"]` → `config.ingest.seed_start` (dot-access, statically checked by mypy).
+  - **Scope:**
+    - Add nested Pydantic `BaseModel` classes in `app/core/config.py` covering every section in `config.yml`: `IngestConfig`, `DataConfig`, `FeatureConfig`, `CleanConfig`, `TrainConfig`, `ModelConfig`, `InferenceConfig`, `ServingConfig`, `MonitoringConfig`, `MlflowConfig`
+    - Keep `load_config(path)` as the public entry point — change its return type from `dict[str, Any]` to `AppConfig`
+    - Migrate all 10 call sites in `app/` from dict indexing to dot-access
+    - DAG files in `orchestration/` also call `load_config()` — they receive an `AppConfig` automatically; update their 6 accesses to dot-access as well
+    - Also add to `config.yml` the three HIGH-priority missing keys identified in the audit (`ingest.dataset_max`, `train.window_days`, `clean.iqr_multiplier`)
+  - **Out of scope:** path duplication in the DAG (`/opt/airflow/data/...` constants) — that's a separate container-path concern
+  - Acceptance:
+    - `uv run mypy app tests` passes with `AppConfig` typed correctly — no `dict[str, Any]` escape hatches on `self.config`
+    - Deleting a required key from `config.yml` raises a Pydantic `ValidationError` with the field name at `load_config()` call time, not a `KeyError` mid-run
+    - All existing tests pass unchanged (the public API of every class is unaffected — only internal attribute access changes)
+    - `uv run ruff check .` clean
+  - Depends on: nothing (pure internal refactor)
+  - Difficulty: S
 
 ---
 

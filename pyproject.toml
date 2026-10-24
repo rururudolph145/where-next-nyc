@@ -1,7 +1,7 @@
 [project]
-name = "new-york-taxi-demand-forecasting"
+name = "where-next-nyc"
 version = "0.1.0"
-description = "New York Taxi Demand Forecasting"
+description = "Operational 15-minute demand-forecasting system for NYC yellow-taxi drivers"
 requires-python = ">=3.13"
 dependencies = [
     # Data
@@ -37,7 +37,7 @@ dependencies = [
 ]
 
 [tool.pytest.ini_options]
-pythonpath = ["orchestration/lib", "tests"]
+pythonpath = [".", "orchestration/lib", "tests"]
 addopts = [
     "--cov=app",
     "--cov-report=term-missing:skip-covered",
