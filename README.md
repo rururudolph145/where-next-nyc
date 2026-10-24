@@ -2,7 +2,7 @@
 
 > An operational 15-minute demand-forecasting system for NYC yellow-taxi drivers.
 
-[![Lint](https://github.com/rururudolph145/where-next-nyc/actions/workflows/lint.yml/badge.svg)](https://github.com/rururudolph145/where-next-nyc/actions/workflows/lint.yml) [![Tests](https://github.com/rururudolph145/where-next-nyc/actions/workflows/test.yml/badge.svg)](https://github.com/rururudolph145/where-next-nyc/actions/workflows/test.yml)
+[![Lint](https://github.com/rururudolph145/where-next-nyc/actions/workflows/lint.yml/badge.svg)](https://github.com/rururudolph145/where-next-nyc/actions/workflows/lint.yml)
 
 ## The Problem
 
@@ -18,6 +18,16 @@ This repository is an **end-to-end demand forecasting system** for NYC yellow ta
 - **Decision horizon.** 30 minutes — roughly the time it takes to finish a trip and reposition.
 - **Resolution.** Per taxi zone (263 zones), per 15-minute bucket — matches the granularity of the decision.
 - **Counterfactual claim.** The model is meant to beat what an experienced driver already knows (the obvious time-of-day pattern). Lift is measured against a *last-week-same-hour* baseline, not against zero.
+
+## Sample Output
+
+Three consecutive 15-minute refresh ticks render to the same choropleth a driver's app would draw from one `/heatmap` call. All three frames share a single fixed colour scale — nothing is re-normalised per image — so any drift you see between frames is real movement in predicted demand, not a plotting artefact.
+
+| 00:00 | 00:15 | 00:30 |
+|---|---|---|
+| ![00:00 heatmap](docs/assets/heatmap_2022-01-08_0000.png) | ![00:15 heatmap](docs/assets/heatmap_2022-01-08_0015.png) | ![00:30 heatmap](docs/assets/heatmap_2022-01-08_0030.png) |
+
+> **What to look for:** demand concentrates in a handful of high-pickup zones (the red/orange clusters) while most of the city stays cool. At these short 15-minute steps the shift is deliberately subtle — the interesting contrast is *across the day*, when peak and off-peak hours reorder the top zones entirely. Regenerate these frames for any watermark position with `uv run python scripts/render_heatmap_samples.py`.
 
 ## How Value Is Measured
 
